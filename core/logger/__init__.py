@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from core.logger import context, faces
-from core.logger.formatters import colorize, format_json, format_tree
+from core.logger.formatters import colorize, format_exception, format_json, format_tree
 from core.logger.setup import Log, log, setup_logging
 
 __all__ = [
@@ -22,6 +22,7 @@ __all__ = [
     "colorize",
     "context",
     "faces",
+    "format_exception",
     "format_json",
     "format_tree",
     "log",

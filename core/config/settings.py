@@ -48,7 +48,8 @@ class LogSettings(BaseSettings):
     json_output: bool = Field(default=False, alias="json")
     dir: str = "logs"
     file_name: str = "app.log"
-    rotation: str = "10 MB"
+    error_file_name: str = "error.log"
+    rotation: str = "00:00"
     retention: str = "7 days"
     compression: str = "zip"
 
