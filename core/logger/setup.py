@@ -126,6 +126,10 @@ def _render_filter(cfg: LogSettings, *, color: bool) -> FilterFunction:
             text = colorize(text, record["level"].name)
         record["message"] = text
         extra["_rendered"] = True
+        # 堆栈已由 format_tree/format_json 渲染，清空以免 loguru 重复追加。
+        # 必须放在幂等判重之后但无条件执行：loguru 会在多次 sink 调用中各自
+        # 检查该字段，任何一次看到非空值都会补一份原始堆栈。
+        record["exception"] = None
         return True
 
     return _filter
