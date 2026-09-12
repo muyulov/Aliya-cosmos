@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 
@@ -64,7 +64,7 @@ def new_request_id() -> str:
 
 
 @contextmanager
-def request_scope(request_id_value: str | None = None) -> Iterator[str]:
+def request_scope(request_id_value: str | None = None) -> Generator[str, None, None]:
     """进入请求上下文，退出时自动还原。
 
     传入为空时自动生成 id，yield 出最终生效的 id。

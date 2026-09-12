@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from types import FrameType, ModuleType
 from typing import override
@@ -76,8 +76,12 @@ class Log:
         logger.bind(face=resolved, fields=merged).exception(message)
 
     @contextmanager
-    def context(self, **kv: object) -> Iterator[None]:
-        """临时附加业务维度到日志上下文，退出时自动还原。"""
+    def context(self, **kv: object) -> Generator[None, None, None]:
+        """临时附加业务维度到日志上下文，退出时自动还原。
+
+        返回类型写 Generator 而非 Iterator：@contextmanager 用 Iterator 标注
+        已被类型检查器视为弃用。
+        """
         token = context_module.bind(**kv)
         try:
             yield
