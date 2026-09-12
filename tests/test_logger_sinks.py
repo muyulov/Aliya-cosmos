@@ -112,3 +112,44 @@ def test_不再暴露_bind_request() -> None:
     from core.logger import log
 
     assert not hasattr(log, "bind_request")
+
+
+def test_中间件不再显式传_request_id() -> None:
+    """回归防护：middleware 源码里不应再出现 request_id=request_id 这种手写字段。"""
+    import inspect
+
+    from core.api import middleware
+
+    source = inspect.getsource(middleware)
+    assert "request_id=request_id" not in source
+    assert "bind_request" not in source
+
+
+async def test_请求日志自动携带_request_id(tmp_path: Path) -> None:
+    """中间件不再手写 request_id，字段由上下文自动注入。"""
+    from httpx import ASGITransport, AsyncClient
+
+    from core.api import create_app
+    from core.config import AppSettings, Settings, get_settings
+    from core.service import ServiceManager
+    from core.service.item_service import ItemService
+
+    get_settings.cache_clear()
+    settings = Settings(
+        app=AppSettings(app_name="t", env="test", debug=False),
+        log=_cfg(tmp_path),
+    )
+    mgr = ServiceManager()
+    _ = mgr.register(ItemService())
+    app = create_app(settings=settings, manager=mgr)
+
+    transport = ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/health", headers={"X-Request-ID": "header-id"})
+    logger.remove()
+
+    assert resp.status_code == 200
+    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+    assert "header-id" in text
+    assert "请求完成" in text
