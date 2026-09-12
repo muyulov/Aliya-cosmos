@@ -39,7 +39,7 @@ core/
   main.py        入口，仅做 uvicorn 启动
   api/           HTTP 层：应用工厂、路由、中间件、异常处理、依赖注入
   service/       业务层：服务基类、生命周期管理器、具体服务实现
-  logger/        日志层：颜文字、树形/JSON 格式化、sink 装配
+  logger/        日志层：颜文字、结构化上下文、树形/JSON 格式化、sink 装配
   config/        配置层：pydantic-settings 分组配置
 tests/           测试
 ```
@@ -67,7 +67,9 @@ APP_LOG__JSON=true
 | `APP_LOG__LEVEL` | `INFO` | 日志级别 |
 | `APP_LOG__JSON` | `false` | 是否输出 JSON 日志 |
 | `APP_LOG__DIR` | `logs` | 日志目录 |
-| `APP_LOG__ROTATION` | `10 MB` | 轮转阈值 |
+| `APP_LOG__FILE_NAME` | `app.log` | 主日志文件名 |
+| `APP_LOG__ERROR_FILE_NAME` | `error.log` | 错误日志文件名 |
+| `APP_LOG__ROTATION` | `00:00` | 轮转阈值（默认按天） |
 | `APP_LOG__RETENTION` | `7 days` | 保留时长 |
 
 ## 日志
@@ -89,6 +91,35 @@ log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消�
 ```
 
 颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`APP_LOG__JSON=true` 时改为单行 JSON，字段平铺，便于日志采集。
+
+请求链路的 `request_id` 会自动携带，调用点无需手写字段：
+
+```python
+from core.logger import log
+
+log.info("处理订单", 订单号="A001")  # request_id 自动出现在字段里
+```
+
+需要临时附加业务维度时用上下文管理器，退出自动还原：
+
+```python
+with log.context(会话="qq:123"):
+    log.info("会话内")
+```
+
+异常堆栈会渲染成独立块，不与字段混淆：
+
+```text
+2026-09-12 10:00:00 [E] (x_x) 未捕获异常
+    ├─ 路径: /api/v1/items
+    └─ 异常: KeyError
+    └─ 堆栈
+       Traceback (most recent call last):
+         ...
+       KeyError: 'item_id'
+```
+
+日志文件有两个：`logs/app.log`（跟随 `APP_LOG__LEVEL`）与 `logs/error.log`（固定 ERROR 级），均按天轮转。
 
 ## 如何新增一个服务
 

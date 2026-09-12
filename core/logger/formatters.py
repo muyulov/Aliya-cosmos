@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from datetime import datetime
 from typing import cast
 
@@ -54,10 +55,13 @@ def _pick_face(face: object, level_name: str) -> str:
     return faces_module.DEFAULT_BY_LEVEL.get(level_name, "")
 
 
-def format_tree(record: Record) -> str:
+def format_tree(record: Record, *, stack: str | None = None) -> str:
     """树形格式化，供控制台与文件 sink 使用。
 
     返回不带结尾换行的字符串，换行由 loguru 负责，避免多行内容被拼接。
+
+    stack 由调用方预先算好并传入，而不再从 record 里取：多个 sink 共享同一
+    record，谁先渲染谁就会清空 record["exception"]，后渲染的 sink 会丢失堆栈。
     """
     extra = _extra_of(record)
     level_name = _level_name_of(record)
@@ -68,21 +72,41 @@ def format_tree(record: Record) -> str:
     head = f"{timestamp} [{LEVEL_TAGS.get(level_name, 'I')}]"
     if face:
         head = f"{head} {face}"
-    line = f"{head} {_message_of(record)}"
-
-    if not fields:
-        return line
+    lines = [f"{head} {_message_of(record)}"]
 
     items = list(fields.items())
-    lines = [line]
     for index, (key, value) in enumerate(items):
         branch = "└─" if index == len(items) - 1 else "├─"
         lines.append(f"{FIELD_INDENT}{branch} {key}: {render_value(value)}")
+
+    lines.extend(_stack_lines(stack))
     return "\n".join(lines)
 
 
-def format_json(record: Record) -> str:
-    """JSON 格式化，字段平铺到顶层。"""
+def format_exception(record: Record) -> str | None:
+    """把 record 里的异常渲染成堆栈文本，无异常时返回 None。
+
+    单独渲染而非交给 loguru：loguru 会把堆栈拼在 message 之后，与字段树混在
+    一起，多行结构失去可读性。
+    """
+    exception = record.get("exception")
+    if not exception:
+        return None
+    stack = traceback.format_exception(exception.type, exception.value, exception.traceback)
+    return "".join(stack).rstrip("\n")
+
+
+def _stack_lines(stack: str | None) -> list[str]:
+    """把堆栈文本转成树形块的行。"""
+    if not stack:
+        return []
+    lines = [f"{FIELD_INDENT}└─ 堆栈"]
+    lines.extend(f"{FIELD_INDENT}   {raw}" for raw in stack.split("\n"))
+    return lines
+
+
+def format_json(record: Record, *, stack: str | None = None) -> str:
+    """JSON 格式化，字段平铺到顶层；堆栈作为独立键存放。"""
     extra = _extra_of(record)
     level_name = _level_name_of(record)
 
@@ -93,6 +117,10 @@ def format_json(record: Record) -> str:
         "face": _pick_face(extra.get("face"), level_name),
     }
     payload.update(_fields_of(extra))
+
+    if stack:
+        payload["exception"] = stack
+
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -158,6 +186,7 @@ __all__ = [
     "LEVEL_COLORS",
     "LEVEL_TAGS",
     "colorize",
+    "format_exception",
     "format_json",
     "format_tree",
     "render_value",

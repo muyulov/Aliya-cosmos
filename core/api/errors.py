@@ -75,69 +75,66 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(AppError)
     async def _handle_app_error(request: Request, exc: AppError) -> JSONResponse:
-        request_id = _request_id(request)
         log.warning(
             "业务异常",
             face=faces.THINK,
             路径=request.url.path,
             错误码=exc.code,
             原因=exc.message,
-            request_id=request_id,
         )
         return JSONResponse(
             status_code=exc.status_code,
-            content=error_body(exc.code, exc.message, request_id, exc.extra),
+            content=error_body(exc.code, exc.message, _request_id(request), exc.extra),
         )
 
     @app.exception_handler(ItemNotFoundError)
     async def _handle_item_not_found(request: Request, exc: ItemNotFoundError) -> JSONResponse:
-        request_id = _request_id(request)
         log.warning(
             "条目不存在",
             face=faces.THINK,
             路径=request.url.path,
             条目编号=exc.item_id,
-            request_id=request_id,
         )
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content=error_body("ITEM_NOT_FOUND", str(exc), request_id),
+            content=error_body("ITEM_NOT_FOUND", str(exc), _request_id(request)),
         )
 
     @app.exception_handler(RequestValidationError)
     async def _handle_validation(request: Request, exc: RequestValidationError) -> JSONResponse:
-        request_id = _request_id(request)
         log.warning(
             "参数校验失败",
             face=faces.THINK,
             路径=request.url.path,
             问题数=len(exc.errors()),
-            request_id=request_id,
         )
         detail = _describe_validation_errors(exc)
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            content=error_body("INVALID_ARGUMENT", "请求参数不合法", request_id, {"错误": detail}),
+            content=error_body(
+                "INVALID_ARGUMENT", "请求参数不合法", _request_id(request), {"错误": detail}
+            ),
         )
 
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        request_id = _request_id(request)
         return JSONResponse(
             status_code=exc.status_code,
-            content=error_body(f"HTTP_{exc.status_code}", str(exc.detail), request_id),
+            content=error_body(f"HTTP_{exc.status_code}", str(exc.detail), _request_id(request)),
         )
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+        # exception 会带上完整堆栈，仅在此处记录，对外不暴露。
+        # request_id 必须显式传入：本处理器由 ServerErrorMiddleware 在最外层执行，
+        # 此时 RequestContextMiddleware 的上下文已退出，从上下文取会得到占位符。
         request_id = _request_id(request)
-        # exception 会带上完整堆栈，仅在此处记录，对外不暴露
         log.exception(
             "未捕获异常",
             face=faces.BOOM,
+            request_id=request_id,
             路径=request.url.path,
             异常=type(exc).__name__,
-            request_id=request_id,
         )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -146,6 +143,11 @@ def register_exception_handlers(app: FastAPI) -> None:
 
 
 def _request_id(request: Request) -> str:
+    """取请求 id，用于填充响应信封与异常日志字段。
+
+    只读 request.state：中间件一进入就写入该值，且在所有异常处理器路径下都可靠；
+    而日志上下文在 500 处理器执行时已退出，不能作为来源。
+    """
     return cast("str", getattr(request.state, "request_id", "-"))
 
 

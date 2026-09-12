@@ -77,8 +77,22 @@ def request_scope(request_id: str | None = None) -> Iterator[str]
 ### `api` 层改动
 
 - `core/api/middleware.py`：`RequestContextMiddleware.dispatch` 改用 `with request_scope(request.headers.get(REQUEST_ID_HEADER)) as rid:` 包住 `call_next`；删除日志里手写的 `request_id=request_id` 字段。
-- `core/api/errors.py`：删除所有 `request_id=request_id` 字段与 `_request_id(request)` 辅助函数。
-- 上述两处的 `request_id` 由渲染层自动从上下文取值。
+- `core/api/errors.py`：删除各处理器日志里手写的 `request_id=request_id` 字段。`_request_id(request)` **保留**，它仍负责填充对外响应信封的 `request_id`（属于 HTTP 契约，不是日志字段）。
+- 常规路径下 `request_id` 由渲染层自动从上下文取值。
+
+### 500 路径的例外
+
+`Exception` 处理器由 Starlette 的 `ServerErrorMiddleware` 在最外层执行，此时
+`RequestContextMiddleware` 的上下文已退出，从上下文取 `request_id` 只会得到
+占位符 `"-"`。因此该处理器必须显式从 `request.state` 取值并作为字段传入：
+
+```python
+request_id = _request_id(request)  # 读 request.state，唯一可靠来源
+log.exception("未捕获异常", request_id=request_id, 路径=..., 异常=...)
+```
+
+`_request_id` 因此不设"回退到上下文"的分支——那在 500 路径下必然失效，在其它
+路径下又走不到，属于会掩盖问题的死代码。
 
 ## 二、异常堆栈独立渲染
 
@@ -143,6 +157,20 @@ def request_scope(request_id: str | None = None) -> Iterator[str]
 ### 时序修正
 
 `setup_logging` 结尾的"日志已就绪"目前打印在 `logger.remove()` 之后、`_intercept_stdlib()` 之前，此时标准库尚未接管。改为在装配全部完成后打印，并额外输出各 sink 的实际路径，便于排查"日志写到了哪里"。
+
+### 多 sink 共享 record 的约束
+
+loguru 会把**同一个 record 对象**按 sink 注册顺序依次喂给各 sink 的 filter，
+前一个 sink 对 `record["message"]` 的改写后一个 sink 会原样看到。这带来两个必须
+规避的坑：
+
+1. 若用"只渲染一次"的标记位，先执行的控制台 sink 着色后会污染后续文件 sink，
+   把 ANSI 转义序列写进日志文件。
+2. 若谁先渲染谁就清空 `record["exception"]`，后渲染的 sink 会丢失堆栈。
+
+对策是两条：每个 sink **无条件重新渲染**自己的 message（不设渲染标记，不依赖
+执行顺序）；原始消息与堆栈文本**各缓存一份到 extra**，供所有 sink 复用。
+`formatters` 的渲染函数因此改为接受 `stack` 关键字参数，不再自己从 record 取值。
 
 ## 测试计划
 
