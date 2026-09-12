@@ -32,6 +32,8 @@ packages = ["core"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# 文档是产物，其中的示例代码不应被 ruff 重排
+exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
