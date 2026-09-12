@@ -1,0 +1,58 @@
+[project]
+name = "aliya-cosmos"
+version = "0.1.0"
+description = "Python + uv 通用脚手架：api / service / logger / config 四层结构"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "loguru>=0.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "httpx>=0.28",
+    "ruff>=0.8",
+    "pre-commit>=4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # 项目统一使用中文，全角标点在中文语境下是正确写法
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # Service 基类的钩子方法允许为空实现（非抽象，子类按需重写）
+    "B027",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试中允许使用断言与魔法值
+"tests/**/*.py" = ["S101", "SIM117"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["core"]
+omit = ["core/main.py"]
