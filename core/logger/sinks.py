@@ -18,7 +18,7 @@ from pathlib import Path
 from loguru import logger
 
 from core.config import LogSettings
-from core.logger.formatters import colorize, format_json, format_tree
+from core.logger.formatters import colorize, format_exception, format_json, format_tree
 from core.logger.types import FilterFunction, Record
 
 #: 错误日志文件的级别门槛
@@ -32,24 +32,52 @@ def _is_tty() -> bool:
 
 
 def build_filter(cfg: LogSettings, *, color: bool) -> FilterFunction:
-    """构造 per-sink filter：把 record 预渲染为完整文本。
+    """构造 per-sink filter：把 record 渲染为完整文本。
 
-    filter 可能被 loguru 多次调用，因此改写必须幂等——用 extra 里的标记位判重，
-    否则消息会被重复拼接。Record 是 TypedDict，直接按键读写即可。
+    必须了解的 loguru 行为：所有 sink 的 filter 共享**同一个 record 对象**，
+    并按 sink 注册顺序串行执行。也就是说前一个 sink 对 record["message"] 的
+    改写，后一个 sink 会原样看到。这带来两个坑：
+
+    1. 若用"只渲染一次"的标记位，先执行的控制台 sink 会着色并写回 message，
+       后续文件 sink 直接复用带 ANSI 码的文本，把转义序列写进日志文件。
+    2. 若谁先渲染谁就清空 record["exception"]，后渲染的 sink 会丢失堆栈。
+
+    因此这里采取两个对策：**每个 sink 无条件重新渲染自己的 message**（不设
+    渲染标记，不依赖执行顺序），以及**堆栈文本只提取一次并缓存到 extra**
+    供所有 sink 复用。
+
+    为什么用 filter 而不是 format 函数：loguru 的 format 传函数时，返回值里的
+    换行会被它自己追加的换行逻辑吃掉，多行日志会挤成一行；而 filter 能在输出前
+    改写 record，配合 format="{message}" 可原样保留换行。
     """
+
+    #: 堆栈文本的缓存键：跨 sink 共享，只算一次
+    stack_key = "_stack_text"
+    #: 原始消息的缓存键：message 会被各 sink 改写，必须留一份原文
+    raw_key = "_raw_message"
 
     def _filter(record: Record) -> bool:
         extra = record["extra"]
-        if extra.get("_rendered"):
-            return True
 
-        text = format_json(record) if cfg.json_output else format_tree(record)
+        # 首次进入时留存原始消息与堆栈，供所有 sink 复用
+        if raw_key not in extra:
+            extra[raw_key] = record["message"]
+            extra[stack_key] = format_exception(record)
+            # 堆栈已自行渲染，清空以免 loguru 再追加一份原始堆栈
+            record["exception"] = None
+
+        raw = extra.get(raw_key)
+        stack = extra.get(stack_key)
+        record["message"] = raw if isinstance(raw, str) else ""
+
+        rendered = (
+            format_json(record, stack=stack if isinstance(stack, str) else None)
+            if cfg.json_output
+            else format_tree(record, stack=stack if isinstance(stack, str) else None)
+        )
         if color and not cfg.json_output:
-            text = colorize(text, record["level"].name)
-        record["message"] = text
-        extra["_rendered"] = True
-        # 堆栈已由 format_tree/format_json 渲染，清空以免 loguru 重复追加
-        record["exception"] = None
+            rendered = colorize(rendered, record["level"].name)
+        record["message"] = rendered
         return True
 
     return _filter

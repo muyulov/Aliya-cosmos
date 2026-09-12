@@ -7,7 +7,13 @@ from datetime import datetime
 from typing import cast
 
 from core.logger import faces
-from core.logger.formatters import colorize, format_json, format_tree, render_value
+from core.logger.formatters import (
+    colorize,
+    format_exception,
+    format_json,
+    format_tree,
+    render_value,
+)
 from core.logger.types import Record
 
 
@@ -144,28 +150,39 @@ def test_无堆栈时不渲染堆栈块() -> None:
     assert "堆栈" not in line
 
 
-def test_带堆栈时字段块完整且堆栈独立成块() -> None:
-    line = format_tree(
-        make_record("未捕获异常", level="ERROR", 路径="/x", exception=_make_exception())
-    )
+def test_format_exception_从_record_提取堆栈() -> None:
+    text = format_exception(make_record("异常", exception=_make_exception()))
+    assert text is not None
+    assert "KeyError" in text
+    assert text.endswith("KeyError: 'item_id'")
+    assert not text.endswith("\n")
+
+
+def test_format_exception_无异常时返回_None() -> None:
+    assert format_exception(make_record("正常")) is None
+
+
+def test_传入堆栈时字段块完整且堆栈独立成块() -> None:
+    record = make_record("未捕获异常", level="ERROR", 路径="/x")
+    line = format_tree(record, stack=format_exception(make_record(exception=_make_exception())))
     lines = line.split("\n")
     assert lines[0].startswith("2026-08-27 23:09:52 [E]")
     assert lines[1] == "    └─ 路径: /x"
     assert lines[2] == "    └─ 堆栈"
     body = "\n".join(lines[3:])
     assert "KeyError" in body
-    assert "\n" in body
 
 
 def test_堆栈渲染不会把_exception_塞进字段() -> None:
-    line = format_tree(make_record("异常", exception=_make_exception()))
+    line = format_tree(make_record("异常"))
     assert "exception:" not in line
 
 
 def test_json_模式下堆栈作为独立键且保持单行() -> None:
     import json
 
-    raw = format_json(make_record("未捕获异常", exception=_make_exception()))
+    stack = format_exception(make_record(exception=_make_exception()))
+    raw = format_json(make_record("未捕获异常"), stack=stack)
     assert "\n" not in raw
     payload = cast("dict[str, object]", json.loads(raw))
     assert isinstance(payload["exception"], str)

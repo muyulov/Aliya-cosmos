@@ -16,7 +16,6 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from core.api.response import error_body
-from core.logger import context as log_context
 from core.logger import faces, log
 from core.service.item_service import ItemNotFoundError
 
@@ -126,29 +125,30 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
-        # exception 会带上完整堆栈，仅在此处记录，对外不暴露
+        # exception 会带上完整堆栈，仅在此处记录，对外不暴露。
+        # request_id 必须显式传入：本处理器由 ServerErrorMiddleware 在最外层执行，
+        # 此时 RequestContextMiddleware 的上下文已退出，从上下文取会得到占位符。
+        request_id = _request_id(request)
         log.exception(
             "未捕获异常",
             face=faces.BOOM,
+            request_id=request_id,
             路径=request.url.path,
             异常=type(exc).__name__,
         )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=error_body("INTERNAL_ERROR", "服务内部错误", _request_id(request)),
+            content=error_body("INTERNAL_ERROR", "服务内部错误", request_id),
         )
 
 
 def _request_id(request: Request) -> str:
-    """取请求 id 填入响应信封。
+    """取请求 id，用于填充响应信封与异常日志字段。
 
-    优先读 request.state（中间件写入），缺失时回退到日志上下文——
-    异常处理器可能运行在中间件的上下文之外，此时 state 才是可靠的。
+    只读 request.state：中间件一进入就写入该值，且在所有异常处理器路径下都可靠；
+    而日志上下文在 500 处理器执行时已退出，不能作为来源。
     """
-    state_id = getattr(request.state, "request_id", None)
-    if state_id:
-        return cast("str", state_id)
-    return log_context.request_id()
+    return cast("str", getattr(request.state, "request_id", "-"))
 
 
 def _describe_validation_errors(exc: RequestValidationError) -> list[dict[str, object]]:

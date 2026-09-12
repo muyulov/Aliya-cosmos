@@ -31,6 +31,8 @@ _INTERCEPTED_LOGGERS = (
     "fastapi",
     "sqlalchemy",
     "asyncio",
+    "httpx",
+    "httpcore",
 )
 
 

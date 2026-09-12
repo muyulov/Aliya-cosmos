@@ -55,10 +55,13 @@ def _pick_face(face: object, level_name: str) -> str:
     return faces_module.DEFAULT_BY_LEVEL.get(level_name, "")
 
 
-def format_tree(record: Record) -> str:
+def format_tree(record: Record, *, stack: str | None = None) -> str:
     """树形格式化，供控制台与文件 sink 使用。
 
     返回不带结尾换行的字符串，换行由 loguru 负责，避免多行内容被拼接。
+
+    stack 由调用方预先算好并传入，而不再从 record 里取：多个 sink 共享同一
+    record，谁先渲染谁就会清空 record["exception"]，后渲染的 sink 会丢失堆栈。
     """
     extra = _extra_of(record)
     level_name = _level_name_of(record)
@@ -76,7 +79,7 @@ def format_tree(record: Record) -> str:
         branch = "└─" if index == len(items) - 1 else "├─"
         lines.append(f"{FIELD_INDENT}{branch} {key}: {render_value(value)}")
 
-    lines.extend(_stack_lines(record))
+    lines.extend(_stack_lines(stack))
     return "\n".join(lines)
 
 
@@ -93,17 +96,16 @@ def format_exception(record: Record) -> str | None:
     return "".join(stack).rstrip("\n")
 
 
-def _stack_lines(record: Record) -> list[str]:
-    """生成堆栈块的行，供树形渲染使用。"""
-    text = format_exception(record)
-    if not text:
+def _stack_lines(stack: str | None) -> list[str]:
+    """把堆栈文本转成树形块的行。"""
+    if not stack:
         return []
     lines = [f"{FIELD_INDENT}└─ 堆栈"]
-    lines.extend(f"{FIELD_INDENT}   {raw}" for raw in text.split("\n"))
+    lines.extend(f"{FIELD_INDENT}   {raw}" for raw in stack.split("\n"))
     return lines
 
 
-def format_json(record: Record) -> str:
+def format_json(record: Record, *, stack: str | None = None) -> str:
     """JSON 格式化，字段平铺到顶层；堆栈作为独立键存放。"""
     extra = _extra_of(record)
     level_name = _level_name_of(record)
@@ -116,7 +118,6 @@ def format_json(record: Record) -> str:
     }
     payload.update(_fields_of(extra))
 
-    stack = format_exception(record)
     if stack:
         payload["exception"] = stack
 
