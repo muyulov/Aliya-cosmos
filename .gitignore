@@ -39,3 +39,6 @@ build/
 # AI
 .codebuddy/
 .claude/
+
+# 隔离工作区
+.worktrees/
