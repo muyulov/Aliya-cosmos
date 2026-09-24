@@ -1387,6 +1387,13 @@ git commit -m "feat(service): 容器改为按类型装配并注入依赖"
 
 **背景：** 这一步兑现注入的实际收益：单测里 `ItemService(FakeClock(...))` 就能锁死时间，断言 `created_at` 精确值，完全不需要容器参与。
 
+**保留 `Item.created_at` 的缺省值（取舍说明）：** `Item` 的
+`created_at: datetime = field(default_factory=lambda: datetime.now(UTC))` 保持不变——
+它让 `Item` 能脱离服务单独构造。代价是同一字段存在两条来源（缺省值 vs 服务注入），
+因此 `Item` 的 docstring 必须写明「缺省值仅为单独构造兜底，服务路径一律由 ClockService 供给」，
+避免后来者直接 `Item(...)` 绕过注入的时钟。不改 `created_at` 为必填，是因为那需要重排
+dataclass 字段顺序（`description` 有默认值），属对演示 DTO 公开签名的破坏性改动。
+
 **Step 1: 写失败的测试**
 
 在 `tests/test_service_injection.py` 末尾追加：

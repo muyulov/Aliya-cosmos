@@ -20,7 +20,11 @@ from core.service.clock_service import ClockService
 
 @dataclass(slots=True)
 class Item:
-    """示例实体。"""
+    """示例实体。
+
+      created_at 的缺省值仅供脱离服务单独构造时兜底；
+    服务路径上一律由 ClockService 供给，时间来源保持唯一。
+    """
 
     id: int
     name: str
