@@ -25,7 +25,7 @@ class RecordService(Service):
     """
 
     name: ClassVar[str] = "recorder"
-    dependencies: ClassVar[tuple[str, ...]] = ()
+    dependencies: ClassVar[tuple[type[Service], ...]] = ()
 
     def __init__(self) -> None:
         super().__init__()

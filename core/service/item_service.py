@@ -48,7 +48,7 @@ class ItemService(Service):
     """示例服务实现。"""
 
     name: ClassVar[str] = "item"
-    dependencies: ClassVar[tuple[str, ...]] = ()
+    dependencies: ClassVar[tuple[type[Service], ...]] = ()
 
     def __init__(self) -> None:
         super().__init__()
