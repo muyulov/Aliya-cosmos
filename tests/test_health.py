@@ -20,12 +20,18 @@ async def test_健康检查返回服务明细(client: AsyncClient) -> None:
     assert data["env"] == "test"
 
     services = cast("list[object]", data["services"])
-    assert len(services) == 1
-    service = as_dict(services[0])
-    assert service["name"] == "item"
-    assert service["state"] == "running"
-    assert service["healthy"] is True
-    assert service["条目数"] == 1
+    assert len(services) == 2
+
+    clock = as_dict(services[0])
+    assert clock["name"] == "clock"
+    assert clock["state"] == "running"
+    assert clock["healthy"] is True
+
+    item = as_dict(services[1])
+    assert item["name"] == "item"
+    assert item["state"] == "running"
+    assert item["healthy"] is True
+    assert item["条目数"] == 1
 
 
 async def test_存活探针(client: AsyncClient) -> None:

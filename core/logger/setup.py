@@ -41,15 +41,44 @@ class Log:
 
     类型注解约定：face 为颜文字字符串，fields 为任意键值的结构化字段，
     因此这里必须宽松（object），这也是 loguru 自身的签名风格。
+
+    门面可派生：bind 追加基础字段，prefix 追加消息前缀，两者互不干扰，
+    各自返回新实例，互不修改原对象。
     """
 
     #: 颜文字常量表，便于 log.face.CHEER 这样取用
     face: ModuleType = faces_module
 
+    def __init__(self, base: dict[str, object] | None = None, prefix: str = "") -> None:
+        self._base: dict[str, object] = dict(base) if base else {}
+        self._prefix: str = prefix
+
+    def bind(self, **kv: object) -> Log:
+        """返回带基础字段的派生门面。
+
+        字段优先级为「基础字段 → 上下文 → 调用点」，调用点最高，
+        因此服务里临时覆盖 服务= 这类字段是可行的。
+
+        与既有基础字段同名时同样以后一次为准：bind(服务="x").bind(服务="y")
+        的结果是 服务=y。
+        """
+        return Log({**self._base, **kv}, self._prefix)
+
+    def prefix(self, text: str) -> Log:
+        """返回带消息前缀的派生门面，渲染为 [text] 消息。
+
+        多次调用时以后一次为准（覆盖而非追加）：prefix("A").prefix("B")
+        渲染为 [B] 消息。
+        """
+        return Log(self._base, text)
+
+    def _compose(self, message: str) -> str:
+        return f"[{self._prefix}] {message}" if self._prefix else message
+
     def _emit(self, level: str, message: str, face: str | None = None, **fields: object) -> None:
         resolved = face or faces_module.DEFAULT_BY_LEVEL.get(level.upper(), "")
-        merged = {**context_module.current(), **fields}
-        logger.bind(face=resolved, fields=merged).log(level.upper(), message)
+        merged = {**self._base, **context_module.current(), **fields}
+        logger.bind(face=resolved, fields=merged).log(level.upper(), self._compose(message))
 
     def debug(self, message: str, face: str | None = None, **fields: object) -> None:
         self._emit("DEBUG", message, face, **fields)
@@ -72,8 +101,8 @@ class Log:
     def exception(self, message: str, face: str | None = None, **fields: object) -> None:
         """记录异常并附带 traceback。"""
         resolved = face or faces_module.DEFAULT_BY_LEVEL.get("ERROR", "")
-        merged = {**context_module.current(), **fields}
-        logger.bind(face=resolved, fields=merged).exception(message)
+        merged = {**self._base, **context_module.current(), **fields}
+        logger.bind(face=resolved, fields=merged).exception(self._compose(message))
 
     @contextmanager
     def context(self, **kv: object) -> Generator[None, None, None]:

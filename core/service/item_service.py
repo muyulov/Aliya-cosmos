@@ -1,8 +1,9 @@
 """示例服务：内存仓储的条目管理。
 
 演示完整链路：
-- 声明 name 与 dependencies，随 manager 启停。
+- 声明依赖类型，由容器在构造时注入。
 - start 预热数据，stop 释放资源。
+- 时间来源取自 ClockService，因此测试可注入固定时间。
 - 业务异常直接用 AppError 子类表达，由 api 层统一转成 HTTP 响应。
 """
 
@@ -14,11 +15,16 @@ from itertools import count
 from typing import ClassVar, override
 
 from core.service.base import HealthStatus, Service, ServiceState
+from core.service.clock_service import ClockService
 
 
 @dataclass(slots=True)
 class Item:
-    """示例实体。"""
+    """示例实体。
+
+    created_at 的缺省值仅供脱离服务单独构造时兜底，
+    服务路径上一律由 ClockService 供给，时间来源保持唯一。
+    """
 
     id: int
     name: str
@@ -48,10 +54,11 @@ class ItemService(Service):
     """示例服务实现。"""
 
     name: ClassVar[str] = "item"
-    dependencies: ClassVar[tuple[str, ...]] = ()
+    dependencies: ClassVar[tuple[type[Service], ...]] = (ClockService,)
 
-    def __init__(self) -> None:
+    def __init__(self, clock: ClockService) -> None:
         super().__init__()
+        self._clock = clock
         self._items: dict[int, Item] = {}
         self._counter: count[int] = count(1)
 
@@ -74,7 +81,7 @@ class ItemService(Service):
     @override
     async def health(self) -> HealthStatus:
         return HealthStatus(
-            name=self.name,
+            name=self.label,
             healthy=self.running,
             state=self.state,
             extra={"条目数": len(self._items)},
@@ -98,6 +105,11 @@ class ItemService(Service):
         del self._items[item_id]
 
     def _create(self, name: str, description: str) -> Item:
-        item = Item(id=next(self._counter), name=name, description=description)
+        item = Item(
+            id=next(self._counter),
+            name=name,
+            description=description,
+            created_at=self._clock.now(),
+        )
         self._items[item.id] = item
         return item

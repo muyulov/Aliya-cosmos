@@ -176,17 +176,14 @@ def _build_app(tmp_path: Path):
     """构造带日志配置的应用，供接口级测试使用。"""
     from core.api import create_app
     from core.config import AppSettings, Settings, get_settings
-    from core.service import ServiceManager
-    from core.service.item_service import ItemService
+    from core.service.registry import build_manager
 
     get_settings.cache_clear()
     settings = Settings(
         app=AppSettings(app_name="t", env="test", debug=False),
         log=_cfg(tmp_path),
     )
-    mgr = ServiceManager()
-    _ = mgr.register(ItemService())
-    return create_app(settings=settings, manager=mgr)
+    return create_app(settings=settings, manager=build_manager(settings))
 
 
 async def _request(app, path: str, request_id: str):
@@ -228,3 +225,64 @@ async def test_未捕获异常日志也带_request_id(tmp_path: Path) -> None:
     text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
     block = text[text.index("未捕获异常") :]
     assert "rid-500" in block
+
+
+def test_bind_附加基础字段(tmp_path: Path) -> None:
+    from core.logger import log
+
+    setup_logging(_cfg(tmp_path))
+    log.bind(服务="clock").info("绑定了字段")
+    logger.remove()
+
+    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+    assert "服务: clock" in text
+
+
+def test_prefix_渲染消息前缀(tmp_path: Path) -> None:
+    from core.logger import log
+
+    setup_logging(_cfg(tmp_path))
+    log.prefix("clock").info("时钟服务已启动")
+    logger.remove()
+
+    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+    assert "[clock] 时钟服务已启动" in text
+
+
+def test_bind_与_prefix_可链式叠加(tmp_path: Path) -> None:
+    from core.logger import log
+
+    setup_logging(_cfg(tmp_path))
+    log.bind(服务="clock").prefix("clock").info("链式")
+    logger.remove()
+
+    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+    assert "[clock] 链式" in text
+    assert "服务: clock" in text
+
+
+def test_调用点字段覆盖_bind_字段(tmp_path: Path) -> None:
+    """bind 的字段优先级最低，调用点显式传值应胜出。"""
+    from core.logger import log
+
+    setup_logging(_cfg(tmp_path))
+    log.bind(服务="clock").info("覆盖", 服务="item")
+    logger.remove()
+
+    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+    assert "服务: item" in text
+    assert "服务: clock" not in text
+
+
+def test_prefix_作用于_exception(tmp_path: Path) -> None:
+    from core.logger import log
+
+    setup_logging(_cfg(tmp_path))
+    try:
+        raise KeyError("boom")
+    except KeyError:
+        log.prefix("clock").exception("带堆栈")
+    logger.remove()
+
+    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+    assert "[clock] 带堆栈" in text
