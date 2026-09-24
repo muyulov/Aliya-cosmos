@@ -9,7 +9,7 @@ import pytest
 from loguru import logger
 
 from core.config import LogSettings
-from core.logger import setup_logging
+from core.logger import faces, setup_logging
 from core.service.base import Service
 
 
@@ -102,3 +102,13 @@ def test_log_error_的自动错误字段优先于调用点传入(tmp_path: Path)
     text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
     assert "错误: RuntimeError: 磁盘满" in text
     assert "错误: 自定义" not in text
+
+
+def test_log_error_可指定颜文字(tmp_path: Path) -> None:
+    """face 是显式形参，不再依赖 **fields 解包时的偶然绑定。"""
+    setup_logging(_cfg(tmp_path))
+    DemoService().log_error("保存失败", RuntimeError("磁盘满"), face=faces.THINK)
+    logger.remove()
+
+    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+    assert faces.THINK in text

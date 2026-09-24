@@ -96,6 +96,29 @@ def add_console_sink(cfg: LogSettings) -> None:
     )
 
 
+def _add_file_sink(target: Path, level: str, cfg: LogSettings) -> None:
+    """装配单个文件 sink。
+
+    两个文件 sink 只有目标路径与级别不同，格式、轮转、编码与关闭规则完全一致，
+    因此收在这里，避免同一张参数表抄两遍。
+
+    路径显式转成 str：loguru 的类型标注把"文件路径"那条重载声明为 str，
+    传 Path 会被类型检查器判为不匹配（运行期两者都能用）。
+    """
+    _ = logger.add(
+        str(target),
+        level=level,
+        format="{message}",
+        rotation=cfg.rotation,
+        retention=cfg.retention,
+        compression=cfg.compression,
+        encoding="utf-8",
+        backtrace=False,
+        diagnose=False,
+        filter=build_filter(cfg, color=False),
+    )
+
+
 def add_file_sinks(cfg: LogSettings) -> tuple[Path, Path]:
     """装配主日志与错误日志两个文件 sink，返回两者的路径。"""
     log_dir = Path(cfg.dir)
@@ -103,28 +126,8 @@ def add_file_sinks(cfg: LogSettings) -> tuple[Path, Path]:
     app_log = log_dir / cfg.file_name
     error_log = log_dir / cfg.error_file_name
 
-    common: dict[str, object] = {
-        "format": "{message}",
-        "rotation": cfg.rotation,
-        "retention": cfg.retention,
-        "compression": cfg.compression,
-        "encoding": "utf-8",
-        "backtrace": False,
-        "diagnose": False,
-    }
-
-    _ = logger.add(
-        app_log,
-        level=cfg.level.upper(),
-        filter=build_filter(cfg, color=False),
-        **common,  # type: ignore[arg-type]
-    )
-    _ = logger.add(
-        error_log,
-        level=ERROR_LEVEL,
-        filter=build_filter(cfg, color=False),
-        **common,  # type: ignore[arg-type]
-    )
+    _add_file_sink(app_log, cfg.level.upper(), cfg)
+    _add_file_sink(error_log, ERROR_LEVEL, cfg)
     return app_log, error_log
 
 

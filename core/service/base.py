@@ -84,16 +84,19 @@ class Service:
         self,
         message: str,
         exc: BaseException | None = None,
+        face: str | None = None,
         **fields: object,
     ) -> None:
         """统一错误日志：自动拼「错误=类型: 消息」，可选带异常对象。
 
         收敛各处重复的 f"{type(exc).__name__}: {exc}" 格式化。
         传 exc 时会写入 错误= 字段，同名传入字段会被覆盖。
+        face 显式声明而非依赖 **fields 的偶然绑定：否则类型检查器会认为
+        任意 object 都可能是 face，报「无法赋值给 str | None」。
         """
         if exc is not None:
             fields["错误"] = f"{type(exc).__name__}: {exc}"
-        self.log.error(message, **fields)
+        self.log.error(message, face, **fields)
 
     @property
     def running(self) -> bool:

@@ -29,6 +29,17 @@ S = TypeVar("S", bound=Service)
 _Plan = tuple[dict[str, type[Service]], list[str]]
 
 
+def _ensure_service_subclass(candidate: object) -> None:
+    """运行期兜底：拒绝非 Service 子类的注册对象。
+
+    参数刻意声明为 object。类型标注正确的调用方不会传错，但无类型标注的调用方
+    与测试里用 cast 绕过类型检查的场景需要这层校验；声明成 object 而不是
+    type[Service]，这层检查才在类型系统眼里有意义。
+    """
+    if not (isinstance(candidate, type) and issubclass(candidate, Service)):
+        raise ServiceContractError(f"{candidate!r} 不是 Service 子类，无法注册")
+
+
 class ServiceManager:
     """服务注册表与生命周期编排器。
 
@@ -40,23 +51,21 @@ class ServiceManager:
 
     def __init__(self, settings: Settings | None = None) -> None:
         #: 容器持有的配置；装配时若为 None 则回退到全局单例
-        self._settings = settings
+        self._settings: Settings | None = settings
         #: 注册顺序（装配前）
         self._types: list[type[Service]] = []
         #: 装配产出的实例表
         self._instances: dict[type[Service], Service] = {}
         #: 装配后固化的启动顺序，关闭时直接逆序，无需可变状态
         self._order: list[type[Service]] = []
-        self._built = False
+        self._built: bool = False
 
     # ---------- 注册 ----------
 
     def register(self, service_type: type[S]) -> type[S]:
         """注册服务类型。非 Service 子类、重复注册、装配后注册都会抛错。"""
         self._ensure_not_built()
-        if not (isinstance(service_type, type) and issubclass(service_type, Service)):
-            name = getattr(service_type, "__name__", repr(service_type))
-            raise ServiceContractError(f"{name} 不是 Service 子类，无法注册")
+        _ensure_service_subclass(service_type)
         if service_type in self._types:
             raise ServiceContractError(f"服务类型重复注册：{service_type.__name__}")
         self._types.append(service_type)
@@ -237,7 +246,7 @@ class ServiceManager:
         annotations，注解都是字符串，必须显式解析。
         """
         hints = get_type_hints(service_type.__init__)
-        _ = hints.pop("return", None)
+        prefix = f"{service_type.__name__}.__init__"
 
         service_params: dict[str, type[Service]] = {}
         settings_params: list[str] = []
@@ -246,27 +255,25 @@ class ServiceManager:
             if param_name == "self":
                 continue
             if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                raise ServiceContractError(
-                    f"{service_type.__name__}.__init__ 含可变参数 {param_name}，容器无法注入"
-                )
+                raise ServiceContractError(f"{prefix} 含可变参数 {param_name}，容器无法注入")
 
-            param_type = hints.get(param_name)
-            if param_type is None:
+            # 显式收成 object：get_type_hints 取值是 Any，直接使用会让 Any
+            # 扩散到后面的 isinstance / repr，触发类型检查器的未知类型告警。
+            annotation: object = hints.get(param_name)
+            if annotation is None:
                 raise ServiceContractError(
-                    f"{service_type.__name__}.__init__ 的参数 {param_name} 缺少类型注解，"
-                    f"容器无法注入"
+                    f"{prefix} 的参数 {param_name} 缺少类型注解，容器无法注入"
                 )
-            if param_type is Settings:
+            if annotation is Settings:
                 settings_params.append(param_name)
                 continue
-            if isinstance(param_type, type) and issubclass(param_type, Service):
-                service_params[param_name] = param_type
+            if isinstance(annotation, type) and issubclass(annotation, Service):
+                service_params[param_name] = annotation
                 continue
 
-            label = getattr(param_type, "__name__", repr(param_type))
+            shown = annotation.__name__ if isinstance(annotation, type) else repr(annotation)
             raise ServiceContractError(
-                f"{service_type.__name__}.__init__ 的参数 {param_name} 注解为 {label}，"
-                f"容器只支持 Service 与 Settings"
+                f"{prefix} 的参数 {param_name} 注解为 {shown}，" + "容器只支持 Service 与 Settings"
             )
 
         declared = set(service_type.dependencies)

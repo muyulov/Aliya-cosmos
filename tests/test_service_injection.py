@@ -32,7 +32,7 @@ class SettingsAwareService(Service):
 
     def __init__(self, settings: Settings) -> None:
         super().__init__()
-        self.settings = settings
+        self.settings: Settings = settings
 
 
 class LazyProbeService(Service):
@@ -63,7 +63,7 @@ class UndeclaredParam(Service):
 
     def __init__(self, db: DbService) -> None:
         super().__init__()
-        self.db = db
+        self.db: DbService = db
 
 
 class UnknownAnnotation(Service):
@@ -73,7 +73,7 @@ class UnknownAnnotation(Service):
 
     def __init__(self, value: int) -> None:
         super().__init__()
-        self.value = value
+        self.value: int = value
 
 
 class VarArgs(Service):
@@ -83,7 +83,7 @@ class VarArgs(Service):
 
     def __init__(self, *args: object) -> None:
         super().__init__()
-        self.args = args
+        self.args: tuple[object, ...] = args
 
 
 @pytest.fixture(autouse=True)
@@ -180,7 +180,10 @@ class MissingAnnotationService(Service):
 
     name: ClassVar[str] = "no-annotation"
 
-    def __init__(self, dependency) -> None:  # pyright: ignore[reportUnknownParameterType]
+    def __init__(
+        self,
+        dependency,  # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]
+    ) -> None:
         """故意的无注解参数，用于覆盖契约校验的最后一个分支。"""
         super().__init__()
 
@@ -214,7 +217,8 @@ def test_装配失败不留下半成品实例() -> None:
     with pytest.raises(RuntimeError, match="构造失败"):
         _ = mgr.services
 
-    assert mgr._instances == {}
+    # 白盒断言：没有公开 API 能观察"是否留下半成品"，只能读实例表
+    assert mgr._instances == {}  # pyright: ignore[reportPrivateUsage]
 
 
 class FakeClock(ClockService):
@@ -222,7 +226,7 @@ class FakeClock(ClockService):
 
     def __init__(self, fixed: datetime) -> None:
         super().__init__()
-        self._fixed = fixed
+        self._fixed: datetime = fixed
 
     @override
     def now(self) -> datetime:
@@ -241,8 +245,10 @@ async def test_时间来源可替换() -> None:
 
 async def test_容器把注册的时钟注入给条目服务() -> None:
     mgr = build_manager()
+    # 白盒断言：只有身份断言能证明"注入的是容器那个实例"而不是新建副本
+    injected = mgr.get(ItemService)._clock  # pyright: ignore[reportPrivateUsage]
 
-    assert mgr.get(ItemService)._clock is mgr.get(ClockService)
+    assert injected is mgr.get(ClockService)
 
 
 async def test_容器装配后条目服务可用() -> None:

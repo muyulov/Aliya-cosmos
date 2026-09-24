@@ -58,7 +58,7 @@ class ItemService(Service):
 
     def __init__(self, clock: ClockService) -> None:
         super().__init__()
-        self._clock = clock
+        self._clock: ClockService = clock
         self._items: dict[int, Item] = {}
         self._counter: count[int] = count(1)
 

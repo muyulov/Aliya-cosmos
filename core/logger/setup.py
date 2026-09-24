@@ -19,9 +19,9 @@ from typing import override
 
 from loguru import logger
 
+import core.logger.context as context_module
 import core.logger.faces as faces_module
 from core.config import LogSettings, get_settings
-from core.logger import context as context_module
 from core.logger.sinks import add_console_sink, add_file_sinks
 
 _INTERCEPTED_LOGGERS = (

@@ -54,7 +54,7 @@ class CacheService(RecordService):
 
     def __init__(self, db: DbService) -> None:
         super().__init__()
-        self.db = db
+        self.db: DbService = db
 
 
 class ApiService(RecordService):
@@ -63,8 +63,8 @@ class ApiService(RecordService):
 
     def __init__(self, cache: CacheService, db: DbService) -> None:
         super().__init__()
-        self.cache = cache
-        self.db = db
+        self.cache: CacheService = cache
+        self.db: DbService = db
 
 
 class BadStopService(RecordService):
@@ -86,12 +86,12 @@ class FailingApiService(RecordService):
 
     def __init__(self, db: FailingDbService) -> None:
         super().__init__()
-        self.db = db
+        self.db: FailingDbService = db
 
     @override
     async def start(self) -> None:
-        self.start_calls += 1
-        events.append(f"start:{self.label}")
+        # 先走基类逻辑（计数 + 记事件），再模拟启动失败
+        await super().start()
         msg = "启动炸了"
         raise RuntimeError(msg)
 
@@ -103,7 +103,7 @@ class CycleA(RecordService):
 
     def __init__(self, b: CycleB) -> None:
         super().__init__()
-        self.b = b
+        self.b: CycleB = b
 
 
 class CycleB(RecordService):
@@ -111,7 +111,7 @@ class CycleB(RecordService):
 
     def __init__(self, a: CycleA) -> None:
         super().__init__()
-        self.a = a
+        self.a: CycleA = a
 
 
 # 成环声明必须在两个类都定义后补上（注解因 from __future__ import annotations 延迟求值）
@@ -127,7 +127,7 @@ class OrphanService(RecordService):
 
     def __init__(self, db: DbService) -> None:
         super().__init__()
-        self.db = db
+        self.db: DbService = db
 
 
 @pytest.fixture(autouse=True)

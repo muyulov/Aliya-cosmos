@@ -383,16 +383,28 @@ class Service:
         self,
         message: str,
         exc: BaseException | None = None,
+        face: str | None = None,
         **fields: object,
     ) -> None:
         """统一错误日志：自动拼「错误=类型: 消息」，可选带异常对象。
 
         收敛 manager 与各服务里重复的 f"{type(exc).__name__}: {exc}" 格式化。
+        face 显式声明而非依赖 **fields 的偶然绑定：否则类型检查器会认为
+        任意 object 都可能是 face，报「无法赋值给 str | None」。
         """
         if exc is not None:
             fields["错误"] = f"{type(exc).__name__}: {exc}"
-        self.log.error(message, **fields)
+        self.log.error(message, face, **fields)
+```
 
+实施期修正：设计文档给的签名是 `log_error(message, exc=None, **fields)`，实施时补了显式
+`face` 形参。原签名下 `self.log.error(message, **fields)` 会被 basedpyright 报
+`reportArgumentType`（`object` 不能赋给 `face: str | None`），且 `face` 能否生效依赖
+`**fields` 解包时的偶然绑定——显式声明后两个问题一起消失。
+注意 `Log.error` 内部 `self._emit("ERROR", message, face, **fields)` 不报错，
+是因为它把 `face` 按**位置**传递，已被绑定，类型检查器会跳过该形参。
+
+```python
     @property
     def running(self) -> bool:
         return self.state is ServiceState.RUNNING

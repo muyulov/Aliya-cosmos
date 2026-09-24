@@ -60,7 +60,7 @@ async def test_并发任务互不污染() -> None:
 
     async def worker(tag: str, gate: asyncio.Event) -> str:
         with context.request_scope(tag):
-            await gate.wait()
+            _ = await gate.wait()
             return context.request_id()
 
     gate = asyncio.Event()

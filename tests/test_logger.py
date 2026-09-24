@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from types import TracebackType
 from typing import cast
 
 from core.logger import faces
@@ -133,9 +134,9 @@ class FakeException:
     """模拟 loguru 的 RecordException（含 type/value/traceback 三元组）。"""
 
     def __init__(self, exc: BaseException) -> None:
-        self.type = type(exc)
-        self.value = exc
-        self.traceback = exc.__traceback__
+        self.type: type[BaseException] = type(exc)
+        self.value: BaseException = exc
+        self.traceback: TracebackType | None = exc.__traceback__
 
 
 def _make_exception() -> FakeException:
@@ -186,4 +187,4 @@ def test_json_模式下堆栈作为独立键且保持单行() -> None:
     assert "\n" not in raw
     payload = cast("dict[str, object]", json.loads(raw))
     assert isinstance(payload["exception"], str)
-    assert "KeyError" in cast("str", payload["exception"])
+    assert "KeyError" in payload["exception"]

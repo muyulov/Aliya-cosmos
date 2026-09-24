@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
+from fastapi import FastAPI
 from loguru import logger
 
 from core.config import LogSettings
@@ -27,12 +29,29 @@ def _cfg(tmp_path: Path, **overrides: object) -> LogSettings:
         "retention": "1 day",
     }
     base.update(overrides)
-    return LogSettings(**base)  # type: ignore[arg-type]
+    # 覆盖项是动态拼进来的，**base 无法静态校验，这里显式抑制
+    return LogSettings(**base)  # pyright: ignore[reportArgumentType]
+
+
+class _Core(Protocol):
+    """loguru 私有核心对象的最小形状，仅取用其中已注册的 sink 表。"""
+
+    handlers: dict[int, object]
+
+
+def _sink_count() -> int:
+    """已注册 sink 的数量。
+
+    loguru 未公开该信息，只能读私有属性 _core.handlers；该属性不在类型标注里，
+    故对属性访问放宽一次，再用 _Core 承接出显式形状，避免未知类型一路扩散。
+    """
+    core = cast("_Core", logger._core)  # pyright: ignore[reportAttributeAccessIssue]
+    return len(core.handlers)
 
 
 def test_装配三个_sink(tmp_path: Path) -> None:
     setup_logging(_cfg(tmp_path))
-    assert len(logger._core.handlers) == 3
+    assert _sink_count() == 3
 
 
 def test_普通信息只进主日志(tmp_path: Path) -> None:
@@ -186,7 +205,7 @@ def _build_app(tmp_path: Path):
     return create_app(settings=settings, manager=build_manager(settings))
 
 
-async def _request(app, path: str, request_id: str):
+async def _request(app: FastAPI, path: str, request_id: str):
     """发一个请求，返回响应。"""
     from httpx import ASGITransport, AsyncClient
 
