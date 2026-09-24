@@ -1382,6 +1382,7 @@ git commit -m "feat(service): 容器改为按类型装配并注入依赖"
 - Modify: `core/service/item_service.py`
 - Modify: `core/service/registry.py`
 - Modify: `core/service/__init__.py`
+- Modify: `tests/test_health.py`
 - Test: `tests/test_service_injection.py`
 
 **背景：** 这一步兑现注入的实际收益：单测里 `ItemService(FakeClock(...))` 就能锁死时间，断言 `created_at` 精确值，完全不需要容器参与。
@@ -1568,6 +1569,9 @@ uv run pytest -q
 ```
 
 Expected: 全部 PASS。注意 `tests/test_items.py` 不需要改动：它走 `client` fixture，`ItemService` 已由容器装配好并注入时钟，`test_启动时预热一条示例数据` 仍应通过。
+
+`tests/test_health.py` 也必须同步：新增 `ClockService` 后 `/api/v1/health` 返回两个服务，
+该用例原断言 `len(services) == 1` 需要改为断言 `clock` 与 `item` 两个服务。
 
 **Step 5: 冒烟启动**
 

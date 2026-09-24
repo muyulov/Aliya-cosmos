@@ -12,6 +12,7 @@ default_manager 没有 import 副作用。
 from __future__ import annotations
 
 from core.config import Settings
+from core.service.clock_service import ClockService
 from core.service.item_service import ItemService
 from core.service.manager import ServiceManager
 
@@ -19,6 +20,7 @@ from core.service.manager import ServiceManager
 def build_manager(settings: Settings | None = None) -> ServiceManager:
     """构造并装配全部服务的 manager。"""
     manager = ServiceManager(settings)
+    _ = manager.register(ClockService)
     _ = manager.register(ItemService)
     return manager
 

@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, cast
+from datetime import UTC, datetime
+from typing import ClassVar, cast, override
 
 import pytest
 
 from core.config import AppSettings, Settings
 from core.service.base import Service
+from core.service.clock_service import ClockService
+from core.service.item_service import ItemService
 from core.service.manager import (
     ServiceContractError,
     ServiceManager,
     ServiceNotRegisteredError,
 )
+from core.service.registry import build_manager
 
 built: list[str] = []
 
@@ -211,3 +215,41 @@ def test_装配失败不留下半成品实例() -> None:
         _ = mgr.services
 
     assert mgr._instances == {}
+
+
+class FakeClock(ClockService):
+    """固定时间的时钟替身，证明时间来源可替换。"""
+
+    def __init__(self, fixed: datetime) -> None:
+        super().__init__()
+        self._fixed = fixed
+
+    @override
+    def now(self) -> datetime:
+        return self._fixed
+
+
+async def test_时间来源可替换() -> None:
+    """绕过容器直接构造，created_at 精确等于假时钟时间。"""
+    fixed = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    service = ItemService(FakeClock(fixed))
+
+    item = await service.create_item("手写")
+
+    assert item.created_at == fixed
+
+
+async def test_容器把注册的时钟注入给条目服务() -> None:
+    mgr = build_manager()
+
+    assert mgr.get(ItemService)._clock is mgr.get(ClockService)
+
+
+async def test_容器装配后条目服务可用() -> None:
+    mgr = build_manager()
+    await mgr.start_all()
+
+    item = await mgr.get(ItemService).create_item("走容器")
+
+    assert item.id == 2
+    assert mgr.get(ItemService).running is True
