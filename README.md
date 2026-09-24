@@ -38,7 +38,7 @@ uv run python -m core.main
 core/
   main.py        入口，仅做 uvicorn 启动
   api/           HTTP 层：应用工厂、路由、中间件、异常处理、依赖注入
-  service/       业务层：服务基类、生命周期管理器、具体服务实现
+  service/       业务层：服务基类、容器、注册表、具体服务实现
   logger/        日志层：颜文字、结构化上下文、树形/JSON 格式化、sink 装配
   config/        配置层：pydantic-settings 分组配置
 tests/           测试
@@ -123,26 +123,58 @@ with log.context(会话="qq:123"):
 
 ## 如何新增一个服务
 
-服务就是实现了 `Service` 基类的类，`ServiceManager` 负责启停与健康检查。
+服务是继承 `Service` 的类，`ServiceManager` 负责装配、启停与健康检查。
+依赖按**类型**声明，容器在构造时注入。
 
 1. 在 `core/service/` 新建文件，继承 `Service`：
 
 ```python
-from core.service.base import HealthStatus, Service
+from typing import ClassVar
+
+from core.service.base import Service
 
 
 class CacheService(Service):
-    name = "cache"
-    dependencies = ()  # 依赖的其他服务 name
+    # 依赖的服务类型；容器据此排序并在构造时注入
+    dependencies: ClassVar[tuple[type[Service], ...]] = (DbService,)
+
+    def __init__(self, db: DbService) -> None:
+        super().__init__()  # 必须调用：负责设置 state 与 self.log
+        self._db = db
 
     async def start(self) -> None: ...  # 建连接
-
     async def stop(self) -> None: ...  # 关连接
 ```
 
-2. 在 `core/service/registry.py` 里注册，它会随应用启动自动启停。
+2. 在 `core/service/registry.py` 里注册**类型**（不是实例）：
 
-`start` / `stop` 需幂等。启动按依赖拓扑排序，失败会逆序回滚；关闭严格逆序，单个服务出错不影响其余服务停下。
+```python
+_ = manager.register(CacheService)
+```
+
+约定：
+
+| 约定 | 说明 |
+| --- | --- |
+| `__init__` 只赋值 | 连接、预热、加载这类动资源的活一律留到 `start()`。装配发生在 lifespan 之前，在 `__init__` 里连资源会让「装配失败」和「启动失败」混成一锅，回滚也会失去意义 |
+| 声明与签名对账 | `dependencies` 与构造器参数必须一一对应，容器装配时校验，不一致直接报 `ServiceContractError` |
+| 依赖写具体类型 | 写**被注册的那个具体类型**，不能拿抽象基类占位，`get()` 按精确类型查找 |
+| `name` 只是标签 | 缺省取类名，不参与依赖解析，也不要求全局唯一，仅用于日志与健康检查展示 |
+| 自带日志 | `self.log` 已带 `服务=<label>` 字段与 `[<label>]` 消息前缀，仍可继续 `bind` / `prefix` |
+| 统一错误格式 | 报错用 `self.log_error("消息", exc)`，自动拼「错误=类型: 消息」 |
+| 配置注入 | 需要配置时在构造器声明 `settings: Settings`，容器会注入应用持有的配置 |
+
+启停语义：`start` / `stop` 需幂等；启动按依赖拓扑排序，失败会逆序回滚；关闭严格按启动的逆序，单个服务出错不影响其余服务停下。
+
+装配期的错误都是 `ServiceError` 的子类，且**不是** `AppError`，因此不会被转成 4xx，只会让启动失败、进程退出（fail fast）：
+
+| 类型 | 触发条件 |
+| --- | --- |
+| `ServiceContractError` | 非 `Service` 子类、重复注册、装配后注册、构造器签名不可解释、声明与签名不一致 |
+| `ServiceNotRegisteredError` | `get()` 查的类型未注册 |
+| `MissingDependencyError` | `dependencies` 里的类型没注册 |
+| `CircularDependencyError` | 依赖成环 |
+| `ServiceStartError` | 某个服务 `start()` 抛错（携带 `service_name` 与 `cause`） |
 
 ## 如何新增一组路由
 
