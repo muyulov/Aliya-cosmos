@@ -58,11 +58,18 @@ class Log:
 
         字段优先级为「基础字段 → 上下文 → 调用点」，调用点最高，
         因此服务里临时覆盖 服务= 这类字段是可行的。
+
+        与既有基础字段同名时同样以后一次为准：bind(服务="x").bind(服务="y")
+        的结果是 服务=y。
         """
         return Log({**self._base, **kv}, self._prefix)
 
     def prefix(self, text: str) -> Log:
-        """返回带消息前缀的派生门面，渲染为 [text] 消息。"""
+        """返回带消息前缀的派生门面，渲染为 [text] 消息。
+
+        多次调用时以后一次为准（覆盖而非追加）：prefix("A").prefix("B")
+        渲染为 [B] 消息。
+        """
         return Log(self._base, text)
 
     def _compose(self, message: str) -> str:
