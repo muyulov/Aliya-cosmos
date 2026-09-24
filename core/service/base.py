@@ -89,6 +89,7 @@ class Service:
         """统一错误日志：自动拼「错误=类型: 消息」，可选带异常对象。
 
         收敛各处重复的 f"{type(exc).__name__}: {exc}" 格式化。
+        传 exc 时会写入 错误= 字段，同名传入字段会被覆盖。
         """
         if exc is not None:
             fields["错误"] = f"{type(exc).__name__}: {exc}"
@@ -112,4 +113,4 @@ class Service:
 
     @override
     def __repr__(self) -> str:
-        return f"<{type(self).__name__} name={self.name!r} state={self.state.value}>"
+        return f"<{type(self).__name__} label={self.label!r} state={self.state.value}>"
