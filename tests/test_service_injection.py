@@ -169,3 +169,45 @@ def test_可变参数无法注入() -> None:
 
     with pytest.raises(ServiceContractError, match="可变参数"):
         _ = mgr.services
+
+
+class MissingAnnotationService(Service):
+    """构造器参数缺少类型注解的服务。"""
+
+    name: ClassVar[str] = "no-annotation"
+
+    def __init__(self, dependency) -> None:  # pyright: ignore[reportUnknownParameterType]
+        """故意的无注解参数，用于覆盖契约校验的最后一个分支。"""
+        super().__init__()
+
+
+def test_参数缺少类型注解报错() -> None:
+    mgr = ServiceManager()
+    _ = mgr.register(MissingAnnotationService)
+
+    with pytest.raises(ServiceContractError, match="缺少类型注解"):
+        _ = mgr.services
+
+
+class BrokenDependentService(Service):
+    """构造器抛错的服务，用于验证装配失败不留下半成品。"""
+
+    name: ClassVar[str] = "broken-dependent"
+    dependencies: ClassVar[tuple[type[Service], ...]] = (DbService,)
+
+    def __init__(self, db: DbService) -> None:
+        super().__init__()
+        msg = "构造失败"
+        raise RuntimeError(msg)
+
+
+def test_装配失败不留下半成品实例() -> None:
+    """构造期失败时容器保持未装配，不会留下已构造的前序服务。"""
+    mgr = ServiceManager()
+    _ = mgr.register(DbService)
+    _ = mgr.register(BrokenDependentService)
+
+    with pytest.raises(RuntimeError, match="构造失败"):
+        _ = mgr.services
+
+    assert mgr._instances == {}

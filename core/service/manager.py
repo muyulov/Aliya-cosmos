@@ -33,7 +33,8 @@ class ServiceManager:
     """服务注册表与生命周期编排器。
 
     装配是惰性的：register 只登记类型，首次访问（get / services / names /
-    health / start_all / stop_all）才校验契约、排序并构造实例。
+    health / start_all）才校验契约、排序并构造实例。stop_all 不是触发点：
+    未装配过的容器没有实例可停，不该为"停止"去构造服务。
     因此模块级构造一个 manager 不读配置、不实例化服务，没有 import 副作用。
     """
 
@@ -125,8 +126,10 @@ class ServiceManager:
 
         顺序在装配期就已固定为 reversed(self._order)，因此这里不需要记录
         "本次启动了哪些"，重复调用天然幂等。
+        未装配过的容器没有实例可停，直接返回，不为"停止"去构造服务。
         """
-        self._ensure_built()
+        if not self._built:
+            return
         for service_type in reversed(self._order):
             service = self._instances[service_type]
             if service.state in (ServiceState.STOPPED, ServiceState.CREATED):
@@ -200,24 +203,30 @@ class ServiceManager:
             raise ServiceContractError(msg)
 
     def _build(self) -> None:
-        """校验契约 → 拓扑排序 → 按序构造注入 → 固化顺序。"""
+        """校验契约 → 拓扑排序 → 按序构造注入 → 固化顺序。
+
+        构造结果先攒在局部字典里，全部成功后才一次性提交：任一步失败时
+        容器保持未装配状态，不会留下半成品实例。
+        """
         settings = self._settings or get_settings()
         plans = {
             service_type: self._validate_contract(service_type) for service_type in self._types
         }
         order = self._resolve_order()
 
+        instances: dict[type[Service], Service] = {}
         for service_type in order:
             service_params, settings_params = plans[service_type]
             kwargs: dict[str, object] = {}
             for param_name in settings_params:
                 kwargs[param_name] = settings
             for param_name, dependency_type in service_params.items():
-                kwargs[param_name] = self._instances[dependency_type]
+                kwargs[param_name] = instances[dependency_type]
             # 构造器参数是动态拼出来的，签名无法静态校验，故这里显式收敛类型
             factory = cast("Callable[..., Service]", service_type)
-            self._instances[service_type] = factory(**kwargs)
+            instances[service_type] = factory(**kwargs)
 
+        self._instances = instances
         self._order = order
         self._built = True
 
