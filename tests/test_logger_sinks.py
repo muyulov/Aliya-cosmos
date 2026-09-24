@@ -176,17 +176,14 @@ def _build_app(tmp_path: Path):
     """构造带日志配置的应用，供接口级测试使用。"""
     from core.api import create_app
     from core.config import AppSettings, Settings, get_settings
-    from core.service import ServiceManager
-    from core.service.item_service import ItemService
+    from core.service.registry import build_manager
 
     get_settings.cache_clear()
     settings = Settings(
         app=AppSettings(app_name="t", env="test", debug=False),
         log=_cfg(tmp_path),
     )
-    mgr = ServiceManager()
-    _ = mgr.register(ItemService())
-    return create_app(settings=settings, manager=mgr)
+    return create_app(settings=settings, manager=build_manager(settings))
 
 
 async def _request(app, path: str, request_id: str):

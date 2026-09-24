@@ -28,7 +28,7 @@ def create_app(
     cfg = settings or get_settings()
     setup_logging(cfg.log)
 
-    services = manager or build_manager()
+    services = manager or build_manager(cfg)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:

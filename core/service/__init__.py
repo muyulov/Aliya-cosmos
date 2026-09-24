@@ -5,8 +5,10 @@ from core.service.item_service import Item, ItemNotFoundError, ItemService
 from core.service.manager import (
     CircularDependencyError,
     MissingDependencyError,
+    ServiceContractError,
     ServiceError,
     ServiceManager,
+    ServiceNotRegisteredError,
     ServiceStartError,
 )
 from core.service.registry import build_manager, default_manager
@@ -19,8 +21,10 @@ __all__ = [
     "ItemService",
     "MissingDependencyError",
     "Service",
+    "ServiceContractError",
     "ServiceError",
     "ServiceManager",
+    "ServiceNotRegisteredError",
     "ServiceStartError",
     "ServiceState",
     "build_manager",

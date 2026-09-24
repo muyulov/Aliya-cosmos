@@ -18,7 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from core.api import create_app
 from core.config import AppSettings, LogSettings, Settings, get_settings
 from core.service import ServiceManager
-from core.service.item_service import ItemService
+from core.service.registry import build_manager
 
 
 @pytest.fixture
@@ -37,11 +37,9 @@ def test_settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture
-def manager() -> ServiceManager:
-    """只装配示例服务的 manager。"""
-    mgr = ServiceManager()
-    _ = mgr.register(ItemService())
-    return mgr
+def manager(test_settings: Settings) -> ServiceManager:
+    """只装配示例服务的 manager，并注入测试配置。"""
+    return build_manager(test_settings)
 
 
 @pytest.fixture

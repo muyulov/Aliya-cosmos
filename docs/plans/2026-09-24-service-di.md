@@ -1008,13 +1008,7 @@ class ServiceManager:
                 await service.start()
             except Exception as exc:
                 service.state = ServiceState.FAILED
-                log.error(
-                    "服务启动失败，开始回滚",
-                    face=faces.BOOM,
-                    服务=service.label,
-                    错误=f"{type(exc).__name__}: {exc}",
-                    已启动=len(started),
-                )
+                service.log_error("服务启动失败，开始回滚", exc, 已启动=len(started))
                 await self._rollback(started)
                 raise ServiceStartError(service.label, exc) from exc
 
