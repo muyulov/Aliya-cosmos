@@ -91,3 +91,14 @@ def test_log_error_可附加自定义字段(tmp_path: Path) -> None:
     text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
     assert "错误: ValueError: 坏值" in text
     assert "重试次数: 2" in text
+
+
+def test_log_error_的自动错误字段优先于调用点传入(tmp_path: Path) -> None:
+    """同时传 exc 与 错误= 时，以自动推导的「类型: 消息」为准。"""
+    setup_logging(_cfg(tmp_path))
+    DemoService().log_error("保存失败", RuntimeError("磁盘满"), 错误="自定义")
+    logger.remove()
+
+    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
+    assert "错误: RuntimeError: 磁盘满" in text
+    assert "错误: 自定义" not in text

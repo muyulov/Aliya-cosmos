@@ -7,7 +7,7 @@ from typing import ClassVar, cast, override
 
 import pytest
 
-from core.config import AppSettings, Settings
+from core.config import AppSettings, Settings, get_settings
 from core.service.base import Service
 from core.service.clock_service import ClockService
 from core.service.item_service import ItemService
@@ -253,3 +253,27 @@ async def test_容器装配后条目服务可用() -> None:
 
     assert item.id == 2
     assert mgr.get(ItemService).running is True
+
+
+async def test_条目服务健康检查用展示名() -> None:
+    """展示名只有一个出口：重写 health() 时也必须走 label。"""
+    mgr = build_manager()
+    service = mgr.get(ItemService)
+    await mgr.start_all()
+
+    health = await service.health()
+
+    assert health.name == service.label
+
+
+def test_配置注入的是容器持有的实例而非全局单例() -> None:
+    """防止装配退化成读 get_settings() 全局单例，丢掉调用方传入的配置。"""
+    own = Settings(app=AppSettings(app_name="容器持有"))
+    mgr = ServiceManager(own)
+    _ = mgr.register(SettingsAwareService)
+
+    injected = mgr.get(SettingsAwareService).settings
+
+    assert injected is own
+    assert injected is not get_settings()
+    assert injected.app.app_name == "容器持有"

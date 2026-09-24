@@ -81,7 +81,7 @@ class ItemService(Service):
     @override
     async def health(self) -> HealthStatus:
         return HealthStatus(
-            name=self.name,
+            name=self.label,
             healthy=self.running,
             state=self.state,
             extra={"条目数": len(self._items)},
