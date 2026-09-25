@@ -1,8 +1,8 @@
 # aliya-cosmos
 
-Python + uv 通用脚手架。四层结构：`api` / `service` / `logger` / `config`，开箱可跑，后续往里填业务。
+Python + uv 通用脚手架。三层结构：`service` / `logger` / `config`，开箱可跑，后续往里填业务。
 
-技术栈：Python 3.12+、uv、FastAPI、pydantic-settings、loguru、ruff、pytest。
+技术栈：Python 3.12+、uv、pydantic-settings、loguru、ruff、pytest。
 
 ## 快速开始
 
@@ -10,11 +10,8 @@ Python + uv 通用脚手架。四层结构：`api` / `service` / `logger` / `con
 # 安装依赖
 uv sync
 
-# 启动服务
+# 启动服务（Ctrl-C 优雅关闭）
 uv run python -m core.main
-
-# 访问接口文档
-# http://127.0.0.1:8000/docs
 ```
 
 无需任何配置即可启动，所有配置项都有默认值。需要自定义时复制 `.env.example` 为 `.env` 修改。
@@ -25,7 +22,6 @@ uv run python -m core.main
 | --- | --- |
 | 安装依赖 | `uv sync` |
 | 启动服务 | `uv run python -m core.main` |
-| 开发热重载 | `uv run uvicorn core.main:app --reload` |
 | 跑测试 | `uv run pytest` |
 | 覆盖率 | `uv run pytest --cov=core` |
 | 代码检查 | `uv run ruff check .` |
@@ -36,15 +32,14 @@ uv run python -m core.main
 
 ```text
 core/
-  main.py        入口，仅做 uvicorn 启动
-  api/           HTTP 层：应用工厂、路由、中间件、异常处理、依赖注入
+  main.py        入口：装配服务容器并驱动生命周期
   service/       业务层：服务基类、容器、注册表、具体服务实现
   logger/        日志层：颜文字、结构化上下文、树形/JSON 格式化、sink 装配
   config/        配置层：pydantic-settings 分组配置
 tests/           测试
 ```
 
-依赖方向单向：`api → service → (config, logger)`。`service` 层不引用 FastAPI，可被 CLI、定时任务、测试直接复用。
+依赖方向单向：`service → (config, logger)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。
 
 ## 配置
 
@@ -52,7 +47,6 @@ tests/           测试
 
 ```bash
 APP_APP__ENV=prod
-APP_APP__PORT=9000
 APP_LOG__LEVEL=DEBUG
 APP_LOG__JSON=true
 ```
@@ -62,8 +56,6 @@ APP_LOG__JSON=true
 | `APP_APP__APP_NAME` | `aliya-cosmos` | 应用名 |
 | `APP_APP__ENV` | `dev` | 环境，只能是 dev / test / prod |
 | `APP_APP__DEBUG` | `true` | 调试开关 |
-| `APP_APP__HOST` | `0.0.0.0` | 监听地址 |
-| `APP_APP__PORT` | `8000` | 监听端口 |
 | `APP_LOG__LEVEL` | `INFO` | 日志级别 |
 | `APP_LOG__JSON` | `false` | 是否输出 JSON 日志 |
 | `APP_LOG__DIR` | `logs` | 日志目录 |
@@ -92,12 +84,13 @@ log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消�
 
 颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`APP_LOG__JSON=true` 时改为单行 JSON，字段平铺，便于日志采集。
 
-请求链路的 `request_id` 会自动携带，调用点无需手写字段：
+`context.request_scope` 作用域内的 `request_id` 会自动携带，调用点无需手写字段：
 
 ```python
-from core.logger import log
+from core.logger import context, log
 
-log.info("处理订单", 订单号="A001")  # request_id 自动出现在字段里
+with context.request_scope():
+    log.info("处理订单", 订单号="A001")  # request_id 自动出现在字段里
 ```
 
 需要临时附加业务维度时用上下文管理器，退出自动还原：
@@ -111,7 +104,7 @@ with log.context(会话="qq:123"):
 
 ```text
 2026-09-12 10:00:00 [E] (x_x) 未捕获异常
-    ├─ 路径: /api/v1/items
+    ├─ 阶段: 装配
     └─ 异常: KeyError
     └─ 堆栈
        Traceback (most recent call last):
@@ -166,7 +159,7 @@ _ = manager.register(CacheService)
 
 启停语义：`start` / `stop` 需幂等；启动按依赖拓扑排序，失败会逆序回滚；关闭严格按启动的逆序，单个服务出错不影响其余服务停下。
 
-装配期的错误都是 `ServiceError` 的子类，且**不是** `AppError`，因此不会被转成 4xx，只会让启动失败、进程退出（fail fast）。（请求期调用 `get()` 查一个未注册的类型属于编程错误，会走通用 500 兜底并留下错误日志。）
+装配期的错误都是 `ServiceError` 的子类，只会让启动失败、进程退出（fail fast）。调用 `get()` 查一个未注册的类型属于编程错误，会抛 `ServiceNotRegisteredError`。
 
 | 类型 | 触发条件 |
 | --- | --- |
@@ -175,21 +168,3 @@ _ = manager.register(CacheService)
 | `MissingDependencyError` | `dependencies` 里的类型没注册 |
 | `CircularDependencyError` | 依赖成环 |
 | `ServiceStartError` | 某个服务 `start()` 抛错（携带 `service_name` 与 `cause`） |
-
-## 如何新增一组路由
-
-在 `core/api/v1/` 下新建文件，用 `APIRouter` 定义路由，然后在 `core/api/v1/router.py` 里 `include_router`。业务逻辑放 `service` 层，路由只做参数校验与响应拼装。
-
-抛业务异常用 `core/api/errors.py` 里的 `AppError` 子类，会被全局处理器转成统一信封 `{code, message, data, request_id}`，无需手写 try/except。
-
-## 示例接口
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/api/v1/health` | 健康检查，聚合各服务状态 |
-| GET | `/api/v1/items` | 列表 |
-| GET | `/api/v1/items/{item_id}` | 详情，不存在返回 404 |
-| POST | `/api/v1/items` | 创建 |
-| DELETE | `/api/v1/items/{item_id}` | 删除 |
-
-示例数据存内存，重启即清空，仅用于演示链路。

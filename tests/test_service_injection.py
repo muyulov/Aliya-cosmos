@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import ClassVar, cast, override
+from typing import ClassVar, cast
 
 import pytest
 
 from core.config import AppSettings, Settings, get_settings
 from core.service.base import Service
 from core.service.clock_service import ClockService
-from core.service.item_service import ItemService
 from core.service.manager import (
     ServiceContractError,
     ServiceManager,
@@ -221,51 +219,38 @@ def test_装配失败不留下半成品实例() -> None:
     assert mgr._instances == {}  # pyright: ignore[reportPrivateUsage]
 
 
-class FakeClock(ClockService):
-    """固定时间的时钟替身，证明时间来源可替换。"""
+class ClockConsumerService(Service):
+    """消费 ClockService 的服务，用于验证容器按类型注入同一实例。"""
 
-    def __init__(self, fixed: datetime) -> None:
+    name: ClassVar[str] = "clock-consumer"
+    dependencies: ClassVar[tuple[type[Service], ...]] = (ClockService,)
+
+    def __init__(self, clock: ClockService) -> None:
         super().__init__()
-        self._fixed: datetime = fixed
-
-    @override
-    def now(self) -> datetime:
-        return self._fixed
+        self.clock: ClockService = clock
 
 
-async def test_时间来源可替换() -> None:
-    """绕过容器直接构造，created_at 精确等于假时钟时间。"""
-    fixed = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
-    service = ItemService(FakeClock(fixed))
+def test_容器按类型注入依赖实例() -> None:
+    """注入的是容器里那个实例，而不是新建副本。"""
+    mgr = ServiceManager()
+    _ = mgr.register(ClockService)
+    _ = mgr.register(ClockConsumerService)
 
-    item = await service.create_item("手写")
-
-    assert item.created_at == fixed
-
-
-async def test_容器把注册的时钟注入给条目服务() -> None:
-    mgr = build_manager()
-    # 白盒断言：只有身份断言能证明"注入的是容器那个实例"而不是新建副本
-    injected = mgr.get(ItemService)._clock  # pyright: ignore[reportPrivateUsage]
-
-    assert injected is mgr.get(ClockService)
+    assert mgr.get(ClockConsumerService).clock is mgr.get(ClockService)
 
 
-async def test_容器装配后条目服务可用() -> None:
+async def test_默认注册表装配后可启动并健康() -> None:
     mgr = build_manager()
     await mgr.start_all()
 
-    item = await mgr.get(ItemService).create_item("走容器")
+    assert mgr.get(ClockService).running is True
+    statuses = await mgr.health()
+    assert [status.name for status in statuses] == ["clock"]
 
-    assert item.id == 2
-    assert mgr.get(ItemService).running is True
 
-
-async def test_条目服务健康检查用展示名() -> None:
+async def test_健康检查用展示名() -> None:
     """展示名只有一个出口：重写 health() 时也必须走 label。"""
-    mgr = build_manager()
-    service = mgr.get(ItemService)
-    await mgr.start_all()
+    service = ClockConsumerService(ClockService())
 
     health = await service.health()
 

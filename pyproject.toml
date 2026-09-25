@@ -1,12 +1,10 @@
 [project]
 name = "aliya-cosmos"
 version = "0.1.0"
-description = "Python + uv 通用脚手架：api / service / logger / config 四层结构"
+description = "Python + uv 通用脚手架：service / logger / config 三层结构"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "loguru>=0.7",
@@ -17,7 +15,6 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
-    "httpx>=0.28",
     "ruff>=0.8",
     "pre-commit>=4.0",
 ]

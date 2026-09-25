@@ -73,8 +73,8 @@ core/main.py:  settings = get_settings()
 
 ```yaml
 app:
-  port: ${APP_PORT:8000}        # 无 APP_PORT 时得到字符串 "8000"，再由 pydantic 转成 int
-  api_key: ${DEEPSEEK_API_KEY}  # .env 里没有就启动失败
+  env: ${APP_ENV:dev}              # 无 APP_ENV 时用 "dev"
+  api_key: ${DEEPSEEK_API_KEY}     # .env 里没有就启动失败（无默认值，fail fast）
 ```
 
 ## 五、错误处理
@@ -131,7 +131,7 @@ def load_settings(config_file: Path = CONFIG_FILE, env_file: Path = ENV_FILE) ->
 | `core/config/settings.py` | 换基类、去 env 源配置、加 `_source` / `config_source` |
 | `core/config/loader.py` | 新增，约 60 行 |
 | `core/config/__init__.py` | 补导出 `ConfigError`、`CONFIG_FILE` |
-| `core/api/app.py` | 启动日志（第 35–41 行那处 `log.info`）加 `配置源=cfg.config_source` 字段；打日志的是 api 层，不新增层间依赖 |
+| `core/main.py` | 启动日志那处 `log.info` 加 `配置源=settings.config_source` 字段；打日志的是入口层，不新增层间依赖 |
 | `pyproject.toml` | 依赖：删 `pydantic-settings`，加 `PyYAML>=6.0`、`python-dotenv>=1.0` |
 | `data/config/app.yaml` | 新增并提交 |
 | `.env.example` | 改写为「密钥清单」式说明 |
@@ -148,8 +148,6 @@ app:
   app_name: aliya-cosmos
   env: dev
   debug: true
-  host: 0.0.0.0
-  port: ${APP_PORT:8000}      # 示例：部署时可用环境变量临时顶掉
 
 log:
   level: INFO
@@ -163,7 +161,7 @@ log:
 # api_key: ${DEEPSEEK_API_KEY}
 ```
 
-`AppSettings.app_name` 字段名**保持不变**（YAML 里写作 `app.app_name`）。改成 `app.name` 会牵连 `app.py`、`health.py`、测试与 README 共 8 处引用，属与本次重构无关的改动，不纳入。
+`AppSettings.app_name` 字段名**保持不变**（YAML 里写作 `app.app_name`）。改名属与本次重构无关的改动，不纳入。
 
 ## 八、测试策略
 
@@ -173,8 +171,8 @@ log:
 | --- | --- |
 | 来源 | 文件缺失 → 全默认值且 `config_source` 为「内置默认值」；正常 YAML → 字段被覆盖、来源为路径 |
 | 插值 | `${VAR}` 取 `.env` 值；进程环境变量优先于 `.env`；`${VAR:默认}` 取默认；嵌套 dict / list 内递归展开；dict 的 key 不插值；单趟展开（值里的 `${}` 不再展开） |
-| 转型 | `port: ${APP_PORT:8000}` 最终为 `int`；`json: true` 走别名生效 |
-| 错误 | `${VAR}` 无值无默认 → `ConfigError` 且消息含变量名与键路径；YAML 语法错 → `ConfigError` 带行列号；顶层是 list → `ConfigError`；`env: staging` / `port: 70000` → `ValidationError` |
+| 转型 | `json: true` 走别名生效；插值得到的 `"true"` 能被 pydantic 宽松转成 bool |
+| 错误 | `${VAR}` 无值无默认 → `ConfigError` 且消息含变量名与键路径；YAML 语法错 → `ConfigError` 带行列号；顶层是 list → `ConfigError`；`env: staging` → `ValidationError` |
 | 单例 | `cache_clear()` 后按新文件重载 |
 
 现有测试除 `conftest.py` 的构造方式外无需改动，用作「重构未破坏契约」的回归证明。
@@ -192,6 +190,6 @@ log:
 ## 十、验收标准
 
 1. `uv run pytest` 全绿、`uv run ruff check .` 干净、basedpyright 无新增诊断。
-2. 改 `data/config/app.yaml` 的 `port` 立即生效；`APP_PORT=9001` 能顶掉它。
+2. 给 `data/config/app.yaml` 的某字段写上 `${VAR:默认}` 后，改 YAML 默认值或设环境变量 `VAR` 都能生效。
 3. 删掉 `data/config/app.yaml` 仍能启动，启动日志显示「配置源=内置默认值」。
 4. 给某字段写上无默认值的占位符、`.env` 里不给值，启动即报错并指出变量名。

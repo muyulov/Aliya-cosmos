@@ -2,7 +2,6 @@
 
 from core.service.base import HealthStatus, Service, ServiceState
 from core.service.clock_service import ClockService
-from core.service.item_service import Item, ItemNotFoundError, ItemService
 from core.service.manager import (
     CircularDependencyError,
     MissingDependencyError,
@@ -18,9 +17,6 @@ __all__ = [
     "CircularDependencyError",
     "ClockService",
     "HealthStatus",
-    "Item",
-    "ItemNotFoundError",
-    "ItemService",
     "MissingDependencyError",
     "Service",
     "ServiceContractError",

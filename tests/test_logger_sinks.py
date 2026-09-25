@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
-from fastapi import FastAPI
 from loguru import logger
 
 from core.config import LogSettings
@@ -183,67 +182,12 @@ def test_桥接路径堆栈也只出现一次(tmp_path: Path) -> None:
 def test_第三方库日志经桥接后仍统一格式(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path, level="DEBUG")
     setup_logging(cfg)
-    logging.getLogger("uvicorn.access").info("第三方库日志")
+    logging.getLogger("sqlalchemy.engine").info("第三方库日志")
     logger.remove()
 
     text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
     assert "[I]" in text
     assert "第三方库日志" in text
-
-
-def _build_app(tmp_path: Path):
-    """构造带日志配置的应用，供接口级测试使用。"""
-    from core.api import create_app
-    from core.config import AppSettings, Settings, get_settings
-    from core.service.registry import build_manager
-
-    get_settings.cache_clear()
-    settings = Settings(
-        app=AppSettings(app_name="t", env="test", debug=False),
-        log=_cfg(tmp_path),
-    )
-    return create_app(settings=settings, manager=build_manager(settings))
-
-
-async def _request(app: FastAPI, path: str, request_id: str):
-    """发一个请求，返回响应。"""
-    from httpx import ASGITransport, AsyncClient
-
-    transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with app.router.lifespan_context(app):
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.get(path, headers={"X-Request-ID": request_id})
-
-
-async def test_请求日志自动携带_request_id(tmp_path: Path) -> None:
-    """中间件不手写 request_id，字段由上下文自动注入。"""
-    app = _build_app(tmp_path)
-    resp = await _request(app, "/api/v1/health", "header-id")
-    logger.remove()
-
-    assert resp.status_code == 200
-    assert resp.headers["X-Request-ID"] == "header-id"
-    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
-    # 请求完成那条日志的字段块里应带上来自请求头的 request_id
-    block = text[text.index("请求完成") :]
-    assert "request_id: header-id" in block
-
-
-async def test_未捕获异常日志也带_request_id(tmp_path: Path) -> None:
-    """500 处理器在中间件之外执行，必须显式从 request.state 取 id。"""
-    app = _build_app(tmp_path)
-
-    @app.get("/boom")
-    async def boom() -> None:
-        raise RuntimeError("炸了")
-
-    resp = await _request(app, "/boom", "rid-500")
-    logger.remove()
-
-    assert resp.status_code == 500
-    text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
-    block = text[text.index("未捕获异常") :]
-    assert "rid-500" in block
 
 
 def test_bind_附加基础字段(tmp_path: Path) -> None:
@@ -285,11 +229,11 @@ def test_调用点字段覆盖_bind_字段(tmp_path: Path) -> None:
     from core.logger import log
 
     setup_logging(_cfg(tmp_path))
-    log.bind(服务="clock").info("覆盖", 服务="item")
+    log.bind(服务="clock").info("覆盖", 服务="db")
     logger.remove()
 
     text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
-    assert "服务: item" in text
+    assert "服务: db" in text
     assert "服务: clock" not in text
 
 

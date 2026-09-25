@@ -2,7 +2,7 @@
 
 约定：
 - 所有字段都有默认值，克隆仓库后不做任何配置即可启动。
-- 环境变量前缀为 APP_，嵌套层级用双下划线，例如 APP_APP__PORT=9000。
+- 环境变量前缀为 APP_，嵌套层级用双下划线，例如 APP_APP__ENV=prod。
 - 通过 get_settings() 获取单例；测试中可用 get_settings.cache_clear() 重置。
 """
 
@@ -23,8 +23,6 @@ class AppSettings(BaseSettings):
     app_name: str = "aliya-cosmos"
     env: Environment = "dev"
     debug: bool = True
-    host: str = "0.0.0.0"
-    port: int = Field(default=8000, ge=1, le=65535)
 
     @property
     def is_prod(self) -> bool:

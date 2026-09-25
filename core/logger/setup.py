@@ -4,7 +4,7 @@
 - 暴露 log 对象：调用 log.info("消息", face=..., 任意字段=值) 时字段自动成树，
   并把 context.py 里的上下文自动并入字段。
 - 编排 sink 装配（委托给 sinks.py）。
-- 桥接标准库 logging（uvicorn、sqlalchemy 等）到 loguru，统一格式。
+- 桥接标准库 logging（sqlalchemy、httpx 等）到 loguru，统一格式。
 
 导入关系：setup 依赖 sinks / context / config，反向不成立，不存在导入环。
 """
@@ -25,10 +25,6 @@ from core.config import LogSettings, get_settings
 from core.logger.sinks import add_console_sink, add_file_sinks
 
 _INTERCEPTED_LOGGERS = (
-    "uvicorn",
-    "uvicorn.error",
-    "uvicorn.access",
-    "fastapi",
     "sqlalchemy",
     "asyncio",
     "httpx",
