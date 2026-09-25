@@ -78,8 +78,7 @@ def interpolate(value: object, sources: dict[str, str], *, path: str = "") -> ob
         }
     if isinstance(value, list):
         return [
-            interpolate(item, sources, path=f"{path}[{index}]")
-            for index, item in enumerate(value)
+            interpolate(item, sources, path=f"{path}[{index}]") for index, item in enumerate(value)
         ]
     return value
 

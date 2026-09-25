@@ -178,17 +178,13 @@ def test_占位符无值且无默认时启动失败(tmp_path: Path) -> None:
         _ = _load(tmp_path, "app:\n  app_name: ${MISSING_KEY}\n")
 
 
-def test_带默认值的占位符变量缺失时取默认(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_带默认值的占位符变量缺失时取默认(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("APP_ENV", raising=False)
     settings = _load(tmp_path, "app:\n  env: ${APP_ENV:dev}\n")
     assert settings.app.env == "dev"
 
 
-def test_带默认值的占位符优先取环境变量(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_带默认值的占位符优先取环境变量(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "prod")
     settings = _load(tmp_path, "app:\n  env: ${APP_ENV:dev}\n")
     assert settings.app.env == "prod"
@@ -217,9 +213,7 @@ def test_非法枚举值被pydantic拦截(tmp_path: Path) -> None:
 # ---- 单例与路径语义 ----
 
 
-def test_单例缓存且配置文件按工作目录解析(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_单例缓存且配置文件按工作目录解析(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     get_settings.cache_clear()
     try:
