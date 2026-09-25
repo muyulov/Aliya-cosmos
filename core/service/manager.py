@@ -13,8 +13,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
-import time
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -115,31 +115,58 @@ class ServiceManager:
     # ---------- 启动与关闭 ----------
 
     async def start_all(self) -> None:
-        """按依赖顺序启动全部服务，失败则回滚。"""
+        """按依赖分层启动：同层并发、层间串行；任一失败则回滚已启动的服务。"""
         self._ensure_built()
         started: list[Service] = []
 
-        for service_type in self._order:
-            service = self._instances[service_type]
-            if service.state is ServiceState.RUNNING:
+        for level in self._levels:
+            pending = [
+                service_type
+                for service_type in level
+                if self._instances[service_type].state is not ServiceState.RUNNING
+            ]
+            if not pending:
                 continue
 
-            service.state = ServiceState.STARTING
-            begin = time.perf_counter()
-            try:
-                await service.start()
-            except Exception as exc:
-                service.state = ServiceState.FAILED
-                service.log_error("服务启动失败，开始回滚", exc, 已启动=len(started))
-                await self._rollback(started)
-                raise ServiceStartError(service.label, exc) from exc
+            outcomes = await asyncio.gather(
+                *(self._start_one(self._instances[service_type]) for service_type in pending),
+                return_exceptions=True,
+            )
 
-            service.state = ServiceState.RUNNING
-            started.append(service)
-            elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
-            log.info("服务已启动", face=faces.START, 服务=service.label, 耗时=f"{elapsed_ms}ms")
+            failures: list[BaseException] = []
+            for outcome in outcomes:  # gather 保序 → 与 pending 同序
+                if isinstance(outcome, ServiceStartError):
+                    failures.append(outcome)
+                elif isinstance(outcome, BaseException):
+                    raise outcome  # 只可能是取消等非 Exception，直接冒泡
+                else:
+                    started.append(outcome)
+
+            if failures:
+                await self._rollback(started)
+                raise failures[0]  # 注册顺序最靠前的失败者，报错稳定
 
         log.info("全部服务启动完成", 服务数=len(started))
+
+    async def _start_one(self, service: Service) -> Service:
+        """启动单个服务；失败收敛成 ServiceStartError，成功返回实例供 gather 收集。
+
+        不取消兄弟任务：同层任一失败也要等整层跑完，取消会把服务停在
+        半启动状态，回滚更难判断；超时兜底在后续 Task 加上。
+        返回实例而不是 None，是为了让 asyncio.gather 的结果能直接分成
+        「实例」与「异常」两类。
+        """
+        service.state = ServiceState.STARTING
+        try:
+            await service.start()
+        except Exception as exc:
+            service.state = ServiceState.FAILED
+            service.log_error("服务启动失败", exc)
+            raise ServiceStartError(service.label, exc) from exc
+
+        service.state = ServiceState.RUNNING
+        log.info("服务已启动", face=faces.START, 服务=service.label)
+        return service
 
     async def stop_all(self) -> None:
         """按启动的逆序关闭所有服务。
