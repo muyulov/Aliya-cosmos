@@ -15,16 +15,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import AsyncGenerator, Callable, Sequence
+import time
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TypeVar, cast, get_type_hints
 
 from pydantic import BaseModel
 
-from core.config import Settings, get_settings
+from core.config import ServiceSettings, Settings, get_settings
 from core.logger import faces, log
-from core.service.base import HealthStatus, Service, ServiceState
+from core.service.base import HealthStatus, Service, ServiceState, Unset
 
 S = TypeVar("S", bound=Service)
 
@@ -49,6 +50,22 @@ def _ensure_service_subclass(candidate: object) -> None:
         raise ServiceContractError(f"{candidate!r} 不是 Service 子类，无法注册")
 
 
+def _resolve_timeout(override: float | Unset | None, default: float | None) -> float | None:
+    """三态解析：UNSET 跟随全局默认，None 表示不限制，数字即该值。"""
+    return default if isinstance(override, Unset) else override
+
+
+async def _call_with_timeout(
+    action: Callable[[], Coroutine[object, object, None]], timeout: float | None
+) -> None:
+    """按超时调用服务钩子。异常不在这里吞，由调用方决定语义。"""
+    if timeout is None:
+        await action()
+        return
+    async with asyncio.timeout(timeout):
+        await action()
+
+
 class ServiceManager:
     """服务注册表与生命周期编排器。
 
@@ -63,6 +80,10 @@ class ServiceManager:
         self._settings: Settings | None = settings
         #: 注册顺序（装配前）
         self._types: list[type[Service]] = []
+        #: 生命周期超时配置。装配前是默认值占位：启停路径必然经过 _ensure_built()，
+        #: 占位值不会被读到。反过来不能在 __init__ 里调 get_settings()——
+        #: 那会让模块级 default_manager = build_manager() 在 import 期读配置文件。
+        self._service_settings: ServiceSettings = ServiceSettings()
         #: 装配产出的实例表
         self._instances: dict[type[Service], Service] = {}
         #: 装配后固化的启动顺序，关闭时直接逆序，无需可变状态
@@ -119,7 +140,7 @@ class ServiceManager:
         self._ensure_built()
         started: list[Service] = []
 
-        for level in self._levels:
+        for index, level in enumerate(self._levels):
             pending = [
                 service_type
                 for service_type in level
@@ -128,10 +149,12 @@ class ServiceManager:
             if not pending:
                 continue
 
+            begin = time.perf_counter()
             outcomes = await asyncio.gather(
                 *(self._start_one(self._instances[service_type]) for service_type in pending),
                 return_exceptions=True,
             )
+            elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
 
             failures: list[BaseException] = []
             for outcome in outcomes:  # gather 保序 → 与 pending 同序
@@ -146,19 +169,23 @@ class ServiceManager:
                 await self._rollback(started)
                 raise failures[0]  # 注册顺序最靠前的失败者，报错稳定
 
+            log.info("同层服务启动完成", 层=index, 服务数=len(pending), 耗时=f"{elapsed_ms}ms")
+
         log.info("全部服务启动完成", 服务数=len(started))
 
     async def _start_one(self, service: Service) -> Service:
-        """启动单个服务；失败收敛成 ServiceStartError，成功返回实例供 gather 收集。
-
-        不取消兄弟任务：同层任一失败也要等整层跑完，取消会把服务停在
-        半启动状态，回滚更难判断；超时兜底在后续 Task 加上。
-        返回实例而不是 None，是为了让 asyncio.gather 的结果能直接分成
-        「实例」与「异常」两类。
-        """
+        """启动单个服务；超时与失败都收敛成 ServiceStartError。"""
         service.state = ServiceState.STARTING
+        timeout = _resolve_timeout(service.start_timeout, self._service_settings.start_timeout)
         try:
-            await service.start()
+            await _call_with_timeout(service.start, timeout)
+        except TimeoutError as exc:
+            service.state = ServiceState.FAILED
+            # 裸 TimeoutError 的 str() 是空的，会让 ServiceStartError 的消息
+            # 变成"服务 X 启动失败：TimeoutError: "，这里换成带说明的 cause。
+            cause = TimeoutError(f"启动超时，超过 {timeout}s")
+            service.log_error("服务启动超时", cause, 超时秒数=timeout)
+            raise ServiceStartError(service.label, cause) from exc
         except Exception as exc:
             service.state = ServiceState.FAILED
             service.log_error("服务启动失败", exc)
@@ -183,8 +210,13 @@ class ServiceManager:
                 continue
 
             service.state = ServiceState.STOPPING
+            timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
             try:
-                await service.stop()
+                await _call_with_timeout(service.stop, timeout)
+            except TimeoutError as exc:
+                service.state = ServiceState.FAILED
+                service.log_error("服务关闭超时", exc, 超时秒数=timeout)
+                continue
             except Exception as exc:
                 # 关闭阶段不阻断其他服务，仅记录
                 service.state = ServiceState.FAILED
@@ -197,10 +229,14 @@ class ServiceManager:
         log.info("全部服务已停止")
 
     async def _rollback(self, started: Sequence[Service]) -> None:
-        """逆序回滚本次已启动的服务。"""
+        """逆序回滚本次已启动的服务；同样套 stop 超时，但不阻断其余回滚。"""
         for service in reversed(started):
+            timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
             try:
-                await service.stop()
+                await _call_with_timeout(service.stop, timeout)
+            except TimeoutError as exc:
+                service.state = ServiceState.FAILED
+                service.log_error("回滚时服务关闭超时", exc, 超时秒数=timeout)
             except Exception as exc:
                 service.state = ServiceState.FAILED
                 service.log_error("回滚时服务关闭异常", exc)
@@ -278,6 +314,7 @@ class ServiceManager:
                 factory = cast("Callable[..., Service]", service_type)
                 instances[service_type] = factory(**kwargs)
 
+        self._service_settings = settings.service
         self._instances = instances
         self._levels = levels
         # 扁平序按层展开：仍是合法拓扑序，reversed 仍是合法逆拓扑序，
