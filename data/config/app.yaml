@@ -14,5 +14,12 @@ log:
   retention: 7 days
   compression: zip
 
+service:
+  start_timeout: 30
+  stop_timeout: 30
+
+clock:
+  tz: UTC          # 部署侧要覆盖时写成占位符：${CLOCK_TZ:UTC}
+
 # 密钥类字段以占位符声明，由 .env 提供值：
 # api_key: ${DEEPSEEK_API_KEY}

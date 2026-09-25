@@ -226,3 +226,33 @@ def test_单例缓存且配置文件按工作目录解析(tmp_path: Path, monkey
         assert get_settings().app.app_name == "from-file"
     finally:
         get_settings.cache_clear()
+
+
+# ---- 服务与时钟配置节点 ----
+
+
+def test_服务与时钟配置节点缺省值() -> None:
+    settings = Settings()
+
+    assert settings.service.start_timeout == 30.0
+    assert settings.service.stop_timeout == 30.0
+    assert settings.clock.tz == "UTC"
+
+
+def test_服务与时钟配置可被yaml覆盖(tmp_path: Path) -> None:
+    settings = _load(
+        tmp_path,
+        "service:\n  start_timeout: 1.5\n  stop_timeout: 2\nclock:\n  tz: Asia/Shanghai\n",
+    )
+
+    assert settings.service.start_timeout == 1.5
+    assert settings.service.stop_timeout == 2.0
+    assert settings.clock.tz == "Asia/Shanghai"
+
+
+def test_时钟时区可走占位符(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLOCK_TZ", "Asia/Tokyo")
+
+    settings = _load(tmp_path, "clock:\n  tz: ${CLOCK_TZ:UTC}\n")
+
+    assert settings.clock.tz == "Asia/Tokyo"

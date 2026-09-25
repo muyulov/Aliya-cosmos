@@ -1,6 +1,6 @@
 """服务层对外出口。"""
 
-from core.service.base import HealthStatus, Service, ServiceState
+from core.service.base import UNSET, HealthStatus, Service, ServiceState, Unset
 from core.service.clock_service import ClockService
 from core.service.manager import (
     CircularDependencyError,
@@ -14,6 +14,7 @@ from core.service.manager import (
 from core.service.registry import build_manager, default_manager
 
 __all__ = [
+    "UNSET",
     "CircularDependencyError",
     "ClockService",
     "HealthStatus",
@@ -25,6 +26,7 @@ __all__ = [
     "ServiceNotRegisteredError",
     "ServiceStartError",
     "ServiceState",
+    "Unset",
     "build_manager",
     "default_manager",
 ]

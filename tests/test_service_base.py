@@ -10,7 +10,7 @@ from loguru import logger
 
 from core.config import LogSettings
 from core.logger import faces, setup_logging
-from core.service.base import Service
+from core.service.base import UNSET, Service, Unset
 
 
 @pytest.fixture(autouse=True)
@@ -112,3 +112,32 @@ def test_log_error_可指定颜文字(tmp_path: Path) -> None:
 
     text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
     assert faces.THINK in text
+
+
+class StartTimeoutService(Service):
+    """覆盖 start 超时：None 表示该服务不限制。"""
+
+    start_timeout: ClassVar[float | Unset | None] = None
+
+
+class StopTimeoutService(Service):
+    """覆盖 stop 超时：写具体秒数。"""
+
+    stop_timeout: ClassVar[float | Unset | None] = 1.5
+
+
+def test_超时缺省为未覆盖哨兵() -> None:
+    assert Service.start_timeout is UNSET
+    assert Service.stop_timeout is UNSET
+    assert repr(UNSET) == "UNSET"
+
+
+def test_服务可覆盖超时三态() -> None:
+    assert StartTimeoutService.start_timeout is None
+    assert StopTimeoutService.stop_timeout == 1.5
+
+
+def test_未覆盖的那一项仍跟随全局() -> None:
+    """两个 ClassVar 各自独立，覆盖了一个不影响另一个。"""
+    assert StartTimeoutService.stop_timeout is UNSET
+    assert StopTimeoutService.start_timeout is UNSET

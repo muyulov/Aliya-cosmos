@@ -13,20 +13,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TypeVar, cast, get_type_hints
 
-from core.config import Settings, get_settings
+from pydantic import BaseModel
+
+from core.config import ServiceSettings, Settings, get_settings
 from core.logger import faces, log
-from core.service.base import HealthStatus, Service, ServiceState
+from core.service.base import HealthStatus, Service, ServiceState, Unset
 
 S = TypeVar("S", bound=Service)
 
-#: 单个服务的构造计划：（服务依赖的参数名 → 依赖类型, 需要注入配置的参数名）
-_Plan = tuple[dict[str, type[Service]], list[str]]
+
+@dataclass(slots=True)
+class _Plan:
+    """单个服务的构造计划：三类注入参数按来源分组。"""
+
+    services: dict[str, type[Service]]  # 参数名 → 依赖服务类型
+    nodes: dict[str, type[BaseModel]]  # 参数名 → 配置节点类型
+    whole_settings: list[str]  # 声明整份 Settings 的参数名
 
 
 def _ensure_service_subclass(candidate: object) -> None:
@@ -38,6 +48,22 @@ def _ensure_service_subclass(candidate: object) -> None:
     """
     if not (isinstance(candidate, type) and issubclass(candidate, Service)):
         raise ServiceContractError(f"{candidate!r} 不是 Service 子类，无法注册")
+
+
+def _resolve_timeout(override: float | Unset | None, default: float | None) -> float | None:
+    """三态解析：UNSET 跟随全局默认，None 表示不限制，数字即该值。"""
+    return default if isinstance(override, Unset) else override
+
+
+async def _call_with_timeout(
+    action: Callable[[], Coroutine[object, object, None]], timeout: float | None
+) -> None:
+    """按超时调用服务钩子。异常不在这里吞，由调用方决定语义。"""
+    if timeout is None:
+        await action()
+        return
+    async with asyncio.timeout(timeout):
+        await action()
 
 
 class ServiceManager:
@@ -54,10 +80,16 @@ class ServiceManager:
         self._settings: Settings | None = settings
         #: 注册顺序（装配前）
         self._types: list[type[Service]] = []
+        #: 生命周期超时配置。装配前是默认值占位：启停路径必然经过 _ensure_built()，
+        #: 占位值不会被读到。反过来不能在 __init__ 里调 get_settings()——
+        #: 那会让模块级 default_manager = build_manager() 在 import 期读配置文件。
+        self._service_settings: ServiceSettings = ServiceSettings()
         #: 装配产出的实例表
         self._instances: dict[type[Service], Service] = {}
         #: 装配后固化的启动顺序，关闭时直接逆序，无需可变状态
         self._order: list[type[Service]] = []
+        #: 装配后按依赖分好的层，索引越小越靠前；启动时逐层推进
+        self._levels: list[list[type[Service]]] = []
         self._built: bool = False
 
     # ---------- 注册 ----------
@@ -104,31 +136,64 @@ class ServiceManager:
     # ---------- 启动与关闭 ----------
 
     async def start_all(self) -> None:
-        """按依赖顺序启动全部服务，失败则回滚。"""
+        """按依赖分层启动：同层并发、层间串行；任一失败则回滚已启动的服务。"""
         self._ensure_built()
         started: list[Service] = []
 
-        for service_type in self._order:
-            service = self._instances[service_type]
-            if service.state is ServiceState.RUNNING:
+        for index, level in enumerate(self._levels):
+            pending = [
+                service_type
+                for service_type in level
+                if self._instances[service_type].state is not ServiceState.RUNNING
+            ]
+            if not pending:
                 continue
 
-            service.state = ServiceState.STARTING
             begin = time.perf_counter()
-            try:
-                await service.start()
-            except Exception as exc:
-                service.state = ServiceState.FAILED
-                service.log_error("服务启动失败，开始回滚", exc, 已启动=len(started))
-                await self._rollback(started)
-                raise ServiceStartError(service.label, exc) from exc
-
-            service.state = ServiceState.RUNNING
-            started.append(service)
+            outcomes = await asyncio.gather(
+                *(self._start_one(self._instances[service_type]) for service_type in pending),
+                return_exceptions=True,
+            )
             elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
-            log.info("服务已启动", face=faces.START, 服务=service.label, 耗时=f"{elapsed_ms}ms")
+
+            failures: list[BaseException] = []
+            for outcome in outcomes:  # gather 保序 → 与 pending 同序
+                if isinstance(outcome, ServiceStartError):
+                    failures.append(outcome)
+                elif isinstance(outcome, BaseException):
+                    raise outcome  # 只可能是取消等非 Exception，直接冒泡
+                else:
+                    started.append(outcome)
+
+            if failures:
+                await self._rollback(started)
+                raise failures[0]  # 注册顺序最靠前的失败者，报错稳定
+
+            log.info("同层服务启动完成", 层=index, 服务数=len(pending), 耗时=f"{elapsed_ms}ms")
 
         log.info("全部服务启动完成", 服务数=len(started))
+
+    async def _start_one(self, service: Service) -> Service:
+        """启动单个服务；超时与失败都收敛成 ServiceStartError。"""
+        service.state = ServiceState.STARTING
+        timeout = _resolve_timeout(service.start_timeout, self._service_settings.start_timeout)
+        try:
+            await _call_with_timeout(service.start, timeout)
+        except TimeoutError as exc:
+            service.state = ServiceState.FAILED
+            # 裸 TimeoutError 的 str() 是空的，会让 ServiceStartError 的消息
+            # 变成"服务 X 启动失败：TimeoutError: "，这里换成带说明的 cause。
+            cause = TimeoutError(f"启动超时，超过 {timeout}s")
+            service.log_error("服务启动超时", cause, 超时秒数=timeout)
+            raise ServiceStartError(service.label, cause) from exc
+        except Exception as exc:
+            service.state = ServiceState.FAILED
+            service.log_error("服务启动失败", exc)
+            raise ServiceStartError(service.label, exc) from exc
+
+        service.state = ServiceState.RUNNING
+        log.info("服务已启动", face=faces.START, 服务=service.label)
+        return service
 
     async def stop_all(self) -> None:
         """按启动的逆序关闭所有服务。
@@ -145,8 +210,13 @@ class ServiceManager:
                 continue
 
             service.state = ServiceState.STOPPING
+            timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
             try:
-                await service.stop()
+                await _call_with_timeout(service.stop, timeout)
+            except TimeoutError as exc:
+                service.state = ServiceState.FAILED
+                service.log_error("服务关闭超时", exc, 超时秒数=timeout)
+                continue
             except Exception as exc:
                 # 关闭阶段不阻断其他服务，仅记录
                 service.state = ServiceState.FAILED
@@ -159,10 +229,14 @@ class ServiceManager:
         log.info("全部服务已停止")
 
     async def _rollback(self, started: Sequence[Service]) -> None:
-        """逆序回滚本次已启动的服务。"""
+        """逆序回滚本次已启动的服务；同样套 stop 超时，但不阻断其余回滚。"""
         for service in reversed(started):
+            timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
             try:
-                await service.stop()
+                await _call_with_timeout(service.stop, timeout)
+            except TimeoutError as exc:
+                service.state = ServiceState.FAILED
+                service.log_error("回滚时服务关闭超时", exc, 超时秒数=timeout)
             except Exception as exc:
                 service.state = ServiceState.FAILED
                 service.log_error("回滚时服务关闭异常", exc)
@@ -218,28 +292,63 @@ class ServiceManager:
         容器保持未装配状态，不会留下半成品实例。
         """
         settings = self._settings or get_settings()
+        nodes = self._index_config_nodes(settings)
         plans = {
-            service_type: self._validate_contract(service_type) for service_type in self._types
+            service_type: self._validate_contract(service_type, nodes)
+            for service_type in self._types
         }
-        order = self._resolve_order()
+        levels = self._resolve_levels()
 
         instances: dict[type[Service], Service] = {}
-        for service_type in order:
-            service_params, settings_params = plans[service_type]
-            kwargs: dict[str, object] = {}
-            for param_name in settings_params:
-                kwargs[param_name] = settings
-            for param_name, dependency_type in service_params.items():
-                kwargs[param_name] = instances[dependency_type]
-            # 构造器参数是动态拼出来的，签名无法静态校验，故这里显式收敛类型
-            factory = cast("Callable[..., Service]", service_type)
-            instances[service_type] = factory(**kwargs)
+        for level in levels:
+            for service_type in level:
+                plan = plans[service_type]
+                kwargs: dict[str, object] = {}
+                for param_name in plan.whole_settings:
+                    kwargs[param_name] = settings
+                for param_name, node_type in plan.nodes.items():
+                    kwargs[param_name] = nodes[node_type]
+                for param_name, dependency_type in plan.services.items():
+                    kwargs[param_name] = instances[dependency_type]
+                # 构造器参数是动态拼出来的，签名无法静态校验，故这里显式收敛类型
+                factory = cast("Callable[..., Service]", service_type)
+                instances[service_type] = factory(**kwargs)
 
+        self._service_settings = settings.service
         self._instances = instances
-        self._order = order
+        self._levels = levels
+        # 扁平序按层展开：仍是合法拓扑序，reversed 仍是合法逆拓扑序，
+        # 因此 services / names 的展示顺序与 stop_all 的关闭顺序都不用改
+        self._order = [service_type for level in levels for service_type in level]
         self._built = True
 
-    def _validate_contract(self, service_type: type[Service]) -> _Plan:
+    @staticmethod
+    def _index_config_nodes(settings: Settings) -> dict[type[BaseModel], BaseModel]:
+        """按类型索引 Settings 的顶层配置节点，供构造器注解命中。
+
+        只认顶层字段、不递归：服务要拿的配置写在哪一眼可见，也避免"某个嵌套
+        深处的同类节点被静默注入"。
+        """
+        nodes: dict[type[BaseModel], BaseModel] = {}
+        for field_name, field_info in type(settings).model_fields.items():
+            # 显式收成 object：model_fields 是运行期字典，取值是 Any，
+            # 直接用会让 Any 渗进后面的 isinstance 与 cast。
+            annotation: object = field_info.annotation
+            if not (isinstance(annotation, type) and issubclass(annotation, BaseModel)):
+                continue
+            if annotation is Settings:  # 整份配置由构造器直接声明 Settings 承接
+                continue
+            if annotation in nodes:
+                raise ServiceContractError(
+                    f"配置节点类型 {annotation.__name__} 在 Settings 中出现多次，"
+                    + "容器无法确定注入哪个"
+                )
+            nodes[annotation] = cast("BaseModel", getattr(settings, field_name))
+        return nodes
+
+    def _validate_contract(
+        self, service_type: type[Service], nodes: dict[type[BaseModel], BaseModel]
+    ) -> _Plan:
         """对账 dependencies 声明与 __init__ 签名，返回该服务的构造计划。
 
         用 get_type_hints 而非裸注解：本仓库满屏 from __future__ import
@@ -248,8 +357,7 @@ class ServiceManager:
         hints = get_type_hints(service_type.__init__)
         prefix = f"{service_type.__name__}.__init__"
 
-        service_params: dict[str, type[Service]] = {}
-        settings_params: list[str] = []
+        plan = _Plan(services={}, nodes={}, whole_settings=[])
 
         for param_name, param in inspect.signature(service_type.__init__).parameters.items():
             if param_name == "self":
@@ -265,19 +373,27 @@ class ServiceManager:
                     f"{prefix} 的参数 {param_name} 缺少类型注解，容器无法注入"
                 )
             if annotation is Settings:
-                settings_params.append(param_name)
+                plan.whole_settings.append(param_name)
                 continue
             if isinstance(annotation, type) and issubclass(annotation, Service):
-                service_params[param_name] = annotation
+                plan.services[param_name] = annotation
+                continue
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                if annotation not in nodes:
+                    raise ServiceContractError(
+                        f"{prefix} 的参数 {param_name} 注解为 {annotation.__name__}，"
+                        + "它不是 Settings 的顶层字段，请在 core/config/settings.py 中注册"
+                    )
+                plan.nodes[param_name] = annotation
                 continue
 
             shown = annotation.__name__ if isinstance(annotation, type) else repr(annotation)
             raise ServiceContractError(
-                f"{prefix} 的参数 {param_name} 注解为 {shown}，" + "容器只支持 Service 与 Settings"
+                f"{prefix} 的参数 {param_name} 注解为 {shown}，" + "容器只支持 Service 与配置节点"
             )
 
         declared = set(service_type.dependencies)
-        injected = set(service_params.values())
+        injected = set(plan.services.values())
 
         undeclared = injected - declared
         if undeclared:
@@ -293,32 +409,40 @@ class ServiceManager:
                 f"{service_type.__name__} 声明了依赖 {names}，但构造器没有对应参数"
             )
 
-        return service_params, settings_params
+        return plan
 
-    def _resolve_order(self) -> list[type[Service]]:
-        """按 dependencies 做拓扑排序，检测环与未注册依赖。"""
-        order: list[type[Service]] = []
+    def _resolve_levels(self) -> list[list[type[Service]]]:
+        """按 dependencies 分层：同层之间必无依赖，可并发启动。
+
+        层号 = max(依赖层号) + 1；同层内按注册顺序排列，保证结果确定。
+        顺带完成环检测与未注册依赖检测。
+        """
+        depth: dict[type[Service], int] = {}
         visiting: set[type[Service]] = set()
-        visited: set[type[Service]] = set()
 
-        def visit(service_type: type[Service]) -> None:
-            if service_type in visited:
-                return
+        def visit(service_type: type[Service]) -> int:
+            if service_type in depth:
+                return depth[service_type]
             if service_type in visiting:
                 raise CircularDependencyError(service_type.__name__)
             if service_type not in self._types:
                 raise MissingDependencyError(service_type.__name__)
 
             visiting.add(service_type)
+            level = 0
             for dependency in service_type.dependencies:
-                visit(dependency)
+                level = max(level, visit(dependency) + 1)
             visiting.discard(service_type)
-            visited.add(service_type)
-            order.append(service_type)
+            depth[service_type] = level
+            return level
 
         for service_type in self._types:
-            visit(service_type)
-        return order
+            _ = visit(service_type)
+
+        levels: list[list[type[Service]]] = [[] for _ in range(max(depth.values(), default=-1) + 1)]
+        for service_type in self._types:  # 注册顺序 → 同层内顺序确定
+            levels[depth[service_type]].append(service_type)
+        return levels
 
 
 class ServiceError(Exception):
