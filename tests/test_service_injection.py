@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import ClassVar, cast
 
 import pytest
 from pydantic import BaseModel
 
 from core.config import AppSettings, ClockSettings, Settings, get_settings
-from core.service.base import Service
+from core.service.base import Service, ServiceState
 from core.service.clock_service import ClockService
 from core.service.manager import (
     ServiceContractError,
     ServiceManager,
     ServiceNotRegisteredError,
+    ServiceStartError,
 )
 from core.service.registry import build_manager
 
@@ -251,7 +253,7 @@ async def test_默认注册表装配后可启动并健康() -> None:
 
 async def test_健康检查用展示名() -> None:
     """展示名只有一个出口：重写 health() 时也必须走 label。"""
-    service = ClockConsumerService(ClockService())
+    service = ClockConsumerService(ClockService(ClockSettings()))
 
     health = await service.health()
 
@@ -323,3 +325,33 @@ def test_配置节点类型重复时报错() -> None:
 
     with pytest.raises(ServiceContractError, match="出现多次"):
         _ = mgr.services
+
+
+async def test_时钟按配置时区取值() -> None:
+    clock = ClockService(ClockSettings(tz="Asia/Shanghai"))
+
+    assert clock.now().utcoffset() == timedelta(hours=8)
+
+
+async def test_时钟默认时区为_utc() -> None:
+    assert ClockService(ClockSettings()).now().utcoffset() == timedelta(0)
+
+
+async def test_非法时区在启动期失败() -> None:
+    """时区解析放 start()：非法值在启动期 fail fast，不回落到 UTC 硬跑。"""
+    mgr = ServiceManager(Settings(clock=ClockSettings(tz="Not/AZone")))
+    _ = mgr.register(ClockService)
+
+    with pytest.raises(ServiceStartError) as excinfo:
+        await mgr.start_all()
+
+    assert excinfo.value.service_name == "clock"
+    assert mgr.get(ClockService).state is ServiceState.FAILED
+
+
+def test_容器把配置节点注入时钟服务() -> None:
+    own = Settings(clock=ClockSettings(tz="Asia/Shanghai"))
+    mgr = ServiceManager(own)
+    _ = mgr.register(ClockService)
+
+    assert mgr.get(ClockService).now().utcoffset() == timedelta(hours=8)
