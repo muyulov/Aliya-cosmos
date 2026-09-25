@@ -17,7 +17,10 @@ import inspect
 import time
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TypeVar, cast, get_type_hints
+
+from pydantic import BaseModel
 
 from core.config import Settings, get_settings
 from core.logger import faces, log
@@ -25,8 +28,14 @@ from core.service.base import HealthStatus, Service, ServiceState
 
 S = TypeVar("S", bound=Service)
 
-#: 单个服务的构造计划：（服务依赖的参数名 → 依赖类型, 需要注入配置的参数名）
-_Plan = tuple[dict[str, type[Service]], list[str]]
+
+@dataclass(slots=True)
+class _Plan:
+    """单个服务的构造计划：三类注入参数按来源分组。"""
+
+    services: dict[str, type[Service]]  # 参数名 → 依赖服务类型
+    nodes: dict[str, type[BaseModel]]  # 参数名 → 配置节点类型
+    whole_settings: list[str]  # 声明整份 Settings 的参数名
 
 
 def _ensure_service_subclass(candidate: object) -> None:
@@ -218,18 +227,22 @@ class ServiceManager:
         容器保持未装配状态，不会留下半成品实例。
         """
         settings = self._settings or get_settings()
+        nodes = self._index_config_nodes(settings)
         plans = {
-            service_type: self._validate_contract(service_type) for service_type in self._types
+            service_type: self._validate_contract(service_type, nodes)
+            for service_type in self._types
         }
         order = self._resolve_order()
 
         instances: dict[type[Service], Service] = {}
         for service_type in order:
-            service_params, settings_params = plans[service_type]
+            plan = plans[service_type]
             kwargs: dict[str, object] = {}
-            for param_name in settings_params:
+            for param_name in plan.whole_settings:
                 kwargs[param_name] = settings
-            for param_name, dependency_type in service_params.items():
+            for param_name, node_type in plan.nodes.items():
+                kwargs[param_name] = nodes[node_type]
+            for param_name, dependency_type in plan.services.items():
                 kwargs[param_name] = instances[dependency_type]
             # 构造器参数是动态拼出来的，签名无法静态校验，故这里显式收敛类型
             factory = cast("Callable[..., Service]", service_type)
@@ -239,7 +252,33 @@ class ServiceManager:
         self._order = order
         self._built = True
 
-    def _validate_contract(self, service_type: type[Service]) -> _Plan:
+    @staticmethod
+    def _index_config_nodes(settings: Settings) -> dict[type[BaseModel], BaseModel]:
+        """按类型索引 Settings 的顶层配置节点，供构造器注解命中。
+
+        只认顶层字段、不递归：服务要拿的配置写在哪一眼可见，也避免"某个嵌套
+        深处的同类节点被静默注入"。
+        """
+        nodes: dict[type[BaseModel], BaseModel] = {}
+        for field_name, field_info in type(settings).model_fields.items():
+            # 显式收成 object：model_fields 是运行期字典，取值是 Any，
+            # 直接用会让 Any 渗进后面的 isinstance 与 cast。
+            annotation: object = field_info.annotation
+            if not (isinstance(annotation, type) and issubclass(annotation, BaseModel)):
+                continue
+            if annotation is Settings:  # 整份配置由构造器直接声明 Settings 承接
+                continue
+            if annotation in nodes:
+                raise ServiceContractError(
+                    f"配置节点类型 {annotation.__name__} 在 Settings 中出现多次，"
+                    + "容器无法确定注入哪个"
+                )
+            nodes[annotation] = cast("BaseModel", getattr(settings, field_name))
+        return nodes
+
+    def _validate_contract(
+        self, service_type: type[Service], nodes: dict[type[BaseModel], BaseModel]
+    ) -> _Plan:
         """对账 dependencies 声明与 __init__ 签名，返回该服务的构造计划。
 
         用 get_type_hints 而非裸注解：本仓库满屏 from __future__ import
@@ -248,8 +287,7 @@ class ServiceManager:
         hints = get_type_hints(service_type.__init__)
         prefix = f"{service_type.__name__}.__init__"
 
-        service_params: dict[str, type[Service]] = {}
-        settings_params: list[str] = []
+        plan = _Plan(services={}, nodes={}, whole_settings=[])
 
         for param_name, param in inspect.signature(service_type.__init__).parameters.items():
             if param_name == "self":
@@ -265,19 +303,27 @@ class ServiceManager:
                     f"{prefix} 的参数 {param_name} 缺少类型注解，容器无法注入"
                 )
             if annotation is Settings:
-                settings_params.append(param_name)
+                plan.whole_settings.append(param_name)
                 continue
             if isinstance(annotation, type) and issubclass(annotation, Service):
-                service_params[param_name] = annotation
+                plan.services[param_name] = annotation
+                continue
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                if annotation not in nodes:
+                    raise ServiceContractError(
+                        f"{prefix} 的参数 {param_name} 注解为 {annotation.__name__}，"
+                        + "它不是 Settings 的顶层字段，请在 core/config/settings.py 中注册"
+                    )
+                plan.nodes[param_name] = annotation
                 continue
 
             shown = annotation.__name__ if isinstance(annotation, type) else repr(annotation)
             raise ServiceContractError(
-                f"{prefix} 的参数 {param_name} 注解为 {shown}，" + "容器只支持 Service 与 Settings"
+                f"{prefix} 的参数 {param_name} 注解为 {shown}，" + "容器只支持 Service 与配置节点"
             )
 
         declared = set(service_type.dependencies)
-        injected = set(service_params.values())
+        injected = set(plan.services.values())
 
         undeclared = injected - declared
         if undeclared:
@@ -293,7 +339,7 @@ class ServiceManager:
                 f"{service_type.__name__} 声明了依赖 {names}，但构造器没有对应参数"
             )
 
-        return service_params, settings_params
+        return plan
 
     def _resolve_order(self) -> list[type[Service]]:
         """按 dependencies 做拓扑排序，检测环与未注册依赖。"""

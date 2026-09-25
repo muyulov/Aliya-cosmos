@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import ClassVar, cast
 
 import pytest
+from pydantic import BaseModel
 
-from core.config import AppSettings, Settings, get_settings
+from core.config import AppSettings, ClockSettings, Settings, get_settings
 from core.service.base import Service
 from core.service.clock_service import ClockService
 from core.service.manager import (
@@ -268,3 +269,57 @@ def test_配置注入的是容器持有的实例而非全局单例() -> None:
     assert injected is own
     assert injected is not get_settings()
     assert injected.app.app_name == "容器持有"
+
+
+class NodeConsumerService(Service):
+    """声明配置节点依赖的服务。"""
+
+    name: ClassVar[str] = "node-consumer"
+
+    def __init__(self, config: ClockSettings) -> None:
+        super().__init__()
+        self.config: ClockSettings = config
+
+
+class UnregisteredNode(BaseModel):
+    """故意不挂到 Settings 上的配置模型。"""
+
+
+class UnknownNodeService(Service):
+    """注解了一个没注册到 Settings 的配置节点。"""
+
+    name: ClassVar[str] = "unknown-node"
+
+    def __init__(self, config: UnregisteredNode) -> None:
+        super().__init__()
+        self.config: UnregisteredNode = config
+
+
+class DuplicateNodeSettings(Settings):
+    """两个字段同类型：容器无法确定注入哪个。"""
+
+    extra_clock: ClockSettings = ClockSettings()
+
+
+def test_配置节点按类型注入() -> None:
+    own = Settings(clock=ClockSettings(tz="Asia/Shanghai"))
+    mgr = ServiceManager(own)
+    _ = mgr.register(NodeConsumerService)
+
+    assert mgr.get(NodeConsumerService).config is own.clock
+
+
+def test_配置节点未注册到_settings_时报错() -> None:
+    mgr = ServiceManager()
+    _ = mgr.register(UnknownNodeService)
+
+    with pytest.raises(ServiceContractError, match="顶层字段"):
+        _ = mgr.services
+
+
+def test_配置节点类型重复时报错() -> None:
+    mgr = ServiceManager(DuplicateNodeSettings(extra_clock=ClockSettings()))
+    _ = mgr.register(NodeConsumerService)
+
+    with pytest.raises(ServiceContractError, match="出现多次"):
+        _ = mgr.services
