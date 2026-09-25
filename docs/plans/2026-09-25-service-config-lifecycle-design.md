@@ -22,7 +22,7 @@
 | 3 | 配置索引是否递归 | 只认 `Settings` **顶层**字段 | 递归嵌套（某个深处的同类节点被静默注入，排查困难） |
 | 4 | 类型歧义怎么处理 | 同类型出现多次 → `ServiceContractError` fail fast | 取第一个（静默行为，出错点离病因太远） |
 | 5 | 超时默认值放哪 | 新增 `ServiceSettings` 节点（`Settings.service`） | 塞进 `AppSettings`（生命周期关注点混进 app 节点）；模块常量（运维无法调） |
-| 6 | 服务级超时覆盖怎么表达 | `ClassVar` **三态** + `UNSET` 哨兵：`UNSET` 跟随全局 / `None` 不限制 / 数字即该值 | 只用 `None` 表"不限时"（无法表达"未覆盖"）；只用默认值（无法表达"不限时"） |
+| 6 | 服务级超时覆盖怎么表达 | `ClassVar` **三态** + `UNSET` 哨兵：`UNSET` 跟随全局 / `None` 不限制 / 数字即该值；哨兵类**公开**（`Unset`） | 只用 `None` 表"不限时"（无法表达"未覆盖"）；只用默认值（无法表达"不限时"）；哨兵私有（子类写不全联合类型，窄化覆盖会被 basedpyright 判为不变型违规） |
 | 7 | B 做到哪一步 | 超时 + 同层并发启动 | 再加失败重试（掩盖配置错误，与回滚语义冲突）；并发停止（风险高收益低） |
 | 8 | 启动失败时同层其余服务怎么处理 | 等**整层跑完**再判成败，不取消已在跑的启动 | 立即取消兄弟任务（会把服务留在半启动状态，回滚更难判断） |
 | 9 | 失败时抛哪个异常 | 取注册顺序**最靠前**的失败者，保证多次运行报错稳定 | 抛"第一个完成的失败者"（并发下不确定，测试与排查都难受） |
@@ -257,17 +257,17 @@ class ClockService(Service):
 
 ### 4.3 超时三态与解析
 
-`core/service/base.py` 新增哨兵与两个 `ClassVar`：
+`core/service/base.py` 新增哨兵与两个 `ClassVar`。**哨兵类必须公开**（`Unset` 而非 `_Unset`）：basedpyright 对可变量按不变型检查，子类把 `ClassVar[float | None | Unset]` 窄化成 `ClassVar[float | None]` 会报 `reportIncompatibleVariableOverride`（已用探针实测），因此服务作者覆盖时必须**写全联合类型**，也就必须能 import 到这个类名。
 
 ```python
-class _Unset:
-    """「未覆盖」哨兵。
+class Unset:
+    """「未覆盖」哨兵。公开成类名是为了让子类能写全联合类型注解。
 
     ClassVar 的默认值无法同时表达「未覆盖，跟随全局」与「显式设为 None，
     即不限制」两件事，因此引入一个只有身份意义的哨兵。
     """
 
-    __slots__ = ()
+    __slots__: ClassVar[tuple[str, ...]] = ()
 
     @override
     def __repr__(self) -> str:
@@ -275,24 +275,33 @@ class _Unset:
 
 
 #: 服务未覆盖该项超时，沿用 ServiceSettings 里的默认值
-UNSET: Final[_Unset] = _Unset()
+UNSET: Final[Unset] = Unset()
 ```
 
 ```python
 class Service:
     #: start 超时（秒）覆盖；UNSET 跟随全局，None 不限制，数字即该值
-    start_timeout: ClassVar[float | None | _Unset] = UNSET
+    start_timeout: ClassVar[float | None | Unset] = UNSET
 
     #: stop 超时（秒）覆盖；语义同 start_timeout
-    stop_timeout: ClassVar[float | None | _Unset] = UNSET
+    stop_timeout: ClassVar[float | None | Unset] = UNSET
+```
+
+服务作者的三种写法：
+
+```python
+class SlowService(Service):
+    start_timeout: ClassVar[float | None | Unset] = 300.0  # 覆盖成 5 分钟
+    stop_timeout: ClassVar[float | None | Unset] = None    # 单独关掉超时
+    # 不写则沿用全局默认（基类的 UNSET）
 ```
 
 解析收在一个模块级函数里（`manager.py`，私有），`isinstance` 收窄后类型干净：
 
 ```python
-def _resolve_timeout(override: float | None | _Unset, default: float | None) -> float | None:
+def _resolve_timeout(override: float | None | Unset, default: float | None) -> float | None:
     """三态解析：UNSET 跟随全局默认，None 表示不限制，数字即该值。"""
-    return default if isinstance(override, _Unset) else override
+    return default if isinstance(override, Unset) else override
 ```
 
 超时靠 `asyncio.timeout`（3.11+，项目要求 3.12）实现，抽出两个对称的小函数给启动 / 关闭两处复用：
@@ -384,10 +393,10 @@ async def _call_with_timeout(action: Callable[[], Coroutine[object, object, None
 | --- | --- |
 | `core/config/settings.py` | 新增 `ServiceSettings` / `ClockSettings`，`Settings` 加 `service` / `clock` 字段 |
 | `core/config/__init__.py` | 导出两个新配置类 |
-| `core/service/base.py` | 新增 `_Unset` / `UNSET` 与 `start_timeout` / `stop_timeout` 两个 `ClassVar` |
+| `core/service/base.py` | 新增 `Unset` / `UNSET` 与 `start_timeout` / `stop_timeout` 两个 `ClassVar` |
 | `core/service/manager.py` | 改动主体：`_Plan` dataclass、配置索引、`_resolve_levels`、同层并发、超时 |
 | `core/service/clock_service.py` | 构造器接收 `ClockSettings`，`now()` 走配置时区，`start()` 校验时区 |
-| `core/service/__init__.py` | 导出 `UNSET` |
+| `core/service/__init__.py` | 导出 `Unset` 与 `UNSET` |
 | `data/config/app.yaml` | 补 `service:` / `clock:` 两段（值等于默认） |
 | `README.md` | 配置项表格补 3 行；服务章节约定表补配置节点注入、超时三态、同层并发 |
 | `tests/test_service_injection.py` | 补 A 的用例；同步改 `ClockService()` 的直接构造 |
@@ -414,7 +423,7 @@ async def _call_with_timeout(action: Callable[[], Coroutine[object, object, None
 | 同层并发启动 | 两个无依赖服务，各自 `start` 里先 `set(自己已进入)`，再 `await asyncio.wait_for(对端已进入, timeout=1)`。串行则对端事件永不置位 → 超时失败。**用事件互等判定并发，不用 sleep 断言耗时**，避免时间抖动 |
 | 跨层不并发 | B 依赖 A，两边把 `enter` / `exit` 记进列表，断言 `exit:A` 早于 `enter:B` |
 | 启动超时触发回滚 | 全局 `start_timeout=0.05`，服务 `start` 里 `sleep(10)` → `ServiceStartError`、该服务 FAILED、已启动的依赖被 stop |
-| 服务级超时覆盖全局 | 全局 `0.05`，该服务 `start_timeout: ClassVar[float \| None] = None`，`sleep(0.1)` 仍成功 |
+| 服务级超时覆盖全局 | 全局 `0.05`，该服务 `start_timeout: ClassVar[float \| None \| Unset] = None`，`sleep(0.1)` 仍成功 |
 | `UNSET` 跟随全局 | 不写 `ClassVar`，全局 `0.05` 时同样超时 |
 | 关闭超时不影响其他服务 | `stop_timeout=0.05`，坏服务 `stop` 里 `sleep(10)` → `stop_all()` 不抛错、该服务 FAILED、其余服务 STOPPED |
 | 失败者取注册顺序最靠前的 | 同层两个失败服务 → `ServiceStartError.service_name` 等于先注册的那个 |
