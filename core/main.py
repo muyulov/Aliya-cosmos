@@ -38,7 +38,13 @@ def main() -> None:
     settings = get_settings()
     setup_logging(settings.log)
 
-    log.info("应用启动中", face=faces.START, 应用=settings.app.app_name, 环境=settings.app.env)
+    log.info(
+        "应用启动中",
+        face=faces.START,
+        应用=settings.app.app_name,
+        环境=settings.app.env,
+        配置源=settings.config_source,
+    )
     asyncio.run(_run(build_manager(settings)))
     log.info("应用已关闭", face=faces.BYE, 应用=settings.app.app_name)
 
