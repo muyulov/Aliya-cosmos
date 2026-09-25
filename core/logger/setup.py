@@ -119,7 +119,12 @@ log = Log()
 
 
 class InterceptHandler(logging.Handler):
-    """把标准库 logging 记录转发给 loguru。"""
+    """把标准库 logging 记录转发给 loguru。
+
+    这里显式 `logger.bind` 而不是裸 `logger.log`：桥接路径绕过了 `Log._emit`，
+    是「上下文自动携带」唯一的旁路，必须自己把 contextvars 里的业务维度
+    （request_id 等）与颜文字合流，否则第三方库日志在并发场景无法归因。
+    """
 
     @override
     def emit(self, record: logging.LogRecord) -> None:
@@ -134,12 +139,16 @@ class InterceptHandler(logging.Handler):
             frame = frame.f_back
             depth += 1
 
-        logger.opt(depth=depth, exception=record.exc_info).log(level_name, record.getMessage())
+        logger.bind(
+            face=faces_module.DEFAULT_BY_LEVEL.get(level_name.upper(), ""),
+            fields=context_module.current(),
+        ).opt(depth=depth, exception=record.exc_info).log(level_name, record.getMessage())
 
 
 def setup_logging(settings: LogSettings | None = None) -> None:
     """装配日志。可重复调用，会先移除已有 sink。"""
-    cfg = settings or get_settings().log
+    # 同上：显式判 None，避免配置模型定义 __bool__ / __len__ 后静默回退
+    cfg = settings if settings is not None else get_settings().log
 
     # 返回的 handler id 在运行期不需要，显式赋给 _ 表示有意忽略
     _ = logger.remove()

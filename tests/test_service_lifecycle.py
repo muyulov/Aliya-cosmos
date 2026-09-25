@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import ClassVar, override
 
 import pytest
+from loguru import logger
 
-from core.config import ServiceSettings, Settings
+from core.config import LogSettings, ServiceSettings, Settings
+from core.logger import setup_logging
 from core.service.base import UNSET, Service, ServiceState, Unset
 from core.service.manager import ServiceManager, ServiceStartError
 
@@ -22,6 +25,13 @@ def _reset_probe_state() -> None:
     """每个用例重置探针状态：事件按需新建，记录清空。"""
     entered.clear()
     order_log.clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_logger():
+    """用例结束后清掉 loguru sink，避免文件句柄与日志内容泄漏到其他测试。"""
+    yield
+    _ = logger.remove()
 
 
 class GateA(Service):
@@ -147,6 +157,11 @@ def _settings(start_timeout: float | None = 30.0, stop_timeout: float | None = 3
     return Settings(service=ServiceSettings(start_timeout=start_timeout, stop_timeout=stop_timeout))
 
 
+def _log_cfg(tmp_path: Path) -> LogSettings:
+    """构造只关心落盘位置的日志配置。"""
+    return LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day")
+
+
 class SlowStartService(Service):
     """start 里睡很久，用来触发超时。"""
 
@@ -197,6 +212,78 @@ class QuickService(Service):
     """正常启停的对照服务。"""
 
     name: ClassVar[str] = "quick"
+
+
+class CancelProbeQuick(Service):
+    """取消场景：第 0 层先成功启动，用来验证取消后它仍被回滚。"""
+
+    name: ClassVar[str] = "cancel-quick"
+
+    @override
+    async def stop(self) -> None:
+        order_log.append("stop:cancel-quick")
+
+
+class CancelProbeHanging(Service):
+    """取消场景：第 1 层挂在 start 里，让 gather 被取消时仍处于等待。"""
+
+    name: ClassVar[str] = "cancel-hanging"
+    dependencies: ClassVar[tuple[type[Service], ...]] = (CancelProbeQuick,)
+
+    def __init__(self, quick: CancelProbeQuick) -> None:
+        super().__init__()
+        self._quick: CancelProbeQuick = quick
+
+    @override
+    async def start(self) -> None:
+        entered.setdefault("cancel-hanging", asyncio.Event()).set()
+        _ = await asyncio.Event().wait()
+
+
+class HalfStartedService(Service):
+    """start 里先占资源再抛错：验证失败者也会被 stop() 回收半途资源。"""
+
+    name: ClassVar[str] = "half-started"
+
+    @override
+    async def start(self) -> None:
+        order_log.append("open:half-started")
+        msg = "建到一半炸了"
+        raise RuntimeError(msg)
+
+    @override
+    async def stop(self) -> None:
+        order_log.append("close:half-started")
+
+
+class HalfStartedInner(Service):
+    """混合场景：第 0 层成功启动。"""
+
+    name: ClassVar[str] = "half-inner"
+
+    @override
+    async def stop(self) -> None:
+        order_log.append("stop:half-inner")
+
+
+class HalfStartedOuter(Service):
+    """混合场景：第 1 层启动失败。"""
+
+    name: ClassVar[str] = "half-outer"
+    dependencies: ClassVar[tuple[type[Service], ...]] = (HalfStartedInner,)
+
+    def __init__(self, inner: HalfStartedInner) -> None:
+        super().__init__()
+        self._inner: HalfStartedInner = inner
+
+    @override
+    async def start(self) -> None:
+        msg = "外层炸了"
+        raise RuntimeError(msg)
+
+    @override
+    async def stop(self) -> None:
+        order_log.append("stop:half-outer")
 
 
 async def test_启动超时判定为失败() -> None:
@@ -257,10 +344,70 @@ async def test_关闭超时不阻断其他服务() -> None:
     assert mgr.get(QuickService).state is ServiceState.STOPPED
 
 
-async def test_关闭超时会写进日志字段() -> None:
+async def test_关闭超时会写进日志字段(tmp_path: Path) -> None:
     """超时日志必须带 超时秒数，否则排查时看不出配的是多少。"""
+    cfg = _log_cfg(tmp_path)
+    setup_logging(cfg)
+
     mgr = ServiceManager(_settings(stop_timeout=0.05))
     _ = mgr.register(HangingStopService)
 
     await mgr.start_all()
     await mgr.stop_all()
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "[hanging-stop] 服务关闭超时" in text
+    assert "超时秒数: 0.05" in text
+
+
+async def test_启动被取消时回滚已启动的服务() -> None:
+    """回归：gather 自身被取消时拿不到 outcomes，已启动的服务仍须被回滚。
+
+    `lifespan()` 的 `__aenter__` 抛错时 `__aexit__` 不会执行、`stop_all` 也不会
+    被调用，因此回滚只能在 `start_all` 内部完成。第 0 层先成功，第 1 层挂住后
+    取消任务：此时 `started` 只能靠 `_start_one` 在协程内部登记才拿得到。
+    """
+    mgr = ServiceManager()
+    _ = mgr.register(CancelProbeQuick)
+    _ = mgr.register(CancelProbeHanging)
+
+    task = asyncio.create_task(mgr.start_all())
+    # 第 1 层的 start 被调用，说明第 0 层 gather 已返回、登记已完成（层间串行）
+    _ = await entered.setdefault("cancel-hanging", asyncio.Event()).wait()
+    _ = task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = await task
+
+    assert "stop:cancel-quick" in order_log
+    assert mgr.get(CancelProbeQuick).state is ServiceState.STOPPED
+    assert mgr.get(CancelProbeHanging).state is ServiceState.FAILED
+
+
+async def test_启动失败的服务自身也会被回滚清理() -> None:
+    """回归：失败者不在「已启动」名单里，但它同样需要 stop() 回收半途资源。"""
+    mgr = ServiceManager()
+    _ = mgr.register(HalfStartedService)
+
+    with pytest.raises(ServiceStartError) as excinfo:
+        await mgr.start_all()
+
+    assert excinfo.value.service_name == "half-started"
+    assert order_log == ["open:half-started", "close:half-started"]
+    # 已被清理，但启动失败是它的终态标记，不该被抹成 STOPPED
+    assert mgr.get(HalfStartedService).state is ServiceState.FAILED
+
+
+async def test_回滚同时覆盖成功者与失败者() -> None:
+    """回滚名单含失败者，且按「动过」的顺序逆序清理。"""
+    mgr = ServiceManager()
+    _ = mgr.register(HalfStartedInner)
+    _ = mgr.register(HalfStartedOuter)
+
+    with pytest.raises(ServiceStartError):
+        await mgr.start_all()
+
+    assert order_log == ["stop:half-outer", "stop:half-inner"]
+    assert mgr.get(HalfStartedInner).state is ServiceState.STOPPED
+    assert mgr.get(HalfStartedOuter).state is ServiceState.FAILED

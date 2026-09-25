@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from types import TracebackType
@@ -31,6 +32,7 @@ def make_record(
     level: str = "INFO",
     face: str = "",
     exception: object = None,
+    extra_fields: dict[str, object] | None = None,
     **fields: object,
 ) -> Record:
     """构造一个字段形状与 loguru Record 一致的最小记录。
@@ -38,13 +40,17 @@ def make_record(
     loguru 的 Record 是 TypedDict，渲染函数按 record["key"] 取值，
     因此这里直接造 dict。Record 的必填字段远多于渲染所需，故用 cast
     声明这是有意为之的测试替身。
+
+    extra_fields 是给「与保留键同名的业务字段」留的逃生口：message /
+    level / face / exception 已被具名形参占用，普通 kwargs 传不进这些键。
     """
+    merged: dict[str, object] = {**fields, **(extra_fields or {})}
     raw: dict[str, object] = {
         "message": message,
         "level": FakeLevel(level),
         "time": datetime(2026, 8, 27, 23, 9, 52),
         "exception": exception,
-        "extra": {"face": face, "fields": fields},
+        "extra": {"face": face, "fields": merged},
     }
     return cast(Record, cast(object, raw))
 
@@ -103,14 +109,48 @@ def test_级别标记映射() -> None:
 
 
 def test_json_模式字段平铺() -> None:
-    import json
-
     raw = format_json(make_record("调用开始", face=faces.START, 模型="Flash"))
     payload = cast("dict[str, object]", json.loads(raw))
     assert payload["level"] == "INFO"
     assert payload["message"] == "调用开始"
     assert payload["模型"] == "Flash"
     assert "fields" not in payload
+
+
+def test_json_模式下业务字段不能覆盖保留键() -> None:
+    """回归：与保留键同名的业务字段一律让位，不得污染采集侧的字段契约。"""
+    record = make_record(
+        "真实消息",
+        level="ERROR",
+        extra_fields={
+            "message": "伪造",
+            "level": "伪造",
+            "time": "伪造",
+            "face": "伪造",
+            "exception": "伪造",
+            "模型": "Flash",
+        },
+    )
+
+    payload = cast("dict[str, object]", json.loads(format_json(record)))
+
+    assert payload["message"] == "真实消息"
+    assert payload["level"] == "ERROR"
+    assert payload["time"] == "2026-08-27 23:09:52"
+    assert payload["face"] == faces.BOOM  # ERROR 级别的默认颜文字
+    assert payload["模型"] == "Flash"
+    assert "exception" not in payload
+
+
+def test_json_模式下堆栈不被业务字段覆盖() -> None:
+    """有堆栈时同样以框架渲染的 exception 为准。"""
+    stack = format_exception(make_record(exception=_make_exception()))
+    record = make_record("未捕获异常", extra_fields={"exception": "伪造堆栈"})
+
+    payload = cast("dict[str, object]", json.loads(format_json(record, stack=stack)))
+
+    assert isinstance(payload["exception"], str)
+    assert "KeyError" in payload["exception"]
 
 
 def test_着色只包裹第一行() -> None:
@@ -180,8 +220,6 @@ def test_堆栈渲染不会把_exception_塞进字段() -> None:
 
 
 def test_json_模式下堆栈作为独立键且保持单行() -> None:
-    import json
-
     stack = format_exception(make_record(exception=_make_exception()))
     raw = format_json(make_record("未捕获异常"), stack=stack)
     assert "\n" not in raw

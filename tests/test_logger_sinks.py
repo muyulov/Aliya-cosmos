@@ -190,6 +190,25 @@ def test_第三方库日志经桥接后仍统一格式(tmp_path: Path) -> None:
     assert "第三方库日志" in text
 
 
+def test_桥接日志自动携带上下文(tmp_path: Path) -> None:
+    """回归：第三方库日志也要带上 request_id，否则并发场景无法归因。
+
+    桥接路径绕过了 `Log._emit`，上下文与颜文字都得在这里自行合流。
+    """
+    from core.logger import context
+
+    cfg = _cfg(tmp_path, level="DEBUG")
+    setup_logging(cfg)
+    with context.request_scope("bridged-rid"):
+        logging.getLogger("sqlalchemy.engine").info("桥接日志")
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "桥接日志" in text
+    assert "bridged-rid" in text
+    assert "request_id" in text
+
+
 def test_bind_附加基础字段(tmp_path: Path) -> None:
     from core.logger import log
 

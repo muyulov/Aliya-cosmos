@@ -8,6 +8,7 @@ from typing import ClassVar, cast
 import pytest
 from pydantic import BaseModel
 
+import core.service.manager as manager_module
 from core.config import AppSettings, ClockSettings, Settings, get_settings
 from core.service.base import Service, ServiceState
 from core.service.clock_service import ClockService
@@ -273,6 +274,41 @@ def test_配置注入的是容器持有的实例而非全局单例() -> None:
     assert injected.app.app_name == "容器持有"
 
 
+def test_未传配置时回退到全局单例(monkeypatch: pytest.MonkeyPatch) -> None:
+    """容器未持有配置时走全局单例。
+
+    判定必须写 `is not None` 而不是 `or`：配置模型一旦定义了 __bool__ /
+    __len__，空配置会被判为假而静默回退到这里，本用例守住这条回退路径。
+    """
+    own = Settings(app=AppSettings(app_name="全局单例"))
+    monkeypatch.setattr(manager_module, "get_settings", lambda: own)
+
+    mgr = ServiceManager()
+    _ = mgr.register(SettingsAwareService)
+
+    assert mgr.get(SettingsAwareService).settings is own
+
+
+class FalsySettings(Settings):
+    """故意判定为假的配置：用真值判断就会被误当成「未传配置」。"""
+
+    def __bool__(self) -> bool:
+        return False
+
+
+def test_假值配置不会被当成未传() -> None:
+    """回归：容器判定「是否持有配置」必须用 `is not None`。
+
+    改回 `settings or get_settings()` 时本用例会红——假值配置会被丢弃，
+    注入的变成全局单例（或默认值），而不是容器持有的那份。
+    """
+    own = FalsySettings(app=AppSettings(app_name="假值配置"))
+    mgr = ServiceManager(own)
+    _ = mgr.register(SettingsAwareService)
+
+    assert mgr.get(SettingsAwareService).settings is own
+
+
 class NodeConsumerService(Service):
     """声明配置节点依赖的服务。"""
 
@@ -315,7 +351,7 @@ def test_配置节点未注册到_settings_时报错() -> None:
     mgr = ServiceManager()
     _ = mgr.register(UnknownNodeService)
 
-    with pytest.raises(ServiceContractError, match="顶层字段"):
+    with pytest.raises(ServiceContractError, match="顶层节点索引"):
         _ = mgr.services
 
 
@@ -324,6 +360,51 @@ def test_配置节点类型重复时报错() -> None:
     _ = mgr.register(NodeConsumerService)
 
     with pytest.raises(ServiceContractError, match="出现多次"):
+        _ = mgr.services
+
+
+class CacheSettings(BaseModel):
+    """可选节点探针用的配置模型。"""
+
+    size: int = 100
+
+
+class CacheConsumerService(Service):
+    """声明可选配置节点依赖的服务。"""
+
+    name: ClassVar[str] = "cache-consumer"
+
+    def __init__(self, config: CacheSettings) -> None:
+        super().__init__()
+        self.config: CacheSettings = config
+
+
+class OptionalNodeSettings(Settings):
+    """可选配置节点，当前有值。"""
+
+    cache: CacheSettings | None = CacheSettings(size=42)
+
+
+class NoneValuedNodeSettings(Settings):
+    """可选配置节点，当前值为 None。"""
+
+    cache: CacheSettings | None = None
+
+
+def test_可选配置节点有值时按类型注入() -> None:
+    """注解写 `X | None` 但当前有值时，仍应能按类型注入。"""
+    mgr = ServiceManager(OptionalNodeSettings())
+    _ = mgr.register(CacheConsumerService)
+
+    assert mgr.get(CacheConsumerService).config.size == 42
+
+
+def test_可选配置节点为_none_时报错并说明原因() -> None:
+    """回归：原来一律报「不是顶层字段」，把「可选且为 None」误导成「没挂上去」。"""
+    mgr = ServiceManager(NoneValuedNodeSettings())
+    _ = mgr.register(CacheConsumerService)
+
+    with pytest.raises(ServiceContractError, match="为 None"):
         _ = mgr.services
 
 

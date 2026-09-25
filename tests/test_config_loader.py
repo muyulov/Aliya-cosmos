@@ -119,6 +119,15 @@ def test_yaml顶层不是映射时报错(tmp_path: Path) -> None:
         _ = read_yaml(config_file)
 
 
+def test_yaml编码非法时报_ConfigError(tmp_path: Path) -> None:
+    """回归：非 UTF-8 的配置文件也要收敛成 ConfigError，而不是裸 UnicodeDecodeError。"""
+    config_file = tmp_path / "app.yaml"
+    _ = config_file.write_bytes(b"app: \xff\xfe\n")
+
+    with pytest.raises(ConfigError, match="UTF-8"):
+        _ = read_yaml(config_file)
+
+
 # ---- 文件级加载 ----
 
 

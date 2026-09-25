@@ -47,6 +47,9 @@ LEVEL_COLORS: dict[str, str] = {
 RESET = "\x1b[0m"
 FIELD_INDENT = "    "
 
+#: JSON 输出的保留键：由日志框架写入，业务字段同名时一律让位
+RESERVED_KEYS: frozenset[str] = frozenset({"time", "level", "message", "face", "exception"})
+
 
 def _pick_face(face: object, level_name: str) -> str:
     """选出颜文字：显式指定优先，否则按级别取默认值。"""
@@ -106,7 +109,12 @@ def _stack_lines(stack: str | None) -> list[str]:
 
 
 def format_json(record: Record, *, stack: str | None = None) -> str:
-    """JSON 格式化，字段平铺到顶层；堆栈作为独立键存放。"""
+    """JSON 格式化，字段平铺到顶层；堆栈作为独立键存放。
+
+    保留键（见 RESERVED_KEYS）由日志框架写入：与它们同名的业务字段一律让位，
+    否则 `log.info("消息", level="伪造")` 这类误用会污染采集侧的字段契约。
+    树形格式没有这个问题——业务字段独立成行，不与元数据混排。
+    """
     extra = _extra_of(record)
     level_name = _level_name_of(record)
 
@@ -116,7 +124,10 @@ def format_json(record: Record, *, stack: str | None = None) -> str:
         "message": _message_of(record),
         "face": _pick_face(extra.get("face"), level_name),
     }
-    payload.update(_fields_of(extra))
+    # 逐键写入而不是 payload.update(...)：保留键不能被业务字段覆盖
+    for key, value in _fields_of(extra).items():
+        if key not in RESERVED_KEYS:
+            payload[key] = value
 
     if stack:
         payload["exception"] = stack
@@ -185,6 +196,7 @@ __all__ = [
     "FIELD_INDENT",
     "LEVEL_COLORS",
     "LEVEL_TAGS",
+    "RESERVED_KEYS",
     "colorize",
     "format_exception",
     "format_json",

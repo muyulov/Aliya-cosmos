@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from collections.abc import Callable
+from types import FrameType
 
 from core.config import get_settings
 from core.logger import faces, log, setup_logging
@@ -30,8 +32,36 @@ async def _wait_for_shutdown() -> None:
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        _ = loop.add_signal_handler(sig, stop.set)
+        _ = _register_signal(loop, sig, stop.set)
     _ = await stop.wait()
+
+
+def _register_signal(
+    loop: asyncio.AbstractEventLoop, sig: signal.Signals, on_signal: Callable[[], None]
+) -> bool:
+    """把信号绑到回调，返回是否用上了事件循环。
+
+    优先 `add_signal_handler`（POSIX 的标准做法，与事件循环天然集成）；Windows 的
+    proactor 循环不实现它，退回 `signal.signal`——信号处理器不在事件循环线程里跑，
+    因此必须经 `call_soon_threadsafe` 置位。
+    """
+    try:
+        _ = loop.add_signal_handler(sig, on_signal)
+    except NotImplementedError:
+        _ = signal.signal(sig, _threadsafe_handler(loop, on_signal))
+        return False
+    return True
+
+
+def _threadsafe_handler(
+    loop: asyncio.AbstractEventLoop, on_signal: Callable[[], None]
+) -> Callable[[int, FrameType | None], None]:
+    """构造 `signal.signal` 用的处理器。"""
+
+    def _handler(_signum: int, _frame: FrameType | None) -> None:
+        _ = loop.call_soon_threadsafe(on_signal)
+
+    return _handler
 
 
 def main() -> None:

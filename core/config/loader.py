@@ -48,17 +48,23 @@ def read_env(env_file: Path = ENV_FILE) -> dict[str, str]:
 
 
 def read_yaml(config_file: Path = CONFIG_FILE) -> tuple[dict[str, object], bool]:
-    """读取 YAML，返回 (原始数据, 是否读到文件)。文件缺失时返回空字典。"""
+    """读取 YAML，返回 (原始数据, 是否读到文件)。文件缺失时返回空字典。
+
+    读取与解析阶段的错误统一收敛成 ConfigError：编码错、权限错、YAML 语法错
+    都不该以裸异常的形式冒到调用方。
+    """
     if not config_file.is_file():
         return {}, False
     try:
+        text = config_file.read_text(encoding="utf-8")
         # safe_load 的返回类型是 Any，用 cast 显式收敛成「YAML 顶层可能出现的形态」，
         # 否则 Any 会顺着 interpolate 一路渗到 Settings.model_validate 的类型检查里。
         # 注意不能只靠 `x: T = ...` 注解：basedpyright 仍会对赋值行报 reportAny。
-        loaded = cast(
-            "dict[str, object] | list[object] | None",
-            yaml.safe_load(config_file.read_text(encoding="utf-8")),
-        )
+        loaded = cast("dict[str, object] | list[object] | None", yaml.safe_load(text))
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"配置文件不是合法的 UTF-8 文本：{config_file}：{exc}") from exc
+    except OSError as exc:
+        raise ConfigError(f"配置文件读取失败：{config_file}：{exc}") from exc
     except yaml.MarkedYAMLError as exc:
         raise ConfigError(f"配置文件解析失败：{config_file}：{exc}") from exc
     if loaded is None:  # 空文件

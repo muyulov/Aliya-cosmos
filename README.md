@@ -16,6 +16,8 @@ uv run python -m core.main
 
 无需任何配置即可启动，所有配置项都有默认值。要自定义时改 `data/config/app.yaml`；密钥类配置写在 `.env`（参考 `.env.example`）。
 
+进程常驻，`SIGINT` / `SIGTERM` 触发优雅关闭。信号注册优先交给事件循环（POSIX 的标准做法）；Windows 的事件循环不实现 `add_signal_handler`，会自动退回 `signal.signal`，并经 `call_soon_threadsafe` 置位。
+
 ## 常用命令
 
 | 目的 | 命令 |
@@ -93,6 +95,7 @@ log:
 | 场景 | 行为 |
 | --- | --- |
 | `data/config/app.yaml` 不存在 | 全部走默认值继续启动，启动日志显示 `配置源=内置默认值（未找到 …）` |
+| 配置文件不是合法 UTF-8，或读不动（权限等） | 报错退出 |
 | YAML 语法错误或顶层不是映射 | 报错退出 |
 | 占位符取不到值且没写默认值 | 报错退出，并指出是哪个变量 |
 | 字段取值非法（如 `env: staging`） | 报错退出 |
@@ -117,9 +120,9 @@ log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消�
     └─ 已取消旧计划: 0
 ```
 
-颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集。
+颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集；`time` / `level` / `message` / `face` / `exception` 是保留键，业务字段与它们同名时以保留键为准（树形格式没有这个限制——业务字段独立成行，不与元数据混排）。
 
-`context.request_scope` 作用域内的 `request_id` 会自动携带，调用点无需手写字段：
+`context.request_scope` 作用域内的 `request_id` 会自动携带，调用点无需手写字段；标准库与第三方库（`sqlalchemy` / `httpx` / `asyncio`）经桥接后的日志同样携带这些上下文：
 
 ```python
 from core.logger import context, log
@@ -192,11 +195,11 @@ _ = manager.register(CacheService)
 | `name` 只是标签 | 缺省取类名，不参与依赖解析，也不要求全局唯一，仅用于日志与健康检查展示 |
 | 自带日志 | `self.log` 已带 `服务=<label>` 字段与 `[<label>]` 消息前缀，仍可继续 `bind` / `prefix` |
 | 统一错误格式 | 报错用 `self.log_error("消息", exc)`，自动拼「错误=类型: 消息」 |
-| 配置节点注入 | 需要局部配置时，把配置类定义在 `core/config/settings.py` 并挂成 `Settings` 的**顶层字段**，构造器声明该类型即可（如 `config: CacheSettings`），容器按类型注入 |
+| 配置节点注入 | 需要局部配置时，把配置类定义在 `core/config/settings.py` 并挂成 `Settings` 的**顶层字段**，构造器声明该类型即可（如 `config: CacheSettings`），容器按类型注入。字段允许写成 `X \| None`（PEP 604），但只有当前值不是 `None` 时才建索引——可选字段为 `None` 时容器无法注入，装配期报 `ServiceContractError` |
 | 整份配置注入 | 需要全局视野时在构造器声明 `settings: Settings`，容器注入应用持有的那份实例 |
 | 超时覆盖 | 默认走 `service.start_timeout` / `service.stop_timeout`；单独调整时写 `start_timeout: ClassVar[float \| Unset \| None] = 300.0`（需 `from core.service.base import Unset`），`None` 表示该服务不限制，不写即跟随全局 |
 
-启停语义：`start` / `stop` 需幂等（重复调用不应报错）。启动按依赖**分层**：同层并发、层间串行；单个服务超时或抛错都判该服务失败，并逆序回滚本次已启动的服务，随后抛出 `ServiceStartError`。关闭按启动的逆序**串行**执行，单个服务超时或出错只记日志（状态置 `FAILED`），不影响其余服务停下。
+启停语义：`start` / `stop` 需幂等（重复调用不应报错），并且 **`stop()` 必须能安全作用在「从未成功启动过」的服务上**——启动失败者同样会被回滚调用。启动按依赖**分层**：同层并发、层间串行；单个服务超时或抛错都判该服务失败，并逆序回滚本次动过的服务（**含失败者**：`start()` 可能已经申请了部分资源，`stop()` 是它唯一的回收入口；失败者的状态保持 `FAILED`，清理成功不等于它启动成功过），随后抛出 `ServiceStartError`；**被取消时（外层 `asyncio.timeout`、`task.cancel()`）走同一条回滚路径**——`lifespan()` 的 `__aenter__` 抛错时 `__aexit__` 不会执行、`stop_all` 不会被调用，所以回滚必须在 `start_all` 内部完成，已启动的服务不会留在 `RUNNING`。关闭按启动的逆序**串行**执行，单个服务超时或出错只记日志（状态置 `FAILED`），不影响其余服务停下。
 
 超时靠 `asyncio.timeout` 的取消实现，因此服务的 `start` / `stop` **不要吞掉 `CancelledError`**（写 `except Exception` 是安全的，它不会捕获 `CancelledError`）。
 

@@ -19,7 +19,7 @@ import time
 from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import TypeVar, cast, get_type_hints
+from typing import TypeVar, cast, get_args, get_type_hints
 
 from pydantic import BaseModel
 
@@ -48,6 +48,24 @@ def _ensure_service_subclass(candidate: object) -> None:
     """
     if not (isinstance(candidate, type) and issubclass(candidate, Service)):
         raise ServiceContractError(f"{candidate!r} 不是 Service 子类，无法注册")
+
+
+def _config_node_type(annotation: object) -> type[BaseModel] | None:
+    """从字段注解中取出配置节点类型。
+
+    支持 `X` 与 `X | None`（PEP 604 / `Optional`）：后者只认「恰好一个 BaseModel
+    分支、其余分支都是 NoneType」。`X | Y` 无法确定注入哪个、`list[X]` 这类泛型
+    根本不是节点，都返回 None。
+    """
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    # get_args 的返回类型是 tuple[Any, ...]：显式 cast 成 object 元组，
+    # 否则 Any 会渗进下面的 isinstance / issubclass（只写注解挡不住）。
+    args = cast("tuple[object, ...]", get_args(annotation))
+    members = [arg for arg in args if isinstance(arg, type) and issubclass(arg, BaseModel)]
+    if len(members) == 1 and len(args) == len(members) + 1 and type(None) in args:
+        return members[0]
+    return None
 
 
 def _resolve_timeout(override: float | Unset | None, default: float | None) -> float | None:
@@ -136,45 +154,58 @@ class ServiceManager:
     # ---------- 启动与关闭 ----------
 
     async def start_all(self) -> None:
-        """按依赖分层启动：同层并发、层间串行；任一失败则回滚已启动的服务。"""
+        """按依赖分层启动：同层并发、层间串行；任一失败或被取消都回滚已启动者。
+
+        失败与取消共用同一条清理路径：`lifespan()` 的 `__aenter__` 抛错时
+        `__aexit__` 不会执行、`stop_all` 也不会被调用，回滚只能在这里做完。
+        """
         self._ensure_built()
-        started: list[Service] = []
+        # 本次启动过程中「动过」的服务（含失败者），回滚时都要调一次 stop()：
+        # 只登记成功者会漏掉 start() 中途抛错、已经申请了部分资源的那些。
+        # 登记在协程内部完成：gather 自身被取消时调用方拿不到 outcomes。
+        attempted: list[Service] = []
 
-        for index, level in enumerate(self._levels):
-            pending = [
-                service_type
-                for service_type in level
-                if self._instances[service_type].state is not ServiceState.RUNNING
-            ]
-            if not pending:
-                continue
+        try:
+            for index, level in enumerate(self._levels):
+                pending = [
+                    service_type
+                    for service_type in level
+                    if self._instances[service_type].state is not ServiceState.RUNNING
+                ]
+                if not pending:
+                    continue
 
-            begin = time.perf_counter()
-            outcomes = await asyncio.gather(
-                *(self._start_one(self._instances[service_type]) for service_type in pending),
-                return_exceptions=True,
-            )
-            elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
+                begin = time.perf_counter()
+                outcomes = await asyncio.gather(
+                    *(
+                        self._start_one(self._instances[service_type], attempted)
+                        for service_type in pending
+                    ),
+                    return_exceptions=True,
+                )
+                elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
 
-            failures: list[BaseException] = []
-            for outcome in outcomes:  # gather 保序 → 与 pending 同序
-                if isinstance(outcome, ServiceStartError):
-                    failures.append(outcome)
-                elif isinstance(outcome, BaseException):
-                    raise outcome  # 只可能是取消等非 Exception，直接冒泡
-                else:
-                    started.append(outcome)
+                # gather 保序 → 失败者与 pending 同序，取首个即注册顺序最靠前者
+                failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+                if failures:
+                    raise failures[0]
 
-            if failures:
-                await self._rollback(started)
-                raise failures[0]  # 注册顺序最靠前的失败者，报错稳定
+                log.info("同层服务启动完成", 层=index, 服务数=len(pending), 耗时=f"{elapsed_ms}ms")
+        except BaseException:
+            await self._rollback(attempted)
+            raise
 
-            log.info("同层服务启动完成", 层=index, 服务数=len(pending), 耗时=f"{elapsed_ms}ms")
+        log.info("全部服务启动完成", 服务数=len(attempted))
 
-        log.info("全部服务启动完成", 服务数=len(started))
+    async def _start_one(self, service: Service, attempted: list[Service]) -> None:
+        """启动单个服务；超时与失败都收敛成 ServiceStartError。
 
-    async def _start_one(self, service: Service) -> Service:
-        """启动单个服务；超时与失败都收敛成 ServiceStartError。"""
+        登记发生在所有失败可能发生之前：`start()` 抛错或超时（协程被取消）时，
+        服务可能已经申请了连接、句柄这类资源，只有记进 `attempted` 才能在回滚时
+        调到 `stop()` 去回收。并发向同一个 list append 是安全的——事件循环单线程，
+        append 是同步操作，不会被其他协程插进来。
+        """
+        attempted.append(service)
         service.state = ServiceState.STARTING
         timeout = _resolve_timeout(service.start_timeout, self._service_settings.start_timeout)
         try:
@@ -190,10 +221,13 @@ class ServiceManager:
             service.state = ServiceState.FAILED
             service.log_error("服务启动失败", exc)
             raise ServiceStartError(service.label, exc) from exc
+        except BaseException:
+            # 取消等非 Exception：必须继续冒泡，但状态不能留在 STARTING
+            service.state = ServiceState.FAILED
+            raise
 
         service.state = ServiceState.RUNNING
         log.info("服务已启动", face=faces.START, 服务=service.label)
-        return service
 
     async def stop_all(self) -> None:
         """按启动的逆序关闭所有服务。
@@ -228,9 +262,15 @@ class ServiceManager:
 
         log.info("全部服务已停止")
 
-    async def _rollback(self, started: Sequence[Service]) -> None:
-        """逆序回滚本次已启动的服务；同样套 stop 超时，但不阻断其余回滚。"""
-        for service in reversed(started):
+    async def _rollback(self, attempted: Sequence[Service]) -> None:
+        """逆序清理本次动过的服务；同样套 stop 超时，但不阻断其余回滚。
+
+        成功启动的（RUNNING）与启动失败的（FAILED）都要调一次 stop()：失败者可能
+        已经申请了部分资源，那是它唯一的回收入口。因此 stop() 必须幂等，并且能
+        安全地作用在「从未成功启动过」的服务上。
+        失败者的状态保持 FAILED——那是它的终态标记，清理成功不该把它抹掉。
+        """
+        for service in reversed(attempted):
             timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
             try:
                 await _call_with_timeout(service.stop, timeout)
@@ -241,7 +281,9 @@ class ServiceManager:
                 service.state = ServiceState.FAILED
                 service.log_error("回滚时服务关闭异常", exc)
             else:
-                service.state = ServiceState.STOPPED
+                # 启动失败者保留 FAILED：清理成功不等于它启动成功过
+                if service.state is not ServiceState.FAILED:
+                    service.state = ServiceState.STOPPED
 
     # ---------- 健康检查 ----------
 
@@ -291,7 +333,9 @@ class ServiceManager:
         构造结果先攒在局部字典里，全部成功后才一次性提交：任一步失败时
         容器保持未装配状态，不会留下半成品实例。
         """
-        settings = self._settings or get_settings()
+        # 显式判 None 而不是 `or`：配置模型一旦定义了 __bool__ / __len__，
+        # 空配置会被判为假，从而静默回退到全局单例、丢掉调用方传入的那份。
+        settings = self._settings if self._settings is not None else get_settings()
         nodes = self._index_config_nodes(settings)
         plans = {
             service_type: self._validate_contract(service_type, nodes)
@@ -328,22 +372,26 @@ class ServiceManager:
 
         只认顶层字段、不递归：服务要拿的配置写在哪一眼可见，也避免"某个嵌套
         深处的同类节点被静默注入"。
+        注解写 `X | None` 时，只有当前值非 None 才建索引——值为 None 说明这一节
+        没配，注入 None 只会把问题推到运行期。
         """
         nodes: dict[type[BaseModel], BaseModel] = {}
         for field_name, field_info in type(settings).model_fields.items():
             # 显式收成 object：model_fields 是运行期字典，取值是 Any，
             # 直接用会让 Any 渗进后面的 isinstance 与 cast。
             annotation: object = field_info.annotation
-            if not (isinstance(annotation, type) and issubclass(annotation, BaseModel)):
+            node_type = _config_node_type(annotation)
+            if node_type is None or node_type is Settings:  # Settings 走整份注入
                 continue
-            if annotation is Settings:  # 整份配置由构造器直接声明 Settings 承接
+            value = cast("BaseModel | None", getattr(settings, field_name))
+            if value is None:
                 continue
-            if annotation in nodes:
+            if node_type in nodes:
                 raise ServiceContractError(
-                    f"配置节点类型 {annotation.__name__} 在 Settings 中出现多次，"
+                    f"配置节点类型 {node_type.__name__} 在 Settings 中出现多次，"
                     + "容器无法确定注入哪个"
                 )
-            nodes[annotation] = cast("BaseModel", getattr(settings, field_name))
+            nodes[node_type] = value
         return nodes
 
     def _validate_contract(
@@ -382,7 +430,9 @@ class ServiceManager:
                 if annotation not in nodes:
                     raise ServiceContractError(
                         f"{prefix} 的参数 {param_name} 注解为 {annotation.__name__}，"
-                        + "它不是 Settings 的顶层字段，请在 core/config/settings.py 中注册"
+                        + "它不在 Settings 的顶层节点索引里：请确认该字段已挂在 "
+                        + "core/config/settings.py 上，且当前值不是 None"
+                        + "（可选字段为 None 时容器无法注入）"
                     )
                 plan.nodes[param_name] = annotation
                 continue
