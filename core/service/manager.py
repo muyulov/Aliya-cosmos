@@ -122,8 +122,15 @@ class ServiceManager:
         return service_type
 
     def register_all(self, service_types: Sequence[type[Service]]) -> None:
+        """批量注册。全部校验通过后才一次性落盘，避免中途失败留下半截注册表。"""
+        self._ensure_not_built()
+        pending: list[type[Service]] = []
         for service_type in service_types:
-            _ = self.register(service_type)
+            _ensure_service_subclass(service_type)
+            if service_type in self._types or service_type in pending:
+                raise ServiceContractError(f"服务类型重复注册：{service_type.__name__}")
+            pending.append(service_type)
+        self._types.extend(pending)
 
     # ---------- 查找 ----------
 
@@ -271,6 +278,9 @@ class ServiceManager:
         失败者的状态保持 FAILED——那是它的终态标记，清理成功不该把它抹掉。
         """
         for service in reversed(attempted):
+            # 启动失败者的 FAILED 是终态标记：清理成功不该把它抹成 STOPPED
+            was_failed = service.state is ServiceState.FAILED
+            service.state = ServiceState.STOPPING
             timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
             try:
                 await _call_with_timeout(service.stop, timeout)
@@ -281,9 +291,7 @@ class ServiceManager:
                 service.state = ServiceState.FAILED
                 service.log_error("回滚时服务关闭异常", exc)
             else:
-                # 启动失败者保留 FAILED：清理成功不等于它启动成功过
-                if service.state is not ServiceState.FAILED:
-                    service.state = ServiceState.STOPPED
+                service.state = ServiceState.FAILED if was_failed else ServiceState.STOPPED
 
     # ---------- 健康检查 ----------
 
@@ -442,7 +450,12 @@ class ServiceManager:
                 f"{prefix} 的参数 {param_name} 注解为 {shown}，" + "容器只支持 Service 与配置节点"
             )
 
-        declared = set(service_type.dependencies)
+        declared_items = service_type.dependencies
+        declared = set(declared_items)
+        if len(declared) != len(declared_items):
+            raise ServiceContractError(
+                f"{service_type.__name__} 的 dependencies 里有重复类型，请去重"
+            )
         injected = set(plan.services.values())
 
         undeclared = injected - declared

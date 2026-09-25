@@ -177,6 +177,27 @@ def test_可变参数无法注入() -> None:
         _ = mgr.services
 
 
+class DuplicateDependencyService(Service):
+    """dependencies 里重复写了同一个类型。"""
+
+    name: ClassVar[str] = "duplicate-dependency"
+    dependencies: ClassVar[tuple[type[Service], ...]] = (DbService, DbService)
+
+    def __init__(self, db: DbService) -> None:
+        super().__init__()
+        self.db: DbService = db
+
+
+def test_dependencies_重复类型报错() -> None:
+    """回归：旧实现用集合对账，重复类型会被静默吃掉。"""
+    mgr = ServiceManager()
+    _ = mgr.register(DbService)
+    _ = mgr.register(DuplicateDependencyService)
+
+    with pytest.raises(ServiceContractError, match="重复类型"):
+        _ = mgr.services
+
+
 class MissingAnnotationService(Service):
     """构造器参数缺少类型注解的服务。"""
 

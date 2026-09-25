@@ -208,10 +208,22 @@ def test_传入堆栈时字段块完整且堆栈独立成块() -> None:
     line = format_tree(record, stack=format_exception(make_record(exception=_make_exception())))
     lines = line.split("\n")
     assert lines[0].startswith("2026-08-27 23:09:52 [E]")
-    assert lines[1] == "    └─ 路径: /x"
+    # 有堆栈时字段末项改用 ├─，把 └─ 留给堆栈块
+    assert lines[1] == "    ├─ 路径: /x"
     assert lines[2] == "    └─ 堆栈"
     body = "\n".join(lines[3:])
     assert "KeyError" in body
+
+
+def test_堆栈块与字段末项不会出现两个末项符号() -> None:
+    """回归：树形同一层只能有一个末项符号。"""
+    record = make_record("未捕获异常", 阶段="装配", 异常="KeyError")
+    lines = format_tree(record, stack="Traceback (most recent call last):").split("\n")
+
+    assert lines[1] == "    ├─ 阶段: 装配"
+    assert lines[2] == "    ├─ 异常: KeyError"
+    assert lines[3] == "    └─ 堆栈"
+    assert sum(1 for line in lines if line.lstrip().startswith("└─")) == 1
 
 
 def test_堆栈渲染不会把_exception_塞进字段() -> None:

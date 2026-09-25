@@ -45,6 +45,10 @@ class ServiceState(StrEnum):
     FAILED = "failed"
 
 
+#: HealthStatus.to_dict 的保留键：extra 里同名的键一律让位
+HEALTH_RESERVED_KEYS: frozenset[str] = frozenset({"name", "healthy", "state", "detail"})
+
+
 @dataclass(slots=True)
 class HealthStatus:
     """单个健康检查结果。"""
@@ -56,6 +60,7 @@ class HealthStatus:
     extra: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
+        """导出为普通字典；extra 与保留键同名时以保留键为准。"""
         payload: dict[str, object] = {
             "name": self.name,
             "healthy": self.healthy,
@@ -63,8 +68,9 @@ class HealthStatus:
         }
         if self.detail:
             payload["detail"] = self.detail
-        if self.extra:
-            payload.update(self.extra)
+        for key, value in self.extra.items():
+            if key not in HEALTH_RESERVED_KEYS:
+                payload[key] = value
         return payload
 
 

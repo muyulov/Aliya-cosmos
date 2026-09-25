@@ -10,7 +10,7 @@ from loguru import logger
 
 from core.config import LogSettings
 from core.logger import faces, setup_logging
-from core.service.base import UNSET, Service, Unset
+from core.service.base import UNSET, HealthStatus, Service, ServiceState, Unset
 
 
 @pytest.fixture(autouse=True)
@@ -141,3 +141,22 @@ def test_未覆盖的那一项仍跟随全局() -> None:
     """两个 ClassVar 各自独立，覆盖了一个不影响另一个。"""
     assert StartTimeoutService.stop_timeout is UNSET
     assert StopTimeoutService.start_timeout is UNSET
+
+
+def test_to_dict_的保留键不被_extra_覆盖() -> None:
+    """回归：extra 里与保留键同名的项一律让位，不得覆盖健康检查的元数据。"""
+    status = HealthStatus(
+        name="clock",
+        healthy=True,
+        state=ServiceState.RUNNING,
+        detail="正常",
+        extra={"name": "伪造", "healthy": False, "state": "伪造", "detail": "伪造", "延迟": 3},
+    )
+
+    payload = status.to_dict()
+
+    assert payload["name"] == "clock"
+    assert payload["healthy"] is True
+    assert payload["state"] == "running"
+    assert payload["detail"] == "正常"
+    assert payload["延迟"] == 3

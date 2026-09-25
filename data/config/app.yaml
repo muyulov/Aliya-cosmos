@@ -7,7 +7,7 @@ log:
   level: INFO
   json: false
   dir: logs
-  rotation: "00:00"           
+  rotation: "00:00"
   retention: 7 days
   compression: zip
 
@@ -16,7 +16,7 @@ service:
   stop_timeout: 30
 
 clock:
-  tz: UTC         
+  tz: UTC
 
 # 密钥类字段以占位符声明，由 .env 提供值：
 # api_key: ${DEEPSEEK_API_KEY}

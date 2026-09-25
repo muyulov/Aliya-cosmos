@@ -79,7 +79,9 @@ def format_tree(record: Record, *, stack: str | None = None) -> str:
 
     items = list(fields.items())
     for index, (key, value) in enumerate(items):
-        branch = "└─" if index == len(items) - 1 else "├─"
+        # 有堆栈时末项也用 ├─：把 └─ 留给堆栈块，否则同一层会出现两个末项符号
+        last = index == len(items) - 1 and not stack
+        branch = "└─" if last else "├─"
         lines.append(f"{FIELD_INDENT}{branch} {key}: {render_value(value)}")
 
     lines.extend(_stack_lines(stack))
