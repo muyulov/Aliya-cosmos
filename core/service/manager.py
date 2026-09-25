@@ -67,6 +67,8 @@ class ServiceManager:
         self._instances: dict[type[Service], Service] = {}
         #: 装配后固化的启动顺序，关闭时直接逆序，无需可变状态
         self._order: list[type[Service]] = []
+        #: 装配后按依赖分好的层，索引越小越靠前；启动时逐层推进
+        self._levels: list[list[type[Service]]] = []
         self._built: bool = False
 
     # ---------- 注册 ----------
@@ -232,24 +234,28 @@ class ServiceManager:
             service_type: self._validate_contract(service_type, nodes)
             for service_type in self._types
         }
-        order = self._resolve_order()
+        levels = self._resolve_levels()
 
         instances: dict[type[Service], Service] = {}
-        for service_type in order:
-            plan = plans[service_type]
-            kwargs: dict[str, object] = {}
-            for param_name in plan.whole_settings:
-                kwargs[param_name] = settings
-            for param_name, node_type in plan.nodes.items():
-                kwargs[param_name] = nodes[node_type]
-            for param_name, dependency_type in plan.services.items():
-                kwargs[param_name] = instances[dependency_type]
-            # 构造器参数是动态拼出来的，签名无法静态校验，故这里显式收敛类型
-            factory = cast("Callable[..., Service]", service_type)
-            instances[service_type] = factory(**kwargs)
+        for level in levels:
+            for service_type in level:
+                plan = plans[service_type]
+                kwargs: dict[str, object] = {}
+                for param_name in plan.whole_settings:
+                    kwargs[param_name] = settings
+                for param_name, node_type in plan.nodes.items():
+                    kwargs[param_name] = nodes[node_type]
+                for param_name, dependency_type in plan.services.items():
+                    kwargs[param_name] = instances[dependency_type]
+                # 构造器参数是动态拼出来的，签名无法静态校验，故这里显式收敛类型
+                factory = cast("Callable[..., Service]", service_type)
+                instances[service_type] = factory(**kwargs)
 
         self._instances = instances
-        self._order = order
+        self._levels = levels
+        # 扁平序按层展开：仍是合法拓扑序，reversed 仍是合法逆拓扑序，
+        # 因此 services / names 的展示顺序与 stop_all 的关闭顺序都不用改
+        self._order = [service_type for level in levels for service_type in level]
         self._built = True
 
     @staticmethod
@@ -341,30 +347,38 @@ class ServiceManager:
 
         return plan
 
-    def _resolve_order(self) -> list[type[Service]]:
-        """按 dependencies 做拓扑排序，检测环与未注册依赖。"""
-        order: list[type[Service]] = []
-        visiting: set[type[Service]] = set()
-        visited: set[type[Service]] = set()
+    def _resolve_levels(self) -> list[list[type[Service]]]:
+        """按 dependencies 分层：同层之间必无依赖，可并发启动。
 
-        def visit(service_type: type[Service]) -> None:
-            if service_type in visited:
-                return
+        层号 = max(依赖层号) + 1；同层内按注册顺序排列，保证结果确定。
+        顺带完成环检测与未注册依赖检测。
+        """
+        depth: dict[type[Service], int] = {}
+        visiting: set[type[Service]] = set()
+
+        def visit(service_type: type[Service]) -> int:
+            if service_type in depth:
+                return depth[service_type]
             if service_type in visiting:
                 raise CircularDependencyError(service_type.__name__)
             if service_type not in self._types:
                 raise MissingDependencyError(service_type.__name__)
 
             visiting.add(service_type)
+            level = 0
             for dependency in service_type.dependencies:
-                visit(dependency)
+                level = max(level, visit(dependency) + 1)
             visiting.discard(service_type)
-            visited.add(service_type)
-            order.append(service_type)
+            depth[service_type] = level
+            return level
 
         for service_type in self._types:
-            visit(service_type)
-        return order
+            _ = visit(service_type)
+
+        levels: list[list[type[Service]]] = [[] for _ in range(max(depth.values(), default=-1) + 1)]
+        for service_type in self._types:  # 注册顺序 → 同层内顺序确定
+            levels[depth[service_type]].append(service_type)
+        return levels
 
 
 class ServiceError(Exception):

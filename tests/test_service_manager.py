@@ -48,6 +48,12 @@ class DbService(RecordService):
     name: ClassVar[str] = "db"
 
 
+class MetricsService(RecordService):
+    """与 DbService 同层（都无依赖）的服务。"""
+
+    name: ClassVar[str] = "metrics"
+
+
 class CacheService(RecordService):
     name: ClassVar[str] = "cache"
     dependencies: ClassVar[tuple[type[Service], ...]] = (DbService,)
@@ -260,3 +266,43 @@ async def test_健康检查聚合() -> None:
     after = await mgr.health()
     assert all(item.healthy for item in after)
     assert [item.name for item in after] == ["db", "cache", "api"]
+
+
+def test_按依赖分层且同层按注册顺序() -> None:
+    mgr = ServiceManager()
+    _ = mgr.register(MetricsService)  # 无依赖 → 第 0 层
+    _ = mgr.register(DbService)  # 无依赖 → 第 0 层
+    _ = mgr.register(CacheService)  # 依赖 DbService → 第 1 层
+    _ = mgr.services  # 触发装配
+
+    # 白盒：分层结构没有公开出口，而它是并发启动的唯一依据，必须直接断言；
+    # 否则分层的正确性只能靠"跑起来像不像并发"间接猜。
+    levels = mgr._levels  # pyright: ignore[reportPrivateUsage]
+
+    assert levels == [[MetricsService, DbService], [CacheService]]
+
+
+def test_扁平顺序按层分组() -> None:
+    """同层服务连续排列，让 services / names 的顺序与"启动即分批"对应。"""
+    mgr = ServiceManager()
+    _ = mgr.register(DbService)
+    _ = mgr.register(MetricsService)
+    _ = mgr.register(CacheService)
+    _ = mgr.register(ApiService)
+
+    # names 是 Sequence，运行期是 tuple，必须转成 list 再比
+    assert list(mgr.names) == ["db", "metrics", "cache", "api"]
+
+
+async def test_分层后关闭顺序仍严格逆序() -> None:
+    mgr = ServiceManager()
+    _ = mgr.register(DbService)
+    _ = mgr.register(MetricsService)
+    _ = mgr.register(CacheService)
+    _ = mgr.register(ApiService)
+
+    await mgr.start_all()
+    await mgr.stop_all()
+
+    stops = [e for e in events if e.startswith("stop:")]
+    assert stops == ["stop:api", "stop:cache", "stop:metrics", "stop:db"]
