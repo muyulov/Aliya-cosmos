@@ -8,9 +8,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import ClassVar, override
+from typing import ClassVar, Final, override
 
 from core.logger import Log, log
+
+
+class Unset:
+    """「未覆盖」哨兵。
+
+    ClassVar 的默认值无法同时表达「未覆盖，跟随全局」与「显式设为 None，
+    即不限制」两件事，因此引入一个只有身份意义的哨兵。
+
+    公开成类名而不是私有：basedpyright 按不变型检查可变量，子类覆盖时必须
+    写全联合类型 `float | None | Unset`，也就必须能 import 到它。
+    """
+
+    __slots__: ClassVar[tuple[str, ...]] = ()
+
+    @override
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+#: 服务未覆盖该项超时，沿用 ServiceSettings 里的默认值
+UNSET: Final[Unset] = Unset()
 
 
 class ServiceState(StrEnum):
@@ -69,6 +90,12 @@ class Service:
 
     #: 依赖的服务类型；容器据此排序并在构造时注入
     dependencies: ClassVar[tuple[type[Service], ...]] = ()
+
+    #: start 超时（秒）覆盖；UNSET 跟随全局，None 不限制，数字即该值
+    start_timeout: ClassVar[float | Unset | None] = UNSET
+
+    #: stop 超时（秒）覆盖；语义同 start_timeout
+    stop_timeout: ClassVar[float | Unset | None] = UNSET
 
     def __init__(self) -> None:
         self.state: ServiceState = ServiceState.CREATED
