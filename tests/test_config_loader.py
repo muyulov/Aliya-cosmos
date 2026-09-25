@@ -9,8 +9,10 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from core.config.loader import ConfigError, interpolate, read_env, read_yaml
+from core.config import ConfigError, Settings, get_settings, load_settings
+from core.config.loader import interpolate, read_env, read_yaml
 
 
 def _write(path: Path, text: str) -> Path:
@@ -115,3 +117,118 @@ def test_yaml顶层不是映射时报错(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="顶层"):
         _ = read_yaml(config_file)
+
+
+# ---- 文件级加载 ----
+
+
+def _load(tmp_path: Path, yaml_text: str, env_text: str | None = None) -> Settings:
+    """把 YAML（可选 .env）写进临时目录后加载。"""
+    config_file = _write(tmp_path / "app.yaml", yaml_text)
+    env_file = tmp_path / ".env"
+    if env_text is not None:
+        env_file = _write(env_file, env_text)
+    return load_settings(config_file=config_file, env_file=env_file)
+
+
+# ---- 来源标记 ----
+
+
+def test_文件缺失时退回默认值并标记来源(tmp_path: Path) -> None:
+    config_file = tmp_path / "missing.yaml"
+
+    settings = load_settings(config_file=config_file, env_file=tmp_path / ".env")
+
+    assert settings.app.app_name == "aliya-cosmos"
+    assert settings.log.level == "INFO"
+    assert settings.config_source == f"内置默认值（未找到 {config_file}）"
+
+
+def test_直接构造的实例标记为外部注入() -> None:
+    assert Settings().config_source == "外部注入"
+
+
+def test_正常文件覆盖默认值并记录来源(tmp_path: Path) -> None:
+    config_file = _write(tmp_path / "app.yaml", "app:\n  env: prod\nlog:\n  level: DEBUG\n")
+
+    settings = load_settings(config_file=config_file, env_file=tmp_path / ".env")
+
+    assert settings.app.env == "prod"
+    assert settings.log.level == "DEBUG"
+    assert settings.config_source == str(config_file)
+
+
+def test_未知配置项被忽略(tmp_path: Path) -> None:
+    assert _load(tmp_path, "app:\n  unknown_key: 1\n").app.app_name == "aliya-cosmos"
+
+
+def test_插值从env文件取值(tmp_path: Path) -> None:
+    settings = _load(tmp_path, "app:\n  app_name: ${APP_NAME}\n", "APP_NAME=from-dotenv\n")
+    assert settings.app.app_name == "from-dotenv"
+
+
+def test_插值优先取进程环境变量(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_NAME", "from-process")
+    settings = _load(tmp_path, "app:\n  app_name: ${APP_NAME}\n", "APP_NAME=from-dotenv\n")
+    assert settings.app.app_name == "from-process"
+
+
+def test_占位符无值且无默认时启动失败(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="MISSING_KEY"):
+        _ = _load(tmp_path, "app:\n  app_name: ${MISSING_KEY}\n")
+
+
+def test_带默认值的占位符变量缺失时取默认(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("APP_ENV", raising=False)
+    settings = _load(tmp_path, "app:\n  env: ${APP_ENV:dev}\n")
+    assert settings.app.env == "dev"
+
+
+def test_带默认值的占位符优先取环境变量(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APP_ENV", "prod")
+    settings = _load(tmp_path, "app:\n  env: ${APP_ENV:dev}\n")
+    assert settings.app.env == "prod"
+
+
+def test_插值结果交给pydantic转型(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_LOG_JSON", "true")
+    settings = _load(tmp_path, "log:\n  json: ${APP_LOG_JSON:false}\n")
+    assert settings.log.json_output is True
+
+
+def test_引号包住的轮转值保持字符串(tmp_path: Path) -> None:
+    """PyYAML 兼容 YAML 1.1，不加引号的 00:00 会被解析成整数 0。"""
+    settings = _load(tmp_path, 'log:\n  rotation: "00:00"\n')
+    assert settings.log.rotation == "00:00"
+
+
+# ---- pydantic 校验 ----
+
+
+def test_非法枚举值被pydantic拦截(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError):
+        _ = _load(tmp_path, "app:\n  env: staging\n")
+
+
+# ---- 单例与路径语义 ----
+
+
+def test_单例缓存且配置文件按工作目录解析(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    try:
+        first = get_settings()
+        assert get_settings() is first
+        assert first.config_source.startswith("内置默认值")
+
+        _ = _write(tmp_path / "data" / "config" / "app.yaml", "app:\n  app_name: from-file\n")
+        get_settings.cache_clear()
+        assert get_settings().app.app_name == "from-file"
+    finally:
+        get_settings.cache_clear()
