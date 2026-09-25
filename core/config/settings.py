@@ -56,6 +56,19 @@ class LogSettings(BaseModel):
     compression: str = "zip"
 
 
+class ServiceSettings(BaseModel):
+    """服务生命周期配置。"""
+
+    start_timeout: float | None = 30.0  # 秒；None 表示不限制
+    stop_timeout: float | None = 30.0
+
+
+class ClockSettings(BaseModel):
+    """时钟服务配置。"""
+
+    tz: str = "UTC"
+
+
 class Settings(BaseModel):
     """顶层配置，按子模块分组，避免一个扁平大类。"""
 
@@ -63,6 +76,8 @@ class Settings(BaseModel):
 
     app: AppSettings = AppSettings()
     log: LogSettings = LogSettings()
+    service: ServiceSettings = ServiceSettings()
+    clock: ClockSettings = ClockSettings()
 
     #: 本次配置的来源；由 load_settings() 写入，直接构造实例时保持 None
     _source: str | None = PrivateAttr(default=None)

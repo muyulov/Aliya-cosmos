@@ -3,7 +3,9 @@
 from core.config.loader import CONFIG_FILE, ENV_FILE, ConfigError
 from core.config.settings import (
     AppSettings,
+    ClockSettings,
     LogSettings,
+    ServiceSettings,
     Settings,
     get_settings,
     load_settings,
@@ -13,8 +15,10 @@ __all__ = [
     "CONFIG_FILE",
     "ENV_FILE",
     "AppSettings",
+    "ClockSettings",
     "ConfigError",
     "LogSettings",
+    "ServiceSettings",
     "Settings",
     "get_settings",
     "load_settings",
