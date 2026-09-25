@@ -32,10 +32,6 @@ class AppSettings(BaseModel):
     env: Environment = "dev"
     debug: bool = True
 
-    @property
-    def is_prod(self) -> bool:
-        return self.env == "prod"
-
 
 class LogSettings(BaseModel):
     """日志层配置。

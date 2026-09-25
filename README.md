@@ -28,7 +28,6 @@ uv run python -m core.main
 | 覆盖率 | `uv run pytest --cov=core` |
 | 代码检查 | `uv run ruff check .` |
 | 代码格式化 | `uv run ruff format .` |
-| 安装 git 钩子 | `uv run pre-commit install` |
 
 ## 目录结构
 
