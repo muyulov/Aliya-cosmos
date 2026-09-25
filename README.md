@@ -2,7 +2,7 @@
 
 Python + uv 通用脚手架。三层结构：`service` / `logger` / `config`，开箱可跑，后续往里填业务。
 
-技术栈：Python 3.12+、uv、pydantic-settings、loguru、ruff、pytest。
+技术栈：Python 3.12+、uv、pydantic、PyYAML、loguru、ruff、pytest。
 
 ## 快速开始
 
@@ -14,7 +14,7 @@ uv sync
 uv run python -m core.main
 ```
 
-无需任何配置即可启动，所有配置项都有默认值。需要自定义时复制 `.env.example` 为 `.env` 修改。
+无需任何配置即可启动，所有配置项都有默认值。要自定义时改 `data/config/app.yaml`；密钥类配置写在 `.env`（参考 `.env.example`）。
 
 ## 常用命令
 
@@ -35,7 +35,8 @@ core/
   main.py        入口：装配服务容器并驱动生命周期
   service/       业务层：服务基类、容器、注册表、具体服务实现
   logger/        日志层：颜文字、结构化上下文、树形/JSON 格式化、sink 装配
-  config/        配置层：pydantic-settings 分组配置
+  config/        配置层：YAML 骨架加载与占位符插值
+data/           配置与运行数据：config/app.yaml 为配置骨架，可安全提交
 tests/           测试
 ```
 
@@ -43,26 +44,57 @@ tests/           测试
 
 ## 配置
 
-环境变量前缀 `APP_`，嵌套层级用双下划线：
+配置以 `data/config/app.yaml` 为唯一来源（路径相对当前工作目录）。该文件可安全提交，因为它不含任何明文密钥。要调整配置，改这个文件即可。
 
-```bash
-APP_APP__ENV=prod
-APP_LOG__LEVEL=DEBUG
-APP_LOG__JSON=true
+```yaml
+app:
+  env: ${APP_ENV:dev}        # 部署时可用环境变量顶掉
+log:
+  level: INFO
+  json: false
 ```
 
-| 变量 | 默认值 | 说明 |
+### 占位符
+
+`${VAR}` 与 `${VAR:默认值}` 两种写法，取值来源是进程环境变量与 `.env`（[进程环境变量优先](https://12factor.net/zh_cn/config)）：
+
+| 写法 | 语义 |
+| --- | --- |
+| `${DEEPSEEK_API_KEY}` | 取不到值就启动失败，进程退出 |
+| `${APP_ENV:dev}` | 取不到值时用 `dev` |
+
+占位符只作用于字符串值，`app.yaml` 里 dict 的键不会被替换；展开后一律是字符串，类型由 pydantic 转换（如 `"true"` → `bool`）。
+
+`.env` 的唯一职责就是给占位符喂值，**不能**直接覆盖配置项。变量名大小写敏感：`${App_Key}` 与 `${APP_KEY}` 是两个不同的名字。
+
+### 配置项
+
+| YAML 路径 | 默认值 | 说明 |
 | --- | --- | --- |
-| `APP_APP__APP_NAME` | `aliya-cosmos` | 应用名 |
-| `APP_APP__ENV` | `dev` | 环境，只能是 dev / test / prod |
-| `APP_APP__DEBUG` | `true` | 调试开关 |
-| `APP_LOG__LEVEL` | `INFO` | 日志级别 |
-| `APP_LOG__JSON` | `false` | 是否输出 JSON 日志 |
-| `APP_LOG__DIR` | `logs` | 日志目录 |
-| `APP_LOG__FILE_NAME` | `app.log` | 主日志文件名 |
-| `APP_LOG__ERROR_FILE_NAME` | `error.log` | 错误日志文件名 |
-| `APP_LOG__ROTATION` | `00:00` | 轮转阈值（默认按天） |
-| `APP_LOG__RETENTION` | `7 days` | 保留时长 |
+| `app.app_name` | `aliya-cosmos` | 应用名 |
+| `app.env` | `dev` | 环境，只能是 dev / test / prod |
+| `app.debug` | `true` | 调试开关 |
+| `log.level` | `INFO` | 日志级别 |
+| `log.json` | `false` | 是否输出 JSON 日志 |
+| `log.dir` | `logs` | 日志目录 |
+| `log.file_name` | `app.log` | 主日志文件名 |
+| `log.error_file_name` | `error.log` | 错误日志文件名 |
+| `log.rotation` | `00:00` | 轮转阈值（默认按天），写进 YAML 时必须加引号 |
+| `log.retention` | `7 days` | 保留时长 |
+| `log.compression` | `zip` | 归档压缩方式 |
+
+### 失败行为
+
+配置在进程启动时加载，出错即退出：
+
+| 场景 | 行为 |
+| --- | --- |
+| `data/config/app.yaml` 不存在 | 全部走默认值继续启动，启动日志显示 `配置源=内置默认值（未找到 …）` |
+| YAML 语法错误或顶层不是映射 | 报错退出 |
+| 占位符取不到值且没写默认值 | 报错退出，并指出是哪个变量 |
+| 字段取值非法（如 `env: staging`） | 报错退出 |
+
+启动日志里的 `配置源` 字段会写明本次配置来自哪个文件，路径是相对工作目录解析的，从别处启动时请核对这一项。
 
 ## 日志
 
@@ -82,7 +114,7 @@ log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消�
     └─ 已取消旧计划: 0
 ```
 
-颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`APP_LOG__JSON=true` 时改为单行 JSON，字段平铺，便于日志采集。
+颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集。
 
 `context.request_scope` 作用域内的 `request_id` 会自动携带，调用点无需手写字段：
 
@@ -112,7 +144,7 @@ with log.context(会话="qq:123"):
        KeyError: 'item_id'
 ```
 
-日志文件有两个：`logs/app.log`（跟随 `APP_LOG__LEVEL`）与 `logs/error.log`（固定 ERROR 级），均按天轮转。
+日志文件有两个：`logs/app.log`（跟随 `log.level`）与 `logs/error.log`（固定 ERROR 级），均按天轮转。
 
 ## 如何新增一个服务
 

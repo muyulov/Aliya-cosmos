@@ -1,0 +1,18 @@
+# 配置骨架。所有字段的默认值见 core/config/settings.py，这里只写需要调整的值。
+# 需要密钥等隐私值时不要写明文，用 ${VAR} 占位符，值放在 .env 里。
+
+app:
+  app_name: aliya-cosmos
+  env: dev
+  debug: true
+
+log:
+  level: INFO
+  json: false
+  dir: logs
+  rotation: "00:00"           # 必须带引号：不加引号会被 YAML 解析成整数
+  retention: 7 days
+  compression: zip
+
+# 密钥类字段以占位符声明，由 .env 提供值：
+# api_key: ${DEEPSEEK_API_KEY}
