@@ -17,8 +17,8 @@ from core.config.loader import interpolate, read_env, read_yaml
 
 def _write(path: Path, text: str) -> Path:
     """写一个临时文件，返回其路径。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    _ = path.parent.mkdir(parents=True, exist_ok=True)
+    _ = path.write_text(text, encoding="utf-8")
     return path
 
 

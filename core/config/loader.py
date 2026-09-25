@@ -52,14 +52,20 @@ def read_yaml(config_file: Path = CONFIG_FILE) -> tuple[dict[str, object], bool]
     if not config_file.is_file():
         return {}, False
     try:
-        data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        # safe_load 的返回类型是 Any，用 cast 显式收敛成「YAML 顶层可能出现的形态」，
+        # 否则 Any 会顺着 interpolate 一路渗到 Settings.model_validate 的类型检查里。
+        # 注意不能只靠 `x: T = ...` 注解：basedpyright 仍会对赋值行报 reportAny。
+        loaded = cast(
+            "dict[str, object] | list[object] | None",
+            yaml.safe_load(config_file.read_text(encoding="utf-8")),
+        )
     except yaml.MarkedYAMLError as exc:
         raise ConfigError(f"配置文件解析失败：{config_file}：{exc}") from exc
-    if data is None:  # 空文件
+    if loaded is None:  # 空文件
         return {}, True
-    if not isinstance(data, dict):
-        raise ConfigError(f"配置文件顶层必须是映射：{config_file}，实际是 {type(data).__name__}")
-    return cast("dict[str, object]", data), True
+    if not isinstance(loaded, dict):
+        raise ConfigError(f"配置文件顶层必须是映射：{config_file}，实际是 {type(loaded).__name__}")
+    return loaded, True
 
 
 def interpolate(value: object, sources: dict[str, str], *, path: str = "") -> object:
@@ -72,13 +78,18 @@ def interpolate(value: object, sources: dict[str, str], *, path: str = "") -> ob
     if isinstance(value, str):
         return _PLACEHOLDER.sub(lambda match: _resolve(match, sources, path), value)
     if isinstance(value, dict):
+        # 从一个 object 收窄出来的 dict，键值类型是 Unknown；用 cast 收敛成 dict[object, object]
+        # 才不会让 Unknown 顺着递归调用继续渗下去（只写注解挡不住，收窄类型会盖掉注解）。
+        mapping = cast("dict[object, object]", value)
         return {
             key: interpolate(item, sources, path=f"{path}.{key}" if path else str(key))
-            for key, item in value.items()
+            for key, item in mapping.items()
         }
     if isinstance(value, list):
+        sequence = cast("list[object]", value)
         return [
-            interpolate(item, sources, path=f"{path}[{index}]") for index, item in enumerate(value)
+            interpolate(item, sources, path=f"{path}[{index}]")
+            for index, item in enumerate(sequence)
         ]
     return value
 
