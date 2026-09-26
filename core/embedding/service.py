@@ -19,7 +19,7 @@ from typing import ClassVar, override
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
 from core.config import EmbeddingSettings
-from core.embedding.encoder import Encoder, build_encoder
+from core.embedding.encoder import EncodedVector, Encoder, build_encoder
 from core.embedding.errors import (
     EmbeddingConfigError,
     EmbeddingConnectionError,
@@ -122,9 +122,10 @@ class EmbeddingService(Service):
         encoder = self._require_encoder()
         begin = time.perf_counter()
         async with _wrap_errors(self._config.base_url, self._config.model):
-            vectors = await encoder.encode([text], dimensions=resolved)
-        self._validate(vectors, 1, resolved)
-        self._log_batch(begin, 1, len(vectors[0]))
+            result = await encoder.encode([text], dimensions=resolved)
+        vectors = self._reorder(result.items, 1)
+        self._check_vectors(vectors, resolved)
+        self._log_batch(begin, 1, len(vectors[0]), result.prompt_tokens)
         return vectors[0]
 
     async def embed_many(
@@ -147,10 +148,11 @@ class EmbeddingService(Service):
         for batch in batches:
             batch_begin = time.perf_counter()
             async with _wrap_errors(self._config.base_url, self._config.model):
-                raw = await encoder.encode(batch, dimensions=resolved)
-            self._validate(raw, len(batch), resolved)
-            vectors.extend(raw)
-            self._log_batch(batch_begin, len(batch), len(raw[0]))
+                result = await encoder.encode(batch, dimensions=resolved)
+            batch_vectors = self._reorder(result.items, len(batch))
+            self._check_vectors(batch_vectors, resolved)
+            vectors.extend(batch_vectors)
+            self._log_batch(batch_begin, len(batch), len(batch_vectors[0]), result.prompt_tokens)
         if len(batches) > 1:
             self.log.info(
                 "批量向量化完成",
@@ -180,10 +182,21 @@ class EmbeddingService(Service):
                 raise EmbeddingInputError("待向量化的文本不能为空或全空白")
 
     @staticmethod
-    def _validate(vectors: list[list[float]], expected: int, dimensions: int | None) -> None:
-        """校验返回体与请求对得上，对不上就抛错而不是把坏数据交给调用方。"""
-        if len(vectors) != expected:
-            raise EmbeddingResponseError(f"端点返回 {len(vectors)} 条向量，期望 {expected} 条")
+    def _reorder(items: Sequence[EncodedVector], expected: int) -> list[list[float]]:
+        """按 index 归位（兼容端点可能乱序返回，不依赖端点顺序）。
+
+        index 越界、重复或条数不符一律抛错：不猜顺序，也不拿坏数据凑数。
+        """
+        order = sorted(item.index for item in items)
+        if order != list(range(expected)):
+            raise EmbeddingResponseError(
+                f"端点返回的 index 与请求对不上：期望 0..{expected - 1}，实际 {order}"
+            )
+        return [item.vector for item in sorted(items, key=lambda item: item.index)]
+
+    @staticmethod
+    def _check_vectors(vectors: list[list[float]], dimensions: int | None) -> None:
+        """校验声明的维度被兑现：端点静默忽略 dimensions 时，只有这里能发现。"""
         for vector in vectors:
             if not vector:
                 raise EmbeddingResponseError("端点返回了空向量")
@@ -192,16 +205,22 @@ class EmbeddingService(Service):
                     f"端点返回 {len(vector)} 维向量，与声明的 {dimensions} 维不符"
                 )
 
-    def _log_batch(self, begin: float, count: int, dimension: int) -> None:
+    def _log_batch(
+        self, begin: float, count: int, dimension: int, prompt_tokens: int | None
+    ) -> None:
         """每批一条成功日志：只记模型 / 端点 / 条数 / 维度 / 耗时，不记正文。
 
-        维度记的是实际返回的维数（未声明 dimensions 时它就是模型原始维度）。
+        维度记的是实际返回的维数（未声明 dimensions 时它就是模型原始维度）；
+        端点没返回用量时省略 输入token，不因为没得记而报错。
         """
-        self.log.info(
-            "向量化完成",
-            模型=self._config.model,
-            端点=self._config.base_url,
-            文本数=count,
-            维度=dimension,
-            耗时毫秒=_elapsed_ms(begin),
-        )
+        fields: dict[str, object] = {
+            "模型": self._config.model,
+            "端点": self._config.base_url,
+            "文本数": count,
+            "维度": dimension,
+            "耗时毫秒": _elapsed_ms(begin),
+        }
+        if prompt_tokens is not None:
+            fields["输入token"] = prompt_tokens
+        # 显式传 face：fields 的值是 object，**fields 展开时会被逐个形参对账
+        self.log.info("向量化完成", face=None, **fields)

@@ -1,11 +1,4 @@
-"""向量化内核：协议、远程实现与工厂。
-
-约定（实现者必须遵守）：
-- 一次 encode() = 一次请求一批文本，返回顺序与入参一一对应，条数必须相等。
-- dimensions 非 None 时必须兑现：拿不到该维度就抛错，禁止静默忽略。本地 bge
-  这类没有截断能力的实现遇到该参数应当显式报错，而不是返回原始维度——
-  否则调用方以为拿到 512 维、实际是 1024 维，错得很晚。
-- aclose() 是资源回收入口；没有资源的本地实现写空实现即可。
+"""向量化内核：协议、结果结构、远程实现与工厂。
 
 换内核 = 子类覆盖 EmbeddingService._make_encoder()（容器的构造器契约只认
 Service 与配置节点，协议对象注不进去）。
@@ -14,20 +7,53 @@ Service 与配置节点，协议对象注不进去）。
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Protocol, cast
 
 from openai import AsyncOpenAI, Omit, omit
+from openai.types.create_embedding_response import Usage
 
 from core.config import EmbeddingSettings
-from core.embedding.errors import EmbeddingResponseError
+
+
+@dataclass(frozen=True, slots=True)
+class EncodedVector:
+    """一条向量，index 是它在本次请求入参中的位置。
+
+    归位与 index 校验在服务层（EmbeddingService._reorder）：内核只把位置原样
+    报上来，不替服务层猜顺序，也不自行重排或丢弃。
+    """
+
+    index: int
+    vector: list[float]
+
+
+@dataclass(frozen=True, slots=True)
+class EncodeResult:
+    """一次 encode() 的结果。
+
+    prompt_tokens 为 None 表示端点没返回用量（兼容端点常见），由调用方决定记不记。
+    """
+
+    items: tuple[EncodedVector, ...]
+    prompt_tokens: int | None = None
 
 
 class Encoder(Protocol):
-    """把一批文本换成一批向量。"""
+    """把一批文本换成一批向量。
+
+    约定（实现者必须遵守）：
+    - 一次 encode() = 一次请求一批文本，返回的 items 条数必须与入参相等。
+    - 每条向量带 index（入参位置），归位由调用方负责——内核不得自行重排。
+    - dimensions 非 None 时必须兑现：拿不到该维度就抛错，禁止静默忽略。本地 bge
+      这类没有截断能力的实现遇到该参数应当显式报错，而不是返回原始维度——
+      否则调用方以为拿到 512 维、实际是 1024 维，错得很晚。
+    - aclose() 是资源回收入口；没有资源的本地实现写空实现即可。
+    """
 
     async def encode(
         self, texts: Sequence[str], *, dimensions: int | None = None
-    ) -> list[list[float]]: ...
+    ) -> EncodeResult: ...
 
     async def aclose(self) -> None: ...
 
@@ -48,23 +74,23 @@ class RemoteEncoder:
         self._client: AsyncOpenAI = client
         self._model: str = model
 
-    async def encode(
-        self, texts: Sequence[str], *, dimensions: int | None = None
-    ) -> list[list[float]]:
-        """一次请求带一批文本，按 index 归位后返回（不依赖端点返回顺序）。
-
-        index 只有内核拿得到（协议出口是纯向量），因此归位与 index 校验都在这里做。
-        index 缺失、越界或重复时抛错，不猜顺序。
-        """
+    async def encode(self, texts: Sequence[str], *, dimensions: int | None = None) -> EncodeResult:
+        """一次请求带一批文本，把向量与它们在入参中的位置原样报上去。"""
         response = await self._client.embeddings.create(
             model=self._model,
             input=list(texts),
             dimensions=_or_omit(dimensions),
         )
-        indices = sorted(item.index for item in response.data)
-        if indices != list(range(len(response.data))):
-            raise EmbeddingResponseError(f"端点返回的 index 不合法：{indices}")
-        return [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
+        # usage 在 SDK 类型里是必填，但兼容端点不返回时 construct_type 会把它填成
+        # None（实测），直接取属性会炸。类型上表达不出来，只能绕过类型系统
+        # （先转 object 再转目标类型，双重 cast 才不会撞 reportInvalidCast）。
+        usage = cast("Usage | None", cast("object", response.usage))
+        return EncodeResult(
+            items=tuple(
+                EncodedVector(index=item.index, vector=item.embedding) for item in response.data
+            ),
+            prompt_tokens=None if usage is None else usage.prompt_tokens,
+        )
 
     async def aclose(self) -> None:
         await self._client.close()

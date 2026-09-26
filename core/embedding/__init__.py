@@ -8,7 +8,13 @@
 换内核（本地 ONNX 等）时覆盖 EmbeddingService._make_encoder()，业务侧不用改。
 """
 
-from core.embedding.encoder import Encoder, RemoteEncoder, build_encoder
+from core.embedding.encoder import (
+    EncodedVector,
+    Encoder,
+    EncodeResult,
+    RemoteEncoder,
+    build_encoder,
+)
 from core.embedding.errors import (
     EmbeddingConfigError,
     EmbeddingConnectionError,
@@ -29,6 +35,8 @@ __all__ = [
     "EmbeddingResponseError",
     "EmbeddingService",
     "EmbeddingTimeoutError",
+    "EncodeResult",
+    "EncodedVector",
     "Encoder",
     "RemoteEncoder",
     "build_encoder",
