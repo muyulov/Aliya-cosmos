@@ -2,7 +2,7 @@
 
 Python + uv 通用脚手架。三层结构：`service` / `logger` / `config`，开箱可跑，后续往里填业务。
 
-技术栈：Python 3.12+、uv、pydantic、PyYAML、loguru、ruff、pytest。
+技术栈：Python 3.12+、uv、pydantic、PyYAML、loguru、openai、ruff、pytest。
 
 ## 快速开始
 
@@ -37,11 +37,12 @@ core/
   service/       业务层：服务基类、容器、注册表、具体服务实现
   logger/        日志层：颜文字、结构化上下文、树形/JSON 格式化、sink 装配
   config/        配置层：YAML 骨架加载与占位符插值
+  llm/           LLM 层：对话 / 流式 / 结构化 / 工具调用 / embedding / 多模态
 data/           配置与运行数据：config/app.yaml 为配置骨架，可安全提交
 tests/           测试
 ```
 
-依赖方向单向：`service → (config, logger)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。
+依赖方向单向：`service → (config, logger)`、`llm → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。
 
 ## 配置
 
@@ -88,6 +89,16 @@ log:
 | `service.start_timeout` | `30` | 单个服务 `start()` 的超时秒数，必须为正数；写 `null` 表示不限制 |
 | `service.stop_timeout` | `30` | 单个服务 `stop()` 的超时秒数，必须为正数；同上 |
 | `clock.tz` | `UTC` | 时钟服务的时区，如 `Asia/Shanghai` |
+| `llm.base_url` | `https://api.openai.com/v1` | 端点地址，接 DeepSeek 等兼容端点时改成对应地址 |
+| `llm.api_key` | 空 | 密钥，YAML 里写 `${OPENAI_API_KEY:}` 由 `.env` 提供；留空则 LLM 功能不可用（只警告，不影响启动） |
+| `llm.chat_model` | `gpt-4o-mini` | 对话模型 |
+| `llm.embed_model` | 空 | embedding 模型，留空则 `embed()` 报错（不回退对话模型） |
+| `llm.vision_model` | 空 | 多模态模型，留空复用 `llm.chat_model` |
+| `llm.timeout` | `60` | 单次请求超时秒数 |
+| `llm.retries` | `2` | SDK 重试次数，`0` 关闭 |
+| `llm.structured_mode` | `json_schema` | 结构化输出模式，兼容端点不支持时改 `json_object` |
+| `llm.temperature` | `null` | 温度，`null` 表示不传该参数（用服务端默认） |
+| `llm.max_tokens` | `null` | 最大输出 token，`null` 表示不传该参数 |
 
 ### 失败行为
 
@@ -152,6 +163,72 @@ with log.context(会话="qq:123"):
 ```
 
 日志文件有两个：`logs/app.log`（跟随 `log.level`）与 `logs/error.log`（固定 ERROR 级），均按天轮转。
+
+## LLM 层
+
+`LLMService` 把「调大模型」收成一个服务，业务代码不直接接触 SDK。六项能力：
+
+```python
+from pydantic import BaseModel
+
+from core.llm import LLMService, image_url, system, tool, user, user_with_images
+
+
+class Item(BaseModel):
+    name: str
+    price: float
+
+
+class WeatherArgs(BaseModel):
+    city: str
+
+
+async def main(svc: LLMService, picture_url: str) -> None:
+    # 对话
+    reply = await svc.chat([system("你是助手"), user("你好")])
+
+    # 流式：逐段产出，不自动拼接
+    parts = [part async for part in svc.stream([user("讲个故事")])]
+
+    # 结构化输出
+    item = await svc.chat_structured([user("苹果多少钱")], Item)
+
+    # 工具调用（单轮）：回传与循环由调用方写
+    call_reply = await svc.chat_tools(
+        [user("上海天气")], [tool("get_weather", "查天气", WeatherArgs)]
+    )
+
+    # embedding
+    vectors = await svc.embed(["文本一", "文本二"])
+
+    # 多模态：不单独开方法，传模型即可
+    seen = await svc.chat(
+        [user_with_images("这是什么", image_url(picture_url))], model=svc.vision_model
+    )
+```
+
+约定：
+
+| 约定 | 说明 |
+| --- | --- |
+| 不记正文 | 日志只记模型 / 端点 / 耗时 / token 用量；消息正文该不该记由调用方自己决定并自己打 |
+| 不自动多轮 | `chat_tools` 只发一轮并返回 `tool_calls`，回传与循环由调用方写 |
+| 单端点多模型 | 改 `llm.base_url` 即可接 DeepSeek、Moonshot、vLLM、Ollama 等 OpenAI 兼容端点；非兼容协议不在范围内。用 Chat Completions 而非 Responses API，因为兼容端点普遍只实现前者 |
+| 缺密钥不 fail fast | 没配 `llm.api_key` 时服务只警告、健康检查 unhealthy，调用时才抛 `LLMConfigError` |
+| 重试交给 SDK | 超时与重试由 `llm.timeout` / `llm.retries` 控制；流式一旦开始消费就不再重试，断流是否重放由调用方决定 |
+| `json_object` 要提示词配合 | 该模式要求提示词里出现 json 字样，属调用方责任 |
+| embedding 不回退 | `llm.embed_model` 留空时 `embed()` 直接报错：对话模型大多没有 embedding 端点，回退只会把错误推后 |
+
+错误全部继承 `LLMError`，原始 SDK 异常挂在 `__cause__`：
+
+| 类型 | 触发条件 |
+| --- | --- |
+| `LLMConfigError` | 未配 `api_key`、`embed_model` 留空 |
+| `LLMRequestError` | 端点返回 4xx / 5xx（带 `status_code` / `endpoint` / `model` / `request_id`） |
+| `LLMTimeoutError` | 请求超时 |
+| `LLMConnectionError` | 连不上端点（超时除外） |
+| `LLMSchemaError` | 结构化输出不符合给定 schema |
+| `LLMResponseError` | 返回体缺内容（choices 为空、`content` 为 `None`） |
 
 ## 如何新增一个服务
 
