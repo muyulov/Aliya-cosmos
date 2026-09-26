@@ -171,7 +171,16 @@ with log.context(会话="qq:123"):
 ```python
 from pydantic import BaseModel
 
-from core.llm import LLMService, image_url, system, tool, user, user_with_images
+from core.llm import (
+    LLMService,
+    assistant,
+    image_url,
+    system,
+    tool,
+    tool_result,
+    user,
+    user_with_images,
+)
 
 
 class Item(BaseModel):
@@ -194,9 +203,13 @@ async def main(svc: LLMService, picture_url: str) -> None:
     item = await svc.chat_structured([user("苹果多少钱")], Item)
 
     # 工具调用（单轮）：回传与循环由调用方写
-    call_reply = await svc.chat_tools(
-        [user("上海天气")], [tool("get_weather", "查天气", WeatherArgs)]
-    )
+    messages = [user("上海天气")]
+    call_reply = await svc.chat_tools(messages, [tool("get_weather", "查天气", WeatherArgs)])
+    if call_reply.tool_calls:
+        # 要第二轮就自己拼：assistant() 原样带回 tool_calls，tool_result() 回填结果
+        call = call_reply.tool_calls[0]
+        messages += [assistant(tool_calls=call_reply.tool_calls), tool_result(call.id, "晴 26℃")]
+        final = await svc.chat(messages)
 
     # embedding
     vectors = await svc.embed(["文本一", "文本二"])
@@ -212,7 +225,7 @@ async def main(svc: LLMService, picture_url: str) -> None:
 | 约定 | 说明 |
 | --- | --- |
 | 不记正文 | 日志只记模型 / 端点 / 耗时 / token 用量；消息正文该不该记由调用方自己决定并自己打 |
-| 不自动多轮 | `chat_tools` 只发一轮并返回 `tool_calls`，回传与循环由调用方写 |
+| 不自动多轮 | `chat_tools` 只发一轮并返回 `tool_calls`，回传用 `assistant(tool_calls=...)` + `tool_result(...)`，循环由调用方写 |
 | 单端点多模型 | 改 `llm.base_url` 即可接 DeepSeek、Moonshot、vLLM、Ollama 等 OpenAI 兼容端点；非兼容协议不在范围内。用 Chat Completions 而非 Responses API，因为兼容端点普遍只实现前者 |
 | 缺密钥不 fail fast | 没配 `llm.api_key` 时服务只警告、健康检查 unhealthy，调用时才抛 `LLMConfigError` |
 | 重试交给 SDK | 超时与重试由 `llm.timeout` / `llm.retries` 控制；流式一旦开始消费就不再重试，断流是否重放由调用方决定 |
