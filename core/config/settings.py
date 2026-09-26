@@ -65,6 +65,22 @@ class ClockSettings(BaseModel):
     tz: str = "UTC"
 
 
+class EmbeddingSettings(BaseModel):
+    """文本向量化端点配置。
+
+    与 llm 分开配：DeepSeek 没有 embedding 端点，两家通常不是同一个服务。
+    `dimensions` 为 None 表示用模型原始维度，设值则请求截断（做不到的模型会报错）。
+    """
+
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    api_key: str = ""  # YAML 里写 ${DASHSCOPE_API_KEY:}，留空表示该端点未启用
+    model: str = "text-embedding-v3"
+    timeout: float = Field(default=60.0, gt=0)  # 单次请求超时（秒）
+    retries: int = Field(default=2, ge=0)  # SDK 重试次数，0 关闭
+    batch_size: int = Field(default=10, gt=0)  # 单次请求最多几条文本
+    dimensions: int | None = None  # None = 用模型原始维度；设值则请求截断
+
+
 class LLMEndpointSettings(BaseModel):
     """一个 LLM 端点的配置：连接参数与采样参数都归端点自己。
 
@@ -101,6 +117,7 @@ class Settings(BaseModel):
     log: LogSettings = LogSettings()
     service: ServiceSettings = ServiceSettings()
     clock: ClockSettings = ClockSettings()
+    embedding: EmbeddingSettings = EmbeddingSettings()
     llm: LLMSettings = LLMSettings()
 
     #: 本次配置的来源；由 load_settings() 写入，直接构造实例时保持 None

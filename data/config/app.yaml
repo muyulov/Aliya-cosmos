@@ -18,6 +18,17 @@ service:
 clock:
   tz: UTC
 
+# 文本向量化端点。与 llm 分开配：DeepSeek 没有 embedding 端点，两家通常不是同一个服务。
+# 没配 api_key 时只警告、健康检查 unhealthy，进程照常启动（不 fail fast）。
+embedding:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1 # OpenAI 兼容端点
+  api_key: ${DASHSCOPE_API_KEY:} # 冒号后为空：.env 里没配时取空串，该端点不可用
+  model: text-embedding-v3
+  timeout: 60 # 单次请求超时（秒），必须为正数
+  retries: 2 # SDK 重试次数，0 关闭
+  batch_size: 10 # 单次请求最多几条文本。阿里 v3 上限 10（v1/v2 为 25，OpenAI 为 2048），超了会 400
+  dimensions: null # null = 用模型原始维度（v3 默认 1024）；设值则请求截断，做不到的模型会报错
+
 # chat 与 vision 是两个端点，字段相同：可以指向同一个服务，也可以分开接不同供应商。
 # 两个端点都没配 api_key 时，服务只警告、健康检查 unhealthy，进程照常启动（不 fail fast）。
 llm:

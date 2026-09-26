@@ -37,12 +37,13 @@ core/
   service/       业务层：服务基类、容器、注册表、具体服务实现
   logger/        日志层：颜文字、结构化上下文、树形/JSON 格式化、sink 装配
   config/        配置层：YAML 骨架加载与占位符插值
+  embedding/     向量层：单条 / 批量文本向量化
   llm/           LLM 层：对话 / 流式 / 结构化 / 工具调用 / 多模态
 data/           配置与运行数据：config/app.yaml 为配置骨架，可安全提交
 tests/           测试
 ```
 
-依赖方向单向：`service → (config, logger)`、`llm → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。
+依赖方向单向：`service → (config, logger)`、`embedding → (config, logger, service)`、`llm → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。
 
 ## 配置
 
@@ -89,6 +90,19 @@ log:
 | `service.start_timeout` | `30` | 单个服务 `start()` 的超时秒数，必须为正数；写 `null` 表示不限制 |
 | `service.stop_timeout` | `30` | 单个服务 `stop()` 的超时秒数，必须为正数；同上 |
 | `clock.tz` | `UTC` | 时钟服务的时区，如 `Asia/Shanghai` |
+
+`embedding` 是独立的向量化端点，与 llm 分开配（DeepSeek 没有 embedding 端点，两家通常不是同一个服务）：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI 兼容端点地址 |
+| `api_key` | 空 | 密钥，YAML 里写 `${DASHSCOPE_API_KEY:}` 由 `.env` 提供；留空则该端点不可用（只警告，不影响启动） |
+| `model` | `text-embedding-v3` | 向量化模型 |
+| `timeout` | `60` | 单次请求超时秒数，必须为正数 |
+| `retries` | `2` | SDK 重试次数，`0` 关闭 |
+| `batch_size` | `10` | 单次请求最多几条文本；阿里 v3 上限就是 10（v1/v2 为 25、OpenAI 为 2048），超了会 400 |
+| `dimensions` | `null` | `null` 用模型原始维度；设值则请求截断，做不到的模型会报错 |
+
 `llm.chat` 与 `llm.vision` 是两个端点，字段完全相同（可指向同一服务，也可分开接不同供应商）：
 
 | 端点字段 | 默认 | 说明 |
@@ -240,6 +254,47 @@ async def main(svc: LLMService, picture_url: str) -> None:
 | `LLMConnectionError` | 连不上端点（超时除外） |
 | `LLMSchemaError` | 结构化输出不符合给定 schema |
 | `LLMResponseError` | 返回体缺内容（choices 为空、`content` 为 `None`） |
+
+## 向量层
+
+`EmbeddingService` 把「文本转向量」收成一个服务，业务代码不直接接触 SDK：
+
+```python
+from core.embedding import EmbeddingService
+
+
+async def main(svc: EmbeddingService, texts: list[str]) -> None:
+    # 单条
+    vector = await svc.embed("要向量化的文本")
+
+    # 批量：按 batch_size 切片、逐批串行请求，结果顺序与入参一致
+    vectors = await svc.embed_many(texts)
+
+    # 截断到指定维度：调用覆盖 > 配置 dimensions > 不传（用模型原始维度）
+    short = await svc.embed("要向量化的文本", dimensions=512)
+```
+
+约定：
+
+| 约定 | 说明 |
+| --- | --- |
+| 原样透传、不归一化 | 返回的是模型原始向量，模长信息不丢；要不要 L2 归一化由调用方决定 |
+| 空序列早退 | `embed_many([])` 返回 `[]`，不发请求、不查密钥（空输入不需要服务）；空串与全空白串在本地抛 `EmbeddingInputError` |
+| 缺密钥不 fail fast | 没配 `api_key` 时只警告、不建内核，健康检查 unhealthy，调用时才抛 `EmbeddingConfigError` |
+| 内核可替换 | 换本地模型（ONNX 等）时覆盖 `EmbeddingService._make_encoder()` 返回一个 `Encoder` 即可；归位与校验仍由服务层做 |
+| 重试交给 SDK | 超时与重试由端点的 `timeout` / `retries` 控制 |
+| 不记正文 | 日志只记模型 / 端点 / 文本数 / 维度 / 耗时 / 输入 token |
+
+错误全部继承 `EmbeddingError`，原始 SDK 异常挂在 `__cause__`：
+
+| 类型 | 触发条件 |
+| --- | --- |
+| `EmbeddingConfigError` | 端点未配 `api_key` |
+| `EmbeddingInputError` | 文本为空或全空白 |
+| `EmbeddingRequestError` | 端点返回 4xx / 5xx（带 `status_code` / `endpoint` / `model` / `request_id`） |
+| `EmbeddingTimeoutError` | 请求超时 |
+| `EmbeddingConnectionError` | 连不上端点（超时除外） |
+| `EmbeddingResponseError` | 返回体与请求对不上：条数不符 / `index` 越界或重复 / 空向量 / 声明维度不符 |
 
 ## 如何新增一个服务
 

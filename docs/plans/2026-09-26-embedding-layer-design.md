@@ -105,22 +105,41 @@ core/embedding/
 
 ## 五、内核协议（`encoder.py`）
 
+协议出口带结构而不是纯向量：纯向量下调用方拿不到 `index` 与 `usage`，归位只能塞进内核，
+而乱序恰恰是端点的行为，不该由可替换的内核替服务层兜（见实施补记第 1 条）。
+
 ```python
+@dataclass(frozen=True, slots=True)
+class EncodedVector:
+    index: int
+    vector: list[float]
+
+
+@dataclass(frozen=True, slots=True)
+class EncodeResult:
+    items: tuple[EncodedVector, ...]
+    prompt_tokens: int | None = None
+
+
 class Encoder(Protocol):
     async def encode(
         self, texts: Sequence[str], *, dimensions: int | None = None
-    ) -> list[list[float]]: ...
+    ) -> EncodeResult: ...
 
     async def aclose(self) -> None: ...
 ```
 
-三条约定（写进 docstring，实现者必须遵守）：
+四条约定（写进 docstring，实现者必须遵守）：
 
-1. **一次调用 = 一次请求一批文本**，返回顺序与入参一一对应，条数必须相等。
-2. **`dimensions` 非 None 时必须兑现**：拿不到该维度就抛错，**禁止静默忽略**。
+1. **一次调用 = 一次请求一批文本**，`items` 条数必须与入参相等。
+2. **归位责任在调用方**：每条向量带 `index`（入参位置），内核不得自行重排或丢弃。
+3. **`dimensions` 非 None 时必须兑现**：拿不到该维度就抛错，**禁止静默忽略**。
    本地 bge 这类没有截断能力的实现，遇到该参数应当显式报错而不是返回原始维度——
    否则调用方以为拿到 512 维、实际是 1024 维，错得很晚。
-3. `aclose()` 是资源回收入口；没有资源的本地实现写空实现即可（协议化的小代价）。
+4. `aclose()` 是资源回收入口；没有资源的本地实现写空实现即可（协议化的小代价）。
+
+`prompt_tokens` 为 None 表示端点没返回用量：`CreateEmbeddingResponse.usage` 在 SDK 类型里
+是必填，但兼容端点不返回时 `construct_type` 会把它填成 `None`（实测），实现侧要按可空处理。
 
 `RemoteEncoder(AsyncOpenAI, model)`：`encode()` 里 `dimensions` 走 `omit` 表达「不传」
 （显式 `None` 会被 SDK 序列化成 JSON `null`）。`build_encoder(config)` 是全仓库除
@@ -171,7 +190,7 @@ async def stop(self) -> None:
 1. 校验 `text.strip()` 非空，否则抛 `EmbeddingInputError`。
 2. 解析维度：`_pick(dimensions, config.dimensions)`（调用方覆盖 > 配置 > 不传）。
 3. `_require_encoder()`（未配 key 时抛 `EmbeddingConfigError`）。
-4. 一次请求（`texts=[text]`）→ 取回一条向量并校验。
+4. 一次请求（`texts=[text]`）→ 按 `index` 归位、校验条数与维度（`_reorder` + `_check_vectors`）。
 5. 打一条日志 → 返回。
 
 `embed_many(texts, *, dimensions=None)`：
@@ -180,7 +199,8 @@ async def stop(self) -> None:
 2. **先全量校验**所有文本非空，再发第一批：否则传到第 5 条才发现空串，前几批白花钱。
 3. 解析维度、取内核。
 4. 按 `batch_size` 切片，逐批 `await`（串行）；每批完成打一条日志。
-5. 每批结果按 `data[i].index` 归位后拼接（**不依赖端点返回顺序**，兼容端点可能乱序）。
+5. 每批结果在**服务层**按 `item.index` 归位后拼接（`_reorder`；**不依赖端点返回顺序**，
+   兼容端点可能乱序）；`index` 越界、重复或条数不符抛 `EmbeddingResponseError`。
 6. 任一批抛错则整次调用抛错，已完成的批作废。
 7. 批数 > 1 时补一条汇总日志。
 
@@ -206,7 +226,7 @@ async def stop(self) -> None:
 日志（不记正文，与 llm 一致）：
 
 - 每批一条 `self.log.info("向量化完成", 模型=…, 端点=…, 文本数=…, 维度=…, 耗时毫秒=…)`，
-  有 `usage` 时补 `输入token`（兼容端点未必返回，取不到就省略）。
+  `EncodeResult.prompt_tokens` 非 None 时补 `输入token`（兼容端点未必返回，取不到就省略）。
 - 批数 > 1 时再打一条 `self.log.info("批量向量化完成", 批数=…, 文本数=…, 耗时毫秒=…)`。
 - 失败走 `self.log_error`（自动带 `错误=类型: 消息`）。
 - `**fields` 展开会逐个形参对账，里面若含 `face` 会撞类型：与 llm 层一致，显式传 `face=None`。
@@ -242,7 +262,9 @@ service._encoder = cast("Encoder", FakeEncoder(...))  # pyright: ignore[reportPr
 | 单条正常返回 | 返回 `str` 对应的向量，条数 1 |
 | `dimensions` 三级优先 | 调用覆盖 > 配置 > 不传；假内核记账收到的 `dimensions` |
 | 批量切分次数 | `n=25`、`batch_size=10` → 内核被调 3 次（10 / 10 / 5） |
-| 批量乱序归位 | 假内核故意乱序返回 `index` → 结果仍按入参顺序 |
+| 批量乱序归位 | 假内核乱序返回 `EncodedVector(index=…)` → 结果仍按入参顺序 |
+| `index` 越界 / 重复 / 条数不符 | 三种都抛 `EmbeddingResponseError` |
+| 日志带 `输入token` | 假内核给 `prompt_tokens` 时有该字段；给 `None` 时无 |
 | 空输入不打请求 | `embed_many([])` 返回 `[]` 且内核零调用（含未配 key 的场景） |
 | 空串与全空白串 | 两者都抛 `EmbeddingInputError`；批量中第 3 条为空 → 内核零调用 |
 | 未配 key | `start()` 不抛错只警告、`_encoder is None`、`health().healthy is False`；调用抛 `EmbeddingConfigError` |
@@ -266,7 +288,8 @@ service._encoder = cast("Encoder", FakeEncoder(...))  # pyright: ignore[reportPr
 - **与 `llm/client.py` 的 5 行重复**：`AsyncOpenAI(api_key, base_url, timeout, max_retries)`
   两处各写一遍。抽公共基类会动已稳定的 llm 层，本次接受重复。
 - **`request_id` 未必存在**：`APIStatusError.request_id` 可能是 None，字段保留但不保证有值。
-- **`EmbeddingResponseError` 的 `index` 归位**：`index` 由端点给出，缺失或重复时按异常处理而不是猜测顺序。
+- **`EmbeddingResponseError` 的 `index` 归位**：`index` 由端点给出，归位在服务层 `_reorder`，
+  越界 / 重复 / 条数不符按异常处理而不是猜测顺序。
 - **`Encoder.aclose()` 让本地实现多写一个空方法**：比在 `stop()` 里 `isinstance` 判断实现类型更干净。
 - **新层不在 coverage omit 里**：只 omit `core/main.py`，`core/embedding/*` 需要真实测试覆盖。
 
@@ -283,3 +306,17 @@ service._encoder = cast("Encoder", FakeEncoder(...))  # pyright: ignore[reportPr
    （手工冒烟，不写进自动化测试）。
 8. README 配置项表格含 `embedding.*` 各字段；新增「向量层」章节含两条调用示例与
    「原样透传、不归一化」「空序列早退」两条约定。
+
+---
+
+## 实施补记（2026-09-26）
+
+1. **协议出口从纯向量改成带结构**（实施中按用户要求回改）。原方案的
+   `encode() -> list[list[float]]` 有两个表达不出来的事实：`index` 只有内核拿得到
+   （归位被迫下沉进内核，与「内核可替换」的定位冲突），`usage` 也没有出口
+   （`输入token` 永远取不到）。现协议返回 `EncodeResult`，归位（`_reorder`）与
+   `输入token` 日志都回到服务层，内核只上报位置与用量。
+2. **`CreateEmbeddingResponse.usage` 必须按可空处理**：SDK 类型里它是必填，但用
+   `construct_type` 实测——数据里没有 `usage` 时该字段被填成 `None`，直接取属性会炸。
+   basedpyright 会把变量注解收窄回 `Usage`（`usage is None` 报 `reportUnnecessaryComparison`），
+   只能写 `cast("Usage | None", cast("object", response.usage))`——双重 cast 与 llm 层同一踩坑。
