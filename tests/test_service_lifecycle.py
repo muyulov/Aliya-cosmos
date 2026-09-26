@@ -540,7 +540,7 @@ def test_超时配置必须为正数() -> None:
 
 
 async def test_启停日志走服务门面带前缀与耗时(tmp_path: Path) -> None:
-    """单服务日志与失败日志同形：`[label]` 前缀 + `服务=` 字段 + 数值耗时。
+    """单服务日志与失败日志同形：同一条 `[label]` 消息前缀 + 数值耗时。
 
     耗时字段是排查「同层里是谁慢」的唯一依据——整层耗时只能定位到批次。
     """
@@ -580,6 +580,57 @@ async def test_同层日志列出服务名与一基层号(tmp_path: Path) -> Non
     assert "耗时毫秒: " in text
 
 
+async def test_单服务层不重复打层摘要(tmp_path: Path) -> None:
+    """单服务层没有并发：层摘要与它的「服务已启动」是同一条信息，不再重复打印。"""
+    cfg = _log_cfg(tmp_path)
+    setup_logging(cfg)
+
+    mgr = ServiceManager()
+    _ = mgr.register(QuickService)
+    await mgr.start_all()
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "[quick] 服务已启动" in text
+    assert "同层服务启动完成" not in text
+
+
+async def test_启动汇总带总耗时(tmp_path: Path) -> None:
+    """逐服务耗时只在层内可比；跨层的等待只有汇总行的墙钟时间能反映。"""
+    cfg = _log_cfg(tmp_path)
+    setup_logging(cfg)
+
+    mgr = ServiceManager()
+    _ = mgr.register(InnerService)
+    _ = mgr.register(OuterService)
+    await mgr.start_all()
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "全部服务启动完成" in text
+    assert "服务数: 2" in text
+    assert "耗时毫秒: " in text.split("全部服务启动完成", 1)[1]
+
+
+async def test_启动失败日志也带耗时(tmp_path: Path) -> None:
+    """失败与成功同形：既有 `错误=` 也有数值耗时，能看出是立刻失败还是卡了很久。"""
+    cfg = _log_cfg(tmp_path)
+    setup_logging(cfg)
+
+    mgr = ServiceManager()
+    _ = mgr.register(BusinessTimeoutOnStart)
+
+    with pytest.raises(ServiceStartError):
+        await mgr.start_all()
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "[business-timeout] 服务启动失败" in text
+    assert "错误: TimeoutError: 业务侧 socket 超时" in text
+    # 该场景没有成功日志、也没有层摘要，带 耗时毫秒 的只有这条失败日志
+    assert "耗时毫秒: " in text
+
+
 async def test_回滚会留痕(tmp_path: Path) -> None:
     """回归：回滚原先完全不留痕，日志里几条「已启动」后凭空冒失败，看不出谁清理的。"""
     cfg = _log_cfg(tmp_path)
@@ -597,6 +648,8 @@ async def test_回滚会留痕(tmp_path: Path) -> None:
     assert "启动未完成，回滚本次动过的服务" in text
     assert "回滚时服务已关闭" in text
     assert "[half-inner] 回滚时服务已关闭" in text
+    # 启动失败者从未 RUNNING，说「已关闭」会跟它上面那条「服务启动失败」自相矛盾
+    assert "[half-outer] 回滚时已清理启动失败的服务" in text
     assert "回滚完成" in text
 
 

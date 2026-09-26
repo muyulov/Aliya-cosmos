@@ -105,8 +105,10 @@ class Service:
 
     def __init__(self) -> None:
         self.state: ServiceState = ServiceState.CREATED
-        #: 带自身维度的日志门面：自带 服务= 字段与 [label] 消息前缀
-        self.log: Log = log.bind(服务=self.label).prefix(self.label)
+        #: 带自身维度的日志门面：消息前缀 [label]，并发启动时一眼看出是哪条服务的日志。
+        #: 不再同时 bind(服务=label)：前缀已经把服务名写进消息，结构化字段里再来
+        #: 一份就是同一信息打两遍（树形与 JSON 两种格式下都重复）。
+        self.log: Log = log.prefix(self.label)
 
     @property
     def label(self) -> str:

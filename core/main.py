@@ -22,18 +22,23 @@ from core.service.registry import build_manager
 async def _run(manager: ServiceManager) -> None:
     """启动全部服务并常驻，直到收到退出信号。"""
     async with manager.lifespan():
-        for status in await manager.health():
-            # detail 只在异常时非空（健康检查抛错的原因就写在这里），
-            # 无条件带上会让正常日志多出一行空字段。
-            extra = {"详情": status.detail} if status.detail else {}
-            log.info(
-                "服务健康",
-                服务=status.name,
-                健康=status.healthy,
-                状态=status.state.value,
-                **extra,
-            )
+        await _report_health(manager)
         await _wait_for_shutdown()
+
+
+async def _report_health(manager: ServiceManager) -> None:
+    """打印一次健康检查结果。
+
+    健康时状态恒为 running、`detail` 恒为空，「服务健康 健康=true」已经说完；
+    不健康时这两项才是定位所需，按需附加即可，正常日志不会多出冗余字段
+    （`detail` 尤其：健康检查抛错的原因就写在这里，丢了就看不到）。
+    """
+    for status in await manager.health():
+        # 值声明成 str：`**extra` 会被类型检查器逐个形参对账，object 连 face 都对不上
+        extra: dict[str, str] = {} if status.healthy else {"状态": status.state.value}
+        if status.detail:
+            extra["详情"] = status.detail
+        log.info("服务健康", 服务=status.name, 健康=status.healthy, **extra)
 
 
 async def _wait_for_shutdown() -> None:

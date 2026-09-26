@@ -42,14 +42,15 @@ def test_展示名显式优先于类名() -> None:
     assert DemoService().label == "demo"
 
 
-def test_服务日志自动带服务字段与消息前缀(tmp_path: Path) -> None:
+def test_服务日志自动带消息前缀(tmp_path: Path) -> None:
+    """服务名只出现在消息前缀里：再 bind 一份 服务= 就是同一信息打两遍。"""
     setup_logging(_cfg(tmp_path))
     DemoService().log.info("演示")
     logger.remove()
 
     text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
     assert "[demo] 演示" in text
-    assert "服务: demo" in text
+    assert "服务: demo" not in text
 
 
 def test_门面可继续派生(tmp_path: Path) -> None:
@@ -60,7 +61,6 @@ def test_门面可继续派生(tmp_path: Path) -> None:
 
     text = (tmp_path / "logs" / "app.log").read_text(encoding="utf-8")
     assert "[demo] 派生日志" in text
-    assert "服务: demo" in text
     assert "阶段: 预热" in text
 
 

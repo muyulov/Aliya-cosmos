@@ -73,6 +73,14 @@ def _resolve_timeout(override: float | Unset | None, default: float | None) -> f
     return default if isinstance(override, Unset) else override
 
 
+def _elapsed_ms(begin: float) -> float:
+    """从 begin（`time.perf_counter()` 的取值）到现在经过的毫秒数。
+
+    统一取一位小数：耗时是给人看趋势、给采集端算分位的数值，不该是带单位的字符串。
+    """
+    return round((time.perf_counter() - begin) * 1000, 1)
+
+
 async def _call_with_timeout(
     action: Callable[[], Coroutine[object, object, None]], timeout: float | None
 ) -> None:
@@ -195,6 +203,8 @@ class ServiceManager:
         # 不含已 RUNNING 的则会在整体失败、进程退出时把它们留在 RUNNING。
         # 新启动的登记在协程内部完成：gather 自身被取消时调用方拿不到 outcomes。
         attempted: list[Service] = []
+        # 整体启动耗时：层摘要只说明单批花了多久，跨层的总时长没有别处能算出来
+        started_at = time.perf_counter()
 
         try:
             for index, level in enumerate(self._levels):
@@ -219,21 +229,22 @@ class ServiceManager:
                     *(self._start_one(service, attempted) for service in pending),
                     return_exceptions=True,
                 )
-                elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
 
                 # gather 保序 → 失败者与 pending 同序，取首个即注册顺序最靠前者
                 failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
                 if failures:
                     raise failures[0]
 
-                # 服务名与耗时都给出来：只报「服务数」看不出慢的是哪一个，
+                # 只在同层真并发时打层摘要：单服务层的它跟那条「服务已启动」是同一
+                # 份信息（服务名 + 耗时），默认的单服务应用因此不会出现重复行。
                 # 层号是展示用的 1-based，与代码里的 index 差 1。
-                log.info(
-                    "同层服务启动完成",
-                    层=index + 1,
-                    服务="、".join(service.label for service in pending),
-                    耗时毫秒=elapsed_ms,
-                )
+                if len(pending) > 1:
+                    log.info(
+                        "同层服务启动完成",
+                        层=index + 1,
+                        服务="、".join(service.label for service in pending),
+                        耗时毫秒=_elapsed_ms(begin),
+                    )
         except BaseException:
             # 回滚必须留痕：否则日志里只有几条「服务已启动」后凭空冒出失败，
             # 看不出那些服务是被谁清理掉的。
@@ -241,7 +252,13 @@ class ServiceManager:
             await self._rollback(attempted)
             raise
 
-        log.info("全部服务启动完成", 服务数=len(self._instances))
+        # 总耗时是启动日志里唯一能回答「这次启动为什么慢」的数字：逐服务的耗时
+        # 只在层内可比，跨层的等待（层间串行）只有这里能算出来。
+        log.info(
+            "全部服务启动完成",
+            服务数=len(self._instances),
+            耗时毫秒=_elapsed_ms(started_at),
+        )
 
     async def _start_one(self, service: Service, attempted: list[Service]) -> None:
         """启动单个服务；超时与失败都收敛成 ServiceStartError。
@@ -268,7 +285,8 @@ class ServiceManager:
             raise ServiceStartError(service.label, cause) from exc
         except Exception as exc:
             service.state = ServiceState.FAILED
-            service.log_error("服务启动失败", exc)
+            # 失败也带耗时：与「服务已启动」同形，并回答「是立刻失败还是卡了很久才失败」
+            service.log_error("服务启动失败", exc, 耗时毫秒=_elapsed_ms(begin))
             raise ServiceStartError(service.label, exc) from exc
         except BaseException:
             # 取消等非 Exception：必须继续冒泡，但状态不能留在 STARTING
@@ -276,10 +294,9 @@ class ServiceManager:
             raise
 
         service.state = ServiceState.RUNNING
-        elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
-        # 用服务自己的门面：与服务侧的失败日志同形（[label] 前缀 + 服务= 字段），
+        # 用服务自己的门面：与失败日志同形（同一条 [label] 消息前缀），
         # 单服务耗时也让「同层里是谁慢」有据可查
-        service.log.info("服务已启动", face=faces.START, 耗时毫秒=elapsed_ms)
+        service.log.info("服务已启动", face=faces.START, 耗时毫秒=_elapsed_ms(begin))
 
     async def stop_all(self) -> None:
         """按启动的逆序关闭所有服务。
@@ -311,8 +328,7 @@ class ServiceManager:
                 continue
 
             service.state = ServiceState.STOPPED
-            elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
-            service.log.info("服务已停止", face=faces.BYE, 耗时毫秒=elapsed_ms)
+            service.log.info("服务已停止", face=faces.BYE, 耗时毫秒=_elapsed_ms(begin))
 
         log.info("全部服务已停止", face=faces.BYE, 服务数=len(self._order))
 
@@ -339,7 +355,11 @@ class ServiceManager:
                 service.log_error("回滚时服务关闭异常", exc)
             else:
                 service.state = ServiceState.FAILED if was_failed else ServiceState.STOPPED
-                service.log.info("回滚时服务已关闭", face=faces.BYE)
+                # 从未 RUNNING 的服务谈不上「已关闭」：它只是把 start() 半途申请的
+                # 资源回收掉了，措辞与真正关停在跑的服务分开，免得日志里
+                # 「服务启动失败」后面紧跟一句「已关闭」自相矛盾。
+                message = "回滚时已清理启动失败的服务" if was_failed else "回滚时服务已关闭"
+                service.log.info(message, face=faces.BYE)
 
         # 回滚没有「全部服务已停止」那样的收尾，这里补一句，
         # 免得日志断在半路、看不出清理是否已经做完；颜文字不用默认的 CHEER，
