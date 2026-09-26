@@ -19,6 +19,7 @@ from typing import Protocol
 from openai import AsyncOpenAI, Omit, omit
 
 from core.config import EmbeddingSettings
+from core.embedding.errors import EmbeddingResponseError
 
 
 class Encoder(Protocol):
@@ -50,13 +51,20 @@ class RemoteEncoder:
     async def encode(
         self, texts: Sequence[str], *, dimensions: int | None = None
     ) -> list[list[float]]:
-        """一次请求带一批文本，按端点返回的顺序取向量。"""
+        """一次请求带一批文本，按 index 归位后返回（不依赖端点返回顺序）。
+
+        index 只有内核拿得到（协议出口是纯向量），因此归位与 index 校验都在这里做。
+        index 缺失、越界或重复时抛错，不猜顺序。
+        """
         response = await self._client.embeddings.create(
             model=self._model,
             input=list(texts),
             dimensions=_or_omit(dimensions),
         )
-        return [item.embedding for item in response.data]
+        indices = sorted(item.index for item in response.data)
+        if indices != list(range(len(response.data))):
+            raise EmbeddingResponseError(f"端点返回的 index 不合法：{indices}")
+        return [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
 
     async def aclose(self) -> None:
         await self._client.close()
