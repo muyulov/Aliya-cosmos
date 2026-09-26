@@ -23,7 +23,16 @@ async def _run(manager: ServiceManager) -> None:
     """启动全部服务并常驻，直到收到退出信号。"""
     async with manager.lifespan():
         for status in await manager.health():
-            log.info("服务健康", 服务=status.name, 健康=status.healthy, 状态=status.state.value)
+            # detail 只在异常时非空（健康检查抛错的原因就写在这里），
+            # 无条件带上会让正常日志多出一行空字段。
+            extra = {"详情": status.detail} if status.detail else {}
+            log.info(
+                "服务健康",
+                服务=status.name,
+                健康=status.healthy,
+                状态=status.state.value,
+                **extra,
+            )
         await _wait_for_shutdown()
 
 
