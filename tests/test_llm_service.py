@@ -14,11 +14,11 @@ from typing import Literal, cast
 import httpx2
 import pytest
 from openai import (
-    NOT_GIVEN,
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
+    omit,
 )
 from openai.types import CompletionUsage, CreateEmbeddingResponse, Embedding
 from openai.types.chat import (
@@ -26,6 +26,7 @@ from openai.types.chat import (
     ChatCompletionChunk,
     ChatCompletionMessage,
     ChatCompletionMessageToolCall,
+    ChatCompletionMessageToolCallUnion,
 )
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
@@ -92,6 +93,7 @@ class _FakeEmbeddings:
         self.owner.calls.append(kwargs)
         if self.owner.error is not None:
             raise self.owner.error
+        assert self.owner.embedding is not None
         return self.owner.embedding
 
 
@@ -148,12 +150,14 @@ def _service(
 
 def _attach(service: LLMService, client: _FakeClient) -> None:
     """塞入替身：容器无法注入客户端，这是唯一接缝。"""
-    service._client = cast("AsyncOpenAI", client)  # pyright: ignore[reportPrivateUsage]
+    service._client = cast(  # pyright: ignore[reportPrivateUsage]
+        "AsyncOpenAI", cast("object", client)
+    )
 
 
 def _completion(
     content: str | None = "你好",
-    tool_calls: list[ChatCompletionMessageToolCall] | None = None,
+    tool_calls: list[ChatCompletionMessageToolCallUnion] | None = None,
 ) -> ChatCompletion:
     return ChatCompletion(
         id="c1",
@@ -250,15 +254,15 @@ async def test_chat返回正文() -> None:
     assert client.calls[0]["model"] == "chat-m"
 
 
-async def test_未设置temperature与max_tokens时传NOT_GIVEN() -> None:
-    """显式 None 会被 SDK 序列化成 JSON null，必须换成 NOT_GIVEN。"""
+async def test_未设置temperature与max_tokens时不传该参数() -> None:
+    """显式 None 会被 SDK 序列化成 JSON null，必须换成 omit（不传）。"""
     service = _service()
     client = _FakeClient(completion=_completion())
     _attach(service, client)
 
     _ = await service.chat([user("在吗")])
-    assert client.calls[0]["temperature"] is NOT_GIVEN
-    assert client.calls[0]["max_tokens"] is NOT_GIVEN
+    assert client.calls[0]["temperature"] is omit
+    assert client.calls[0]["max_tokens"] is omit
 
 
 async def test_配置了temperature时传给端点() -> None:

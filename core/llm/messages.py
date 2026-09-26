@@ -75,7 +75,7 @@ def tool(
     """工具声明：schema 可以是 pydantic 模型，也可以是手写 JSON Schema 字典。"""
     parameters: dict[str, object] = (
         cast("dict[str, object]", schema.model_json_schema())
-        if isinstance(schema, type) and issubclass(schema, BaseModel)
+        if isinstance(schema, type)  # 注解里 type[BaseModel] 与 Mapping 二选一
         else dict(schema)
     )
     return {

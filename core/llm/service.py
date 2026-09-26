@@ -11,23 +11,24 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import ClassVar, TypeVar, cast, override
 
 from openai import (
-    NOT_GIVEN,
     APIConnectionError,
     APIError,
     APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
-    NotGiven,
+    Omit,
+    omit,
 )
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionMessageParam,
+    ChatCompletionMessageToolCall,
     ChatCompletionToolParam,
 )
 from openai.types.chat.completion_create_params import ResponseFormat
@@ -48,6 +49,9 @@ from core.service.base import HealthStatus, Service, ServiceState
 
 #: 结构化输出的 schema 类型
 T = TypeVar("T", bound=BaseModel)
+
+#: 可选参数在「不传」时用的哨兵。SDK 3.x 的请求体只剔除 NotGiven 与 Omit，
+#: 显式 None 会被原样序列化成 JSON null（端点多半 400 或当 0 处理）。
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +74,9 @@ class AssistantReply:
     tool_calls: tuple[ToolCall, ...]
 
 
-def _or_not_given[V](value: V | None) -> V | NotGiven:
-    """None 换成 NOT_GIVEN。
-
-    SDK 只剔除 NotGiven，显式 None 会被原样序列化成 JSON null（端点多半 400 或当 0）。
-    """
-    return NOT_GIVEN if value is None else value
+def _or_omit[V](value: V | None) -> V | Omit:
+    """None 换成 omit（不传该参数）。"""
+    return omit if value is None else value
 
 
 def _elapsed_ms(begin: float) -> float:
@@ -84,7 +85,7 @@ def _elapsed_ms(begin: float) -> float:
 
 
 @asynccontextmanager
-async def _wrap_errors(endpoint: str, model: str) -> AsyncIterator[None]:
+async def _wrap_errors(endpoint: str, model: str) -> AsyncGenerator[None, None]:
     """把 SDK 异常换成 LLM 层错误。
 
     except 顺序是硬要求：APITimeoutError 是 APIConnectionError 的子类，
@@ -285,13 +286,14 @@ class LLMService(Service):
         if not response.choices:
             raise LLMResponseError("LLM 返回体没有 choices")
         message = response.choices[0].message
-        return AssistantReply(
-            content=message.content,
-            tool_calls=tuple(
-                ToolCall(id=call.id, name=call.function.name, arguments=call.function.arguments)
-                for call in message.tool_calls or ()
-            ),
-        )
+        # tool_calls 是 function 与 custom 两种调用的联合，这里只认 function：
+        # ToolCall 的 arguments 取自 function.arguments，custom 没有这个结构。
+        calls = [
+            ToolCall(id=call.id, name=call.function.name, arguments=call.function.arguments)
+            for call in message.tool_calls or ()
+            if isinstance(call, ChatCompletionMessageToolCall)
+        ]
+        return AssistantReply(content=message.content, tool_calls=tuple(calls))
 
     async def embed(self, texts: Sequence[str], *, model: str | None = None) -> list[list[float]]:
         """文本向量化：按输入顺序返回，不内置分批。"""
@@ -317,13 +319,13 @@ class LLMService(Service):
         """模型覆盖优先，否则用 chat_model。"""
         return override or self._config.chat_model
 
-    def _temperature(self, override: float | None) -> float | NotGiven:
+    def _temperature(self, override: float | None) -> float | Omit:
         """temperature 覆盖优先，其次配置，都没有则不传。"""
-        return _or_not_given(override if override is not None else self._config.temperature)
+        return _or_omit(override if override is not None else self._config.temperature)
 
-    def _max_tokens(self, override: int | None) -> int | NotGiven:
+    def _max_tokens(self, override: int | None) -> int | Omit:
         """max_tokens 覆盖优先，其次配置，都没有则不传。"""
-        return _or_not_given(override if override is not None else self._config.max_tokens)
+        return _or_omit(override if override is not None else self._config.max_tokens)
 
     def _response_format(self, schema: type[BaseModel]) -> ResponseFormat:
         """按 structured_mode 构造 response_format。
@@ -371,4 +373,5 @@ class LLMService(Service):
             fields["输入token"] = prompt_tokens
         if completion_tokens is not None:
             fields["输出token"] = completion_tokens
-        self.log.info("LLM 调用完成", **fields)
+        # 显式传 face：fields 的值是 object，**fields 展开时会被逐个形参对账
+        self.log.info("LLM 调用完成", None, **fields)
