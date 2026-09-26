@@ -1,8 +1,9 @@
 """LLM 服务：把「调大模型」收成一个服务，业务代码不直接接触 SDK。
 
 约定：
-- 六项能力：chat / stream / chat_structured / chat_tools / embed / 多模态。
+- 五项能力：chat / stream / chat_structured / chat_tools / 多模态。
   多模态不单独开方法，由调用方给 chat 传 `model=svc.vision_model`。
+- chat 与 vision 是两个端点，各持一个客户端；服务按传进来的模型名挑端点。
 - 工具调用只做单轮：返回 tool_calls，回传用 `assistant(tool_calls=...)` +
   `tool_result(...)`，循环由调用方写。
 - 日志不记消息正文：正文该不该记由调用方自己决定并自己打。
@@ -35,7 +36,7 @@ from openai.types.chat import (
 from openai.types.chat.completion_create_params import ResponseFormat
 from pydantic import BaseModel, ValidationError
 
-from core.config import LLMSettings
+from core.config import LLMEndpointSettings, LLMSettings
 from core.llm.client import build_client
 from core.llm.errors import (
     LLMConfigError,
@@ -71,6 +72,11 @@ def _or_omit[V](value: V | None) -> V | Omit:
     JSON null（端点多半 400 或当 0 处理），所以「不传」必须走 omit。
     """
     return omit if value is None else value
+
+
+def _pick[V](override: V | None, fallback: V | None) -> V | Omit:
+    """调用方的覆盖优先，其次端点配置，都没有则不传。"""
+    return _or_omit(override if override is not None else fallback)
 
 
 def _elapsed_ms(begin: float) -> float:
@@ -111,54 +117,49 @@ class LLMService(Service):
     def __init__(self, config: LLMSettings) -> None:
         super().__init__()
         self._config: LLMSettings = config
-        self._client: AsyncOpenAI | None = None
+        self._chat: AsyncOpenAI | None = None
+        self._vision: AsyncOpenAI | None = None
 
     # ---------- 模型槽位 ----------
 
     @property
     def chat_model(self) -> str:
         """对话模型。"""
-        return self._config.chat_model
-
-    @property
-    def embed_model(self) -> str:
-        """embedding 模型：留空即未启用。"""
-        return self._config.embed_model
+        return self._config.chat.model
 
     @property
     def vision_model(self) -> str:
-        """多模态模型：留空时复用 chat_model。"""
-        return self._config.vision_model or self._config.chat_model
+        """多模态模型：给 chat 传它就走 vision 端点。"""
+        return self._config.vision.model
 
     # ---------- 生命周期 ----------
 
     @override
     async def start(self) -> None:
-        """建客户端。没配 api_key 时只警告：脚手架不该因为没密钥就起不来。
-
-        幂等看「有没有客户端」而不是状态：手工重复调用不该建出第二个客户端
-        （前一个会被覆盖、没人 close）。
-        """
-        if self._client is not None or self.state is ServiceState.RUNNING:
+        """两个端点各建一个客户端。没配 api_key 的端点只警告：脚手架不该因为没密钥就起不来。"""
+        if self.state is ServiceState.RUNNING:
             return
-        if not self._config.api_key:
-            self.log.warning(NO_API_KEY, 端点=self._config.base_url)
-            return
-        self._client = build_client(self._config)
+        self._chat = self._build("chat", self._config.chat, self._chat)
+        self._vision = self._build("vision", self._config.vision, self._vision)
 
     @override
     async def stop(self) -> None:
-        """关客户端。必须幂等：回滚时它也会作用在没建过客户端的实例上。"""
-        if self._client is None:
-            return
-        client, self._client = self._client, None
-        await client.close()
+        """关两个客户端。必须幂等：回滚时它也会作用在没建过客户端的实例上。"""
+        chat, self._chat = self._chat, None
+        vision, self._vision = self._vision, None
+        if chat is not None:
+            await chat.close()
+        if vision is not None:
+            await vision.close()
 
     @override
     async def health(self) -> HealthStatus:
-        """只看有没有客户端：健康检查不该发请求（有副作用、花钱、受网络抖动影响）。"""
-        healthy = self._client is not None
-        detail = "" if healthy else "未配置 api_key，LLM 功能不可用"
+        """只看有没有客户端：健康检查不该发请求（有副作用、花钱、受网络抖动影响）。
+
+        两个端点全没配才算不健康：只启用一头也是能用的。
+        """
+        healthy = self._chat is not None or self._vision is not None
+        detail = "" if healthy else NO_API_KEY
         return HealthStatus(name=self.label, healthy=healthy, state=self.state, detail=detail)
 
     # ---------- 调用能力 ----------
@@ -172,19 +173,19 @@ class LLMService(Service):
         max_tokens: int | None = None,
     ) -> str:
         """对话补全，返回消息正文。"""
-        client = self._require_client()
-        resolved = self._resolve_model(model)
+        client, endpoint, resolved = self._endpoint(model)
         begin = time.perf_counter()
-        async with _wrap_errors(self._config.base_url, resolved):
+        async with _wrap_errors(endpoint.base_url, resolved):
             response = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
-                temperature=self._temperature(temperature),
-                max_tokens=self._max_tokens(max_tokens),
+                temperature=_pick(temperature, endpoint.temperature),
+                max_tokens=_pick(max_tokens, endpoint.max_tokens),
             )
         usage = response.usage
         self._log_done(
             begin,
+            endpoint,
             resolved,
             usage.prompt_tokens if usage else None,
             usage.completion_tokens if usage else None,
@@ -203,22 +204,21 @@ class LLMService(Service):
 
         SDK 明确「流已消费则不重试」，中途断流会直接抛错，是否重放由调用方决定。
         """
-        client = self._require_client()
-        resolved = self._resolve_model(model)
+        client, endpoint, resolved = self._endpoint(model)
         begin = time.perf_counter()
-        async with _wrap_errors(self._config.base_url, resolved):
+        async with _wrap_errors(endpoint.base_url, resolved):
             chunks = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
-                temperature=self._temperature(temperature),
-                max_tokens=self._max_tokens(max_tokens),
+                temperature=_pick(temperature, endpoint.temperature),
+                max_tokens=_pick(max_tokens, endpoint.max_tokens),
                 stream=True,
             )
             async for chunk in chunks:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 if delta:
                     yield delta
-        self._log_done(begin, resolved, None)
+        self._log_done(begin, endpoint, resolved, None)
 
     async def chat_structured(
         self,
@@ -233,20 +233,20 @@ class LLMService(Service):
 
         不传 strict：strict 要求所有字段 required，默认关掉更不容易踩坑。
         """
-        client = self._require_client()
-        resolved = self._resolve_model(model)
+        client, endpoint, resolved = self._endpoint(model)
         begin = time.perf_counter()
-        async with _wrap_errors(self._config.base_url, resolved):
+        async with _wrap_errors(endpoint.base_url, resolved):
             response = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
-                temperature=self._temperature(temperature),
-                max_tokens=self._max_tokens(max_tokens),
-                response_format=self._response_format(schema),
+                temperature=_pick(temperature, endpoint.temperature),
+                max_tokens=_pick(max_tokens, endpoint.max_tokens),
+                response_format=self._response_format(endpoint, schema),
             )
         usage = response.usage
         self._log_done(
             begin,
+            endpoint,
             resolved,
             usage.prompt_tokens if usage else None,
             usage.completion_tokens if usage else None,
@@ -267,20 +267,20 @@ class LLMService(Service):
         max_tokens: int | None = None,
     ) -> AssistantReply:
         """工具调用（单轮）：返回正文与 tool_calls，不自动发起第二轮。"""
-        client = self._require_client()
-        resolved = self._resolve_model(model)
+        client, endpoint, resolved = self._endpoint(model)
         begin = time.perf_counter()
-        async with _wrap_errors(self._config.base_url, resolved):
+        async with _wrap_errors(endpoint.base_url, resolved):
             response = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
                 tools=list(tools),
-                temperature=self._temperature(temperature),
-                max_tokens=self._max_tokens(max_tokens),
+                temperature=_pick(temperature, endpoint.temperature),
+                max_tokens=_pick(max_tokens, endpoint.max_tokens),
             )
         usage = response.usage
         self._log_done(
             begin,
+            endpoint,
             resolved,
             usage.prompt_tokens if usage else None,
             usage.completion_tokens if usage else None,
@@ -297,45 +297,52 @@ class LLMService(Service):
         ]
         return AssistantReply(content=message.content, tool_calls=tuple(calls))
 
-    async def embed(self, texts: Sequence[str], *, model: str | None = None) -> list[list[float]]:
-        """文本向量化：按输入顺序返回，不内置分批。"""
-        client = self._require_client()
-        resolved = model or self._config.embed_model
-        if not resolved:
-            raise LLMConfigError("未配置 embed_model，embedding 不可用")
-        begin = time.perf_counter()
-        async with _wrap_errors(self._config.base_url, resolved):
-            response = await client.embeddings.create(model=resolved, input=list(texts))
-        self._log_done(begin, resolved, response.usage.prompt_tokens)
-        return [item.embedding for item in response.data]
-
     # ---------- 内部 ----------
 
-    def _require_client(self) -> AsyncOpenAI:
+    def _build(
+        self,
+        name: str,
+        endpoint: LLMEndpointSettings,
+        current: AsyncOpenAI | None,
+    ) -> AsyncOpenAI | None:
+        """建一个端点的客户端：已建过就原样返回（幂等），没配 api_key 则警告并返回 None。"""
+        if current is not None:
+            return current
+        if not endpoint.api_key:
+            self.log.warning(NO_API_KEY, 端点=name, 地址=endpoint.base_url)
+            return None
+        return build_client(endpoint)
+
+    def _endpoint(self, model: str | None) -> tuple[AsyncOpenAI, LLMEndpointSettings, str]:
+        """挑端点：默认 chat；传 vision 的模型且 vision 已启用时走 vision。
+
+        其余情况按 chat 端点覆盖模型名。
+
+        vision 没启用时不接管自己的模型：两头 model 常常同名，
+        免得 chat 调用因为 vision 没配密钥而报错。
+        """
+        vision = self._config.vision
+        if model is not None and model == vision.model and self._vision is not None:
+            return self._vision, vision, model
+        chat = self._config.chat
+        return self._require(self._chat, "chat"), chat, model or chat.model
+
+    @staticmethod
+    def _require(client: AsyncOpenAI | None, name: str) -> AsyncOpenAI:
         """取客户端；没配 api_key 时到这里才报错（配置缺失不该让进程起不来）。"""
-        if self._client is None:
-            raise LLMConfigError(NO_API_KEY)
-        return self._client
+        if client is None:
+            raise LLMConfigError(f"{name} 端点{NO_API_KEY}")
+        return client
 
-    def _resolve_model(self, override: str | None) -> str:
-        """模型覆盖优先，否则用 chat_model。"""
-        return override or self._config.chat_model
-
-    def _temperature(self, override: float | None) -> float | Omit:
-        """temperature 覆盖优先，其次配置，都没有则不传。"""
-        return _or_omit(override if override is not None else self._config.temperature)
-
-    def _max_tokens(self, override: int | None) -> int | Omit:
-        """max_tokens 覆盖优先，其次配置，都没有则不传。"""
-        return _or_omit(override if override is not None else self._config.max_tokens)
-
-    def _response_format(self, schema: type[BaseModel]) -> ResponseFormat:
-        """按 structured_mode 构造 response_format。
+    def _response_format(
+        self, endpoint: LLMEndpointSettings, schema: type[BaseModel]
+    ) -> ResponseFormat:
+        """按端点的 structured_mode 构造 response_format。
 
         model_json_schema() 返回 dict[str, Any]，cast 成 object 值再放进请求体，
         否则 Any 会顺着 SDK 参数渗进类型检查。
         """
-        if self._config.structured_mode == "json_object":
+        if endpoint.structured_mode == "json_object":
             return {"type": "json_object"}
         return {
             "type": "json_schema",
@@ -358,6 +365,7 @@ class LLMService(Service):
     def _log_done(
         self,
         begin: float,
+        endpoint: LLMEndpointSettings,
         model: str,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
@@ -368,7 +376,7 @@ class LLMService(Service):
         """
         fields: dict[str, object] = {
             "模型": model,
-            "端点": self._config.base_url,
+            "端点": endpoint.base_url,
             "耗时毫秒": _elapsed_ms(begin),
         }
         if prompt_tokens is not None:

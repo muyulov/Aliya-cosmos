@@ -1,8 +1,8 @@
 """LLM 服务测试。
 
 约定：
-- 不走 start() 建客户端：容器只认配置节点，客户端只能白盒塞进 service._client，
-  因此除了「未配 key」那条走容器外，其余用例直接构造服务再注入假客户端。
+- 不走 start() 建客户端：容器只认配置节点，客户端只能白盒塞进 service._chat /
+  _vision，因此除了「未配 key」那条走容器外，其余用例直接构造服务再注入假客户端。
 - 不起 mock server、不 mock HTTP：假客户端按预设返回 SDK 风格的假对象。
 """
 
@@ -20,7 +20,7 @@ from openai import (
     AsyncOpenAI,
     omit,
 )
-from openai.types import CompletionUsage, CreateEmbeddingResponse, Embedding
+from openai.types import CompletionUsage
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionChunk,
@@ -32,10 +32,9 @@ from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.chat.chat_completion_message_tool_call import Function
-from openai.types.create_embedding_response import Usage
 from pydantic import BaseModel, ValidationError
 
-from core.config import LLMSettings, Settings
+from core.config import LLMEndpointSettings, LLMSettings, Settings
 from core.llm import (
     LLMConfigError,
     LLMConnectionError,
@@ -85,38 +84,21 @@ class _FakeChat:
         self.completions: _FakeCompletions = _FakeCompletions(owner)
 
 
-class _FakeEmbeddings:
-    """client.embeddings 替身。"""
-
-    def __init__(self, owner: _FakeClient) -> None:
-        self.owner: _FakeClient = owner
-
-    async def create(self, **kwargs: object) -> CreateEmbeddingResponse:
-        self.owner.calls.append(kwargs)
-        if self.owner.error is not None:
-            raise self.owner.error
-        assert self.owner.embedding is not None
-        return self.owner.embedding
-
-
 class _FakeClient:
-    """AsyncOpenAI 替身：鸭子类型，只实现被测代码用到的三个入口。"""
+    """AsyncOpenAI 替身：鸭子类型，只实现被测代码用到的入口。"""
 
     def __init__(
         self,
         completion: ChatCompletion | None = None,
         chunks: tuple[ChatCompletionChunk, ...] = (),
-        embedding: CreateEmbeddingResponse | None = None,
         error: Exception | None = None,
     ) -> None:
         self.calls: list[dict[str, object]] = []
         self.close_count: int = 0
         self.completion: ChatCompletion | None = completion
         self.chunks: tuple[ChatCompletionChunk, ...] = chunks
-        self.embedding: CreateEmbeddingResponse | None = embedding
         self.error: Exception | None = error
         self.chat: _FakeChat = _FakeChat(self)
-        self.embeddings: _FakeEmbeddings = _FakeEmbeddings(self)
 
     async def close(self) -> None:
         self.close_count += 1
@@ -129,34 +111,43 @@ class Item(BaseModel):
     price: float
 
 
-def _service(
+def _endpoint(
     *,
     api_key: str = "k",
-    chat_model: str = "chat-m",
-    embed_model: str = "embed-m",
-    vision_model: str = "",
+    model: str = "chat-m",
+    base_url: str = "https://chat.test/v1",
     structured_mode: Literal["json_schema", "json_object"] = "json_schema",
     temperature: float | None = None,
     max_tokens: int | None = None,
+) -> LLMEndpointSettings:
+    return LLMEndpointSettings(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        structured_mode=structured_mode,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def _service(
+    *,
+    chat: LLMEndpointSettings | None = None,
+    vision: LLMEndpointSettings | None = None,
 ) -> LLMService:
+    """默认两头都配好密钥，vision 的模型名与 chat 不同，便于分辨走了哪个端点。"""
     return LLMService(
-        LLMSettings(
-            api_key=api_key,
-            chat_model=chat_model,
-            embed_model=embed_model,
-            vision_model=vision_model,
-            structured_mode=structured_mode,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        LLMSettings(chat=chat or _endpoint(), vision=vision or _endpoint(model="vision-m"))
     )
 
 
-def _attach(service: LLMService, client: _FakeClient) -> None:
+def _attach(service: LLMService, client: _FakeClient, *, vision: bool = False) -> None:
     """塞入替身：容器无法注入客户端，这是唯一接缝。"""
-    service._client = cast(  # pyright: ignore[reportPrivateUsage]
-        "AsyncOpenAI", cast("object", client)
-    )
+    fake = cast("AsyncOpenAI", cast("object", client))
+    if vision:
+        service._vision = fake  # pyright: ignore[reportPrivateUsage]
+    else:
+        service._chat = fake  # pyright: ignore[reportPrivateUsage]
 
 
 def _completion(
@@ -191,18 +182,6 @@ def _chunk(text: str | None) -> ChatCompletionChunk:
     )
 
 
-def _embedding(*vectors: list[float]) -> CreateEmbeddingResponse:
-    return CreateEmbeddingResponse(
-        data=[
-            Embedding(index=index, embedding=vector, object="embedding")
-            for index, vector in enumerate(vectors)
-        ],
-        model="embed-m",
-        object="list",
-        usage=Usage(prompt_tokens=3, total_tokens=3),
-    )
-
-
 def _status_error(status: int = 500, request_id: str = "req-1") -> APIStatusError:
     response = httpx2.Response(
         status, request=httpx2.Request("POST", _URL), headers={"x-request-id": request_id}
@@ -210,11 +189,13 @@ def _status_error(status: int = 500, request_id: str = "req-1") -> APIStatusErro
     return APIStatusError("boom", response=response, body=None)
 
 
-# ---- 生命周期与配置 ----
+# ---- 生命周期与端点 ----
 
 
 async def test_未配key时start不建客户端() -> None:
-    mgr = ServiceManager(Settings(llm=LLMSettings(api_key="")))
+    mgr = ServiceManager(
+        Settings(llm=LLMSettings(chat=_endpoint(api_key=""), vision=_endpoint(api_key="")))
+    )
     _ = mgr.register(LLMService)
     await mgr.start_all()
 
@@ -226,50 +207,69 @@ async def test_未配key时start不建客户端() -> None:
 
 
 async def test_未配key时调用才报错() -> None:
-    service = _service(api_key="")
+    service = _service(chat=_endpoint(api_key=""))
     await service.start()
 
     with pytest.raises(LLMConfigError, match="api_key"):
         _ = await service.chat([user("你好")])
 
 
-async def test_embed_model留空时embed报错() -> None:
-    service = _service(embed_model="")
-    _attach(service, _FakeClient())
-
-    with pytest.raises(LLMConfigError, match="embed_model"):
-        _ = await service.embed(["文本"])
-
-
-def test_vision_model留空时复用chat_model() -> None:
-    assert _service(vision_model="").vision_model == "chat-m"
-    assert _service(vision_model="vision-m").vision_model == "vision-m"
-
-
-async def test_start重复调用不重建客户端() -> None:
-    """幂等看客户端而不是状态：重复 start 不该把已建的客户端顶掉（前一个会泄漏）。"""
-    service = _service()
+async def test_只启用一个端点也算健康() -> None:
+    service = _service(vision=_endpoint(api_key=""))
     await service.start()
-    client = service._client  # pyright: ignore[reportPrivateUsage]
-
-    await service.start()
-    assert service._client is client  # pyright: ignore[reportPrivateUsage]
-
-
-async def test_有客户端时健康检查为健康() -> None:
-    service = _service()
-    _attach(service, _FakeClient())
 
     status = await service.health()
     assert status.healthy is True
     assert status.detail == ""
 
 
+async def test_start重复调用不重建客户端() -> None:
+    """重复 start 不该建出第二个客户端（前一个会被覆盖、没人 close）。"""
+    service = _service()
+    await service.start()
+    chat = service._chat  # pyright: ignore[reportPrivateUsage]
+    vision = service._vision  # pyright: ignore[reportPrivateUsage]
+
+    await service.start()
+    assert service._chat is chat  # pyright: ignore[reportPrivateUsage]
+    assert service._vision is vision  # pyright: ignore[reportPrivateUsage]
+
+
 def test_非法timeout与retries被拒() -> None:
     with pytest.raises(ValidationError):
-        _ = LLMSettings(timeout=0)
+        _ = LLMEndpointSettings(timeout=0)
     with pytest.raises(ValidationError):
-        _ = LLMSettings(retries=-1)
+        _ = LLMEndpointSettings(retries=-1)
+
+
+# ---- 端点路由 ----
+
+
+def test_两个端点各有自己的模型() -> None:
+    assert _service().chat_model == "chat-m"
+    assert _service().vision_model == "vision-m"
+
+
+async def test_传vision模型时走vision端点() -> None:
+    service = _service()
+    chat_client = _FakeClient(completion=_completion())
+    vision_client = _FakeClient(completion=_completion())
+    _attach(service, chat_client)
+    _attach(service, vision_client, vision=True)
+
+    _ = await service.chat([user("看图")], model=service.vision_model)
+    assert vision_client.calls[0]["model"] == "vision-m"
+    assert chat_client.calls == []
+
+
+async def test_vision端点没启用时不接管() -> None:
+    """两头的 model 常常同名：vision 没配密钥时不能让 chat 调用跟着报错。"""
+    service = _service(vision=_endpoint(model="vision-m", api_key=""))
+    client = _FakeClient(completion=_completion())
+    _attach(service, client)
+
+    _ = await service.chat([user("在吗")], model=service.vision_model)
+    assert client.calls[0]["model"] == "vision-m"
 
 
 # ---- 对话与流式 ----
@@ -296,7 +296,7 @@ async def test_未设置temperature与max_tokens时不传该参数() -> None:
 
 
 async def test_配置了temperature时传给端点() -> None:
-    service = _service(temperature=0.3)
+    service = _service(chat=_endpoint(temperature=0.3))
     client = _FakeClient(completion=_completion())
     _attach(service, client)
 
@@ -320,24 +320,6 @@ async def test_stream逐段产出且跳过空片段() -> None:
     )
 
     assert [part async for part in service.stream([user("在吗")])] == ["你", "好"]
-
-
-async def test_chat传model覆盖配置() -> None:
-    """多模态走的就是这条路：不单独开方法，传 model=svc.vision_model。"""
-    service = _service(vision_model="vision-m")
-    client = _FakeClient(completion=_completion())
-    _attach(service, client)
-
-    _ = await service.chat([user("在吗")], model=service.vision_model)
-    assert client.calls[0]["model"] == "vision-m"
-
-
-async def test_流式错误同样走错误映射() -> None:
-    service = _service()
-    _attach(service, _FakeClient(error=_status_error(429)))
-
-    with pytest.raises(LLMRequestError):
-        _ = [part async for part in service.stream([user("在吗")])]
 
 
 # ---- 结构化输出 ----
@@ -365,7 +347,7 @@ async def test_结构化输出不合schema时报LLMSchemaError() -> None:
 
 
 async def test_json_object模式只传类型标记() -> None:
-    service = _service(structured_mode="json_object")
+    service = _service(chat=_endpoint(structured_mode="json_object"))
     client = _FakeClient(completion=_completion('{"name": "苹果", "price": 1.5}'))
     _attach(service, client)
 
@@ -373,9 +355,9 @@ async def test_json_object模式只传类型标记() -> None:
     assert client.calls[0]["response_format"] == {"type": "json_object"}
 
 
-async def test_结构化输出与工具调用也吃配置的max_tokens() -> None:
+async def test_结构化输出与工具调用也吃端点的max_tokens() -> None:
     """结构化输出最怕输出被截断，max_tokens 不能只对 chat / stream 生效。"""
-    service = _service(max_tokens=512)
+    service = _service(chat=_endpoint(max_tokens=512))
     client = _FakeClient(completion=_completion('{"name": "苹果", "price": 1.5}'))
     _attach(service, client)
 
@@ -467,15 +449,15 @@ async def test_连接错误映射成LLMConnectionError() -> None:
         _ = await service.chat([user("在吗")])
 
 
-# ---- embedding 与收尾 ----
-
-
-async def test_embed按输入顺序返回() -> None:
+async def test_流式错误同样走错误映射() -> None:
     service = _service()
-    _attach(service, _FakeClient(embedding=_embedding([0.1], [0.2], [0.3])))
+    _attach(service, _FakeClient(error=_status_error(429)))
 
-    vectors = await service.embed(["a", "b", "c"])
-    assert vectors == [[0.1], [0.2], [0.3]]
+    with pytest.raises(LLMRequestError):
+        _ = [part async for part in service.stream([user("在吗")])]
+
+
+# ---- 收尾 ----
 
 
 async def test_stop幂等() -> None:

@@ -65,23 +65,31 @@ class ClockSettings(BaseModel):
     tz: str = "UTC"
 
 
-class LLMSettings(BaseModel):
-    """LLM 层配置。
+class LLMEndpointSettings(BaseModel):
+    """一个 LLM 端点的配置：连接参数与采样参数都归端点自己。
 
     `temperature` / `max_tokens` 为 None 表示「不传该参数」，由服务端决定取值；
     传给 SDK 前会在调用边界换成 omit（显式 None 会被序列化成 JSON null）。
     """
 
     base_url: str = "https://api.openai.com/v1"
-    api_key: str = ""  # YAML 里写 ${OPENAI_API_KEY:}，留空表示未启用
-    chat_model: str = "gpt-4o-mini"
-    embed_model: str = ""  # 留空则 embed() 抛 LLMConfigError
-    vision_model: str = ""  # 留空复用 chat_model
+    api_key: str = ""  # YAML 里写 ${XXX_API_KEY:}，留空表示该端点未启用
+    model: str = "gpt-4o-mini"
     timeout: float = Field(default=60.0, gt=0)  # 单次请求超时（秒）
     retries: int = Field(default=2, ge=0)  # SDK 重试次数，0 关闭
     structured_mode: Literal["json_schema", "json_object"] = "json_schema"
     temperature: float | None = None
     max_tokens: int | None = None
+
+
+class LLMSettings(BaseModel):
+    """LLM 层配置：chat 与 vision 各是一个端点。
+
+    两头可以指向同一个服务（多数兼容端点如此），也可以分开接不同供应商。
+    """
+
+    chat: LLMEndpointSettings = LLMEndpointSettings()
+    vision: LLMEndpointSettings = LLMEndpointSettings()
 
 
 class Settings(BaseModel):

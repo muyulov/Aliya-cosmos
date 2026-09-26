@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from openai import AsyncOpenAI
 
-from core.config import LLMSettings
+from core.config import LLMEndpointSettings
 
 
-def build_client(config: LLMSettings) -> AsyncOpenAI:
-    """按配置构造异步客户端。
+def build_client(config: LLMEndpointSettings) -> AsyncOpenAI:
+    """按端点配置构造异步客户端。
 
     SDK 默认 timeout 是 10 分钟、max_retries 是 2，这里都显式给值，
     免得默认值随 SDK 版本漂移。

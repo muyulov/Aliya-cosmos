@@ -14,7 +14,7 @@ class LLMError(Exception):
 
 
 class LLMConfigError(LLMError):
-    """配置缺失导致的能力不可用：未配 api_key、embed_model 留空等。
+    """配置缺失导致的能力不可用：端点未配 api_key。
 
     无 cause：这不是调用失败，是根本没有发起调用。
     """
