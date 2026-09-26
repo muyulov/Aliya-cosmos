@@ -270,7 +270,7 @@ async def test_默认注册表装配后可启动并健康() -> None:
 
     assert mgr.get(ClockService).running is True
     statuses = await mgr.health()
-    assert [status.name for status in statuses] == ["clock"]
+    assert [status.name for status in statuses] == ["clock", "llm"]
 
 
 async def test_健康检查用展示名() -> None:
