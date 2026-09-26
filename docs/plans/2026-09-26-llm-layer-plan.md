@@ -224,6 +224,10 @@ git commit -m "docs(llm): 补充 LLM 层文档与配置项"
 
 测试 19 → 26 例：补 model 覆盖 / 流式错误映射 / start 重复调用 / 有客户端时 health / 配置校验 / max_tokens / 回传消息结构。
 
+### 后续变更：配置改双端点、移除 embedding
+
+`llm` 下改为 `chat` / `vision` 两个端点（字段同 `LLMEndpointSettings`），`embed()` 删除。服务持有两个客户端，按 `model` 覆盖值挑端点（见 design 补记第 3 条）。影响：`app.yaml`、`LLMSettings` / `LLMEndpointSettings`、`client.build_client`、`LLMService` 的生命周期与全部调用方法、测试注入点由 `_client` 变 `_chat` / `_vision`、README 配置项表与示例。
+
 ---
 
 ## 完成后的合并流程
