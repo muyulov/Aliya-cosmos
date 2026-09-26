@@ -18,17 +18,21 @@ service:
 clock:
   tz: UTC
 
+# chat 与 vision 是两个端点，字段相同：可以指向同一个服务，也可以分开接不同供应商。
+# 两个端点都没配 api_key 时，服务只警告、健康检查 unhealthy，进程照常启动（不 fail fast）。
 llm:
   chat:
-    base_url: https://api.deepseek.com/v1
-    api_key: ${DEEPSEEK_API_KEY:}
+    base_url: https://api.deepseek.com/v1 # 端点地址；OpenAI 兼容端点（vLLM / Ollama / Moonshot）改这里即可
+    api_key: ${DEEPSEEK_API_KEY:} # 冒号后为空：.env 里没配时取空串，该端点不可用
     model: deepseek-flash
-    timeout: 60
-    retries: 2
-    structured_mode: json_schema
-    temperature: null
-    max_tokens: null
+    timeout: 60 # 单次请求超时（秒），必须为正数
+    retries: 2 # SDK 重试次数，0 关闭；流式一旦开始消费就不再重试
+    structured_mode: json_schema # 兼容端点不支持时改 json_object（该模式要求提示词里出现 json 字样）
+    temperature: null # null = 不传该参数，用服务端默认；传值则覆盖
+    max_tokens: null # 同上。结构化输出建议给值，避免输出被截断
   vision:
+    # 多模态走这个端点：给 svc.chat 传 model=svc.vision_model 就切过来。
+    # 本端点没配 api_key 时不会接管自己的模型，chat 调用不受影响。
     base_url: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY:}
     model: deepseek-flash
