@@ -65,6 +65,25 @@ class ClockSettings(BaseModel):
     tz: str = "UTC"
 
 
+class LLMSettings(BaseModel):
+    """LLM 层配置。
+
+    `temperature` / `max_tokens` 为 None 表示「不传该参数」，由服务端决定取值；
+    传给 SDK 前会在调用边界换成 NOT_GIVEN（显式 None 会被序列化成 JSON null）。
+    """
+
+    base_url: str = "https://api.openai.com/v1"
+    api_key: str = ""  # YAML 里写 ${OPENAI_API_KEY:}，留空表示未启用
+    chat_model: str = "gpt-4o-mini"
+    embed_model: str = ""  # 留空则 embed() 抛 LLMConfigError
+    vision_model: str = ""  # 留空复用 chat_model
+    timeout: float = 60.0  # 单次请求超时（秒）
+    retries: int = 2  # SDK 重试次数，0 关闭
+    structured_mode: Literal["json_schema", "json_object"] = "json_schema"
+    temperature: float | None = None
+    max_tokens: int | None = None
+
+
 class Settings(BaseModel):
     """顶层配置，按子模块分组，避免一个扁平大类。"""
 
@@ -74,6 +93,7 @@ class Settings(BaseModel):
     log: LogSettings = LogSettings()
     service: ServiceSettings = ServiceSettings()
     clock: ClockSettings = ClockSettings()
+    llm: LLMSettings = LLMSettings()
 
     #: 本次配置的来源；由 load_settings() 写入，直接构造实例时保持 None
     _source: str | None = PrivateAttr(default=None)

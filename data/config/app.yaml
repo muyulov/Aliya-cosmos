@@ -18,5 +18,17 @@ service:
 clock:
   tz: UTC
 
+llm:
+  base_url: https://api.openai.com/v1     # 接 DeepSeek 改 https://api.deepseek.com/v1
+  api_key: ${OPENAI_API_KEY:}             # 冒号后为空：不配时取空串，服务只警告不报错
+  chat_model: gpt-4o-mini
+  embed_model: ""                         # 留空 = 未启用 embedding，调用即报错
+  vision_model: ""                        # 留空 = 复用 chat_model
+  timeout: 60
+  retries: 2
+  structured_mode: json_schema            # 兼容端点不支持时改 json_object
+  temperature: null                       # null = 不传该参数，用服务端默认
+  max_tokens: null
+
 # 密钥类字段以占位符声明，由 .env 提供值：
 # api_key: ${DEEPSEEK_API_KEY}
