@@ -4,13 +4,10 @@
     from core.embedding import EmbeddingService
 
     vector = await svc.embed("要向量化的文本")
-
-换内核（本地 ONNX 等）时覆盖 EmbeddingService._make_encoder()，业务侧不用改。
 """
 
 from core.embedding.encoder import (
     EncodedVector,
-    Encoder,
     EncodeResult,
     RemoteEncoder,
     build_encoder,
@@ -37,7 +34,6 @@ __all__ = [
     "EmbeddingTimeoutError",
     "EncodeResult",
     "EncodedVector",
-    "Encoder",
     "RemoteEncoder",
     "build_encoder",
 ]

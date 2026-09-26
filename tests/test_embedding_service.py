@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import override
+from typing import cast
 
 import httpx2
 import pytest
@@ -28,8 +28,8 @@ from core.embedding import (
     EmbeddingService,
     EmbeddingTimeoutError,
     EncodedVector,
-    Encoder,
     EncodeResult,
+    RemoteEncoder,
 )
 from core.logger import setup_logging
 from core.service.base import ServiceState
@@ -40,7 +40,7 @@ _URL = "https://embed.test/v1/embeddings"
 
 
 class _FakeEncoder:
-    """Encoder 替身：记录每次入参，按预设返回或抛错。
+    """内核替身：记录每次入参，按预设返回或抛错。
 
     向量首元素就是入参位置，便于断言归位结果；默认兑现传入的 dimensions，
     `ignore_dimensions=True` 时不兑现（用来造「端点静默忽略该参数」的场景）。
@@ -105,8 +105,11 @@ def _settings(
 
 
 def _attach(service: EmbeddingService, fake: _FakeEncoder) -> None:
-    """塞入替身：容器无法注入内核（构造器只认配置节点），这是唯一接缝。"""
-    service._encoder = fake  # pyright: ignore[reportPrivateUsage]
+    """塞入替身：容器无法注入内核（构造器只认配置节点），这是唯一接缝。
+
+    两个类型不重叠，先转 object 再转目标类型，否则撞 reportInvalidCast。
+    """
+    service._encoder = cast("RemoteEncoder", cast("object", fake))  # pyright: ignore[reportPrivateUsage]
 
 
 def _status_error(status: int = 500, request_id: str = "req-1") -> APIStatusError:
@@ -119,19 +122,6 @@ def _status_error(status: int = 500, request_id: str = "req-1") -> APIStatusErro
 def _log_cfg(tmp_path: Path) -> LogSettings:
     """构造只关心落盘位置的日志配置。"""
     return LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day")
-
-
-class _CountingService(EmbeddingService):
-    """记 _make_encoder 被调了几次，用来验证 start 的幂等。"""
-
-    def __init__(self, config: EmbeddingSettings) -> None:
-        super().__init__(config)
-        self.build_count: int = 0
-
-    @override
-    def _make_encoder(self, config: EmbeddingSettings) -> Encoder:
-        self.build_count += 1
-        return super()._make_encoder(config)
 
 
 # ---- 生命周期与配置 ----
@@ -160,15 +150,14 @@ async def test_未配key时调用才报错() -> None:
 
 async def test_start重复调用不重建内核() -> None:
     """重复 start 不该建出第二个内核（前一个会被覆盖、没人 close）。"""
-    service = _CountingService(_settings())
+    service = EmbeddingService(_settings())
     await service.start()
     encoder = service._encoder  # pyright: ignore[reportPrivateUsage]
 
     await service.start()
-    await service.stop()
+    assert service._encoder is encoder  # pyright: ignore[reportPrivateUsage]
 
-    assert service.build_count == 1
-    assert encoder is not None
+    await service.stop()
 
 
 async def test_有内核时health健康且不发请求() -> None:

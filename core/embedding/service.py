@@ -5,7 +5,6 @@
 - 输出原样透传：不做 L2 归一化，模长信息该不该丢由调用方决定。
 - 缺 api_key 时只警告、不建内核：脚手架不该因为没密钥就起不来。
 - dimensions 三级优先：调用方覆盖 > 配置 > 不传（用模型原始维度）。
-- 换内核走子类覆盖 _make_encoder()：容器的构造器契约只认 Service 与配置节点。
 - 日志不记正文：正文该不该记由调用方自己决定并自己打。
 """
 
@@ -19,7 +18,7 @@ from typing import ClassVar, override
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
 from core.config import EmbeddingSettings
-from core.embedding.encoder import EncodedVector, Encoder, build_encoder
+from core.embedding.encoder import EncodedVector, RemoteEncoder, build_encoder
 from core.embedding.errors import (
     EmbeddingConfigError,
     EmbeddingConnectionError,
@@ -78,7 +77,7 @@ class EmbeddingService(Service):
     def __init__(self, config: EmbeddingSettings) -> None:
         super().__init__()
         self._config: EmbeddingSettings = config
-        self._encoder: Encoder | None = None
+        self._encoder: RemoteEncoder | None = None
 
     # ---------- 模型 ----------
 
@@ -97,7 +96,7 @@ class EmbeddingService(Service):
         if not self._config.api_key:
             self.log.warning(NO_API_KEY, 端点=self._config.base_url)
             return
-        self._encoder = self._make_encoder(self._config)
+        self._encoder = build_encoder(self._config)
 
     @override
     async def stop(self) -> None:
@@ -164,11 +163,7 @@ class EmbeddingService(Service):
 
     # ---------- 内部 ----------
 
-    def _make_encoder(self, config: EmbeddingSettings) -> Encoder:
-        """构造内核。换实现（如本地 ONNX）时覆盖本方法即可。"""
-        return build_encoder(config)
-
-    def _require_encoder(self) -> Encoder:
+    def _require_encoder(self) -> RemoteEncoder:
         """取内核；没配 api_key 时到这里才报错（配置缺失不该让进程起不来）。"""
         if self._encoder is None:
             raise EmbeddingConfigError(NO_API_KEY)
