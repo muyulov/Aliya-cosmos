@@ -9,13 +9,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import cast
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
+    ChatCompletionMessageFunctionToolCallParam,
+    ChatCompletionMessageToolCallUnionParam,
     ChatCompletionSystemMessageParam,
     ChatCompletionToolMessageParam,
     ChatCompletionToolParam,
@@ -25,6 +28,21 @@ from pydantic import BaseModel
 
 #: 一条多模态内容里的图片片段
 type ImagePart = ChatCompletionContentPartImageParam
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """一次工具调用。
+
+    chat_tools() 返回它，assistant() 接收它回传第二轮：
+    来回用同一个结构，调用方不必碰 SDK 的类型。
+
+    arguments 是原始 JSON 字符串，不做解析：schema 只有调用方知道。
+    """
+
+    id: str
+    name: str
+    arguments: str
 
 
 def system(text: str) -> ChatCompletionSystemMessageParam:
@@ -40,9 +58,26 @@ def user(text: str) -> ChatCompletionUserMessageParam:
     return {"role": "user", "content": text}
 
 
-def assistant(text: str) -> ChatCompletionAssistantMessageParam:
-    """助手消息，用于回传历史。"""
-    return {"role": "assistant", "content": text}
+def assistant(
+    text: str | None = None, *, tool_calls: Sequence[ToolCall] | None = None
+) -> ChatCompletionAssistantMessageParam:
+    """助手消息：回传历史用纯文本，回传工具调用结果时带上 tool_calls。
+
+    两者都给是合法的（部分模型边说边调工具）；都不给就是一条空消息。
+    """
+    message: ChatCompletionAssistantMessageParam = {"role": "assistant", "content": text}
+    if tool_calls:
+        # list 不变型：形参声明成联合类型，具体函数工具调用才能装进去
+        calls: list[ChatCompletionMessageToolCallUnionParam] = [
+            ChatCompletionMessageFunctionToolCallParam(
+                id=call.id,
+                type="function",
+                function={"name": call.name, "arguments": call.arguments},
+            )
+            for call in tool_calls
+        ]
+        message["tool_calls"] = calls
+    return message
 
 
 def tool_result(call_id: str, content: str) -> ChatCompletionToolMessageParam:

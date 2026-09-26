@@ -3,7 +3,8 @@
 约定：
 - 六项能力：chat / stream / chat_structured / chat_tools / embed / 多模态。
   多模态不单独开方法，由调用方给 chat 传 `model=svc.vision_model`。
-- 工具调用只做单轮：返回 tool_calls，回传与循环由调用方写。
+- 工具调用只做单轮：返回 tool_calls，回传用 `assistant(tool_calls=...)` +
+  `tool_result(...)`，循环由调用方写。
 - 日志不记消息正文：正文该不该记由调用方自己决定并自己打。
 - 重试与超时全交给 SDK，这里不包一层。
 """
@@ -45,25 +46,14 @@ from core.llm.errors import (
     LLMSchemaError,
     LLMTimeoutError,
 )
+from core.llm.messages import ToolCall
 from core.service.base import HealthStatus, Service, ServiceState
 
 #: 结构化输出的 schema 类型
 T = TypeVar("T", bound=BaseModel)
 
-#: 可选参数在「不传」时用的哨兵。SDK 3.x 的请求体只剔除 NotGiven 与 Omit，
-#: 显式 None 会被原样序列化成 JSON null（端点多半 400 或当 0 处理）。
-
-
-@dataclass(frozen=True, slots=True)
-class ToolCall:
-    """单次工具调用。
-
-    arguments 是原始 JSON 字符串，不做解析：schema 只有调用方知道。
-    """
-
-    id: str
-    name: str
-    arguments: str
+#: 没配密钥时的统一措辞：start 的警告、health 的详情、调用时的报错共用
+NO_API_KEY = "未配置 api_key，LLM 功能不可用"
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +65,11 @@ class AssistantReply:
 
 
 def _or_omit[V](value: V | None) -> V | Omit:
-    """None 换成 omit（不传该参数）。"""
+    """None 换成 omit（不传该参数）。
+
+    SDK 3.x 的请求体只剔除 NotGiven 与 Omit，显式 None 会被原样序列化成
+    JSON null（端点多半 400 或当 0 处理），所以「不传」必须走 omit。
+    """
     return omit if value is None else value
 
 
@@ -140,11 +134,15 @@ class LLMService(Service):
 
     @override
     async def start(self) -> None:
-        """建客户端。没配 api_key 时只警告：脚手架不该因为没密钥就起不来。"""
-        if self.state is ServiceState.RUNNING:
+        """建客户端。没配 api_key 时只警告：脚手架不该因为没密钥就起不来。
+
+        幂等看「有没有客户端」而不是状态：手工重复调用不该建出第二个客户端
+        （前一个会被覆盖、没人 close）。
+        """
+        if self._client is not None or self.state is ServiceState.RUNNING:
             return
         if not self._config.api_key:
-            self.log.warning("未配置 api_key，LLM 功能不可用", 端点=self._config.base_url)
+            self.log.warning(NO_API_KEY, 端点=self._config.base_url)
             return
         self._client = build_client(self._config)
 
@@ -229,6 +227,7 @@ class LLMService(Service):
         *,
         model: str | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> T:
         """结构化输出：按 schema 约束返回，返回体校验失败抛 LLMSchemaError。
 
@@ -242,6 +241,7 @@ class LLMService(Service):
                 model=resolved,
                 messages=list(messages),
                 temperature=self._temperature(temperature),
+                max_tokens=self._max_tokens(max_tokens),
                 response_format=self._response_format(schema),
             )
         usage = response.usage
@@ -264,6 +264,7 @@ class LLMService(Service):
         *,
         model: str | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> AssistantReply:
         """工具调用（单轮）：返回正文与 tool_calls，不自动发起第二轮。"""
         client = self._require_client()
@@ -275,6 +276,7 @@ class LLMService(Service):
                 messages=list(messages),
                 tools=list(tools),
                 temperature=self._temperature(temperature),
+                max_tokens=self._max_tokens(max_tokens),
             )
         usage = response.usage
         self._log_done(
@@ -312,7 +314,7 @@ class LLMService(Service):
     def _require_client(self) -> AsyncOpenAI:
         """取客户端；没配 api_key 时到这里才报错（配置缺失不该让进程起不来）。"""
         if self._client is None:
-            raise LLMConfigError("未配置 api_key，LLM 功能不可用")
+            raise LLMConfigError(NO_API_KEY)
         return self._client
 
     def _resolve_model(self, override: str | None) -> str:
@@ -374,4 +376,4 @@ class LLMService(Service):
         if completion_tokens is not None:
             fields["输出token"] = completion_tokens
         # 显式传 face：fields 的值是 object，**fields 展开时会被逐个形参对账
-        self.log.info("LLM 调用完成", None, **fields)
+        self.log.info("LLM 调用完成", face=None, **fields)

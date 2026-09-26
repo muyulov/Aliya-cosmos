@@ -19,6 +19,7 @@ from core.llm.errors import (
 )
 from core.llm.messages import (
     ImagePart,
+    ToolCall,
     assistant,
     image_base64,
     image_url,
@@ -28,7 +29,7 @@ from core.llm.messages import (
     user,
     user_with_images,
 )
-from core.llm.service import AssistantReply, LLMService, ToolCall
+from core.llm.service import AssistantReply, LLMService
 
 __all__ = [
     "AssistantReply",

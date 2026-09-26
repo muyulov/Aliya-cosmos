@@ -33,7 +33,7 @@ from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
 from openai.types.chat.chat_completion_message_tool_call import Function
 from openai.types.create_embedding_response import Usage
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from core.config import LLMSettings, Settings
 from core.llm import (
@@ -45,8 +45,10 @@ from core.llm import (
     LLMService,
     LLMTimeoutError,
     ToolCall,
+    assistant,
     image_url,
     tool,
+    tool_result,
     user,
     user_with_images,
 )
@@ -135,6 +137,7 @@ def _service(
     vision_model: str = "",
     structured_mode: Literal["json_schema", "json_object"] = "json_schema",
     temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> LLMService:
     return LLMService(
         LLMSettings(
@@ -144,6 +147,7 @@ def _service(
             vision_model=vision_model,
             structured_mode=structured_mode,
             temperature=temperature,
+            max_tokens=max_tokens,
         )
     )
 
@@ -242,6 +246,32 @@ def test_vision_model留空时复用chat_model() -> None:
     assert _service(vision_model="vision-m").vision_model == "vision-m"
 
 
+async def test_start重复调用不重建客户端() -> None:
+    """幂等看客户端而不是状态：重复 start 不该把已建的客户端顶掉（前一个会泄漏）。"""
+    service = _service()
+    await service.start()
+    client = service._client  # pyright: ignore[reportPrivateUsage]
+
+    await service.start()
+    assert service._client is client  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_有客户端时健康检查为健康() -> None:
+    service = _service()
+    _attach(service, _FakeClient())
+
+    status = await service.health()
+    assert status.healthy is True
+    assert status.detail == ""
+
+
+def test_非法timeout与retries被拒() -> None:
+    with pytest.raises(ValidationError):
+        _ = LLMSettings(timeout=0)
+    with pytest.raises(ValidationError):
+        _ = LLMSettings(retries=-1)
+
+
 # ---- 对话与流式 ----
 
 
@@ -292,6 +322,24 @@ async def test_stream逐段产出且跳过空片段() -> None:
     assert [part async for part in service.stream([user("在吗")])] == ["你", "好"]
 
 
+async def test_chat传model覆盖配置() -> None:
+    """多模态走的就是这条路：不单独开方法，传 model=svc.vision_model。"""
+    service = _service(vision_model="vision-m")
+    client = _FakeClient(completion=_completion())
+    _attach(service, client)
+
+    _ = await service.chat([user("在吗")], model=service.vision_model)
+    assert client.calls[0]["model"] == "vision-m"
+
+
+async def test_流式错误同样走错误映射() -> None:
+    service = _service()
+    _attach(service, _FakeClient(error=_status_error(429)))
+
+    with pytest.raises(LLMRequestError):
+        _ = [part async for part in service.stream([user("在吗")])]
+
+
 # ---- 结构化输出 ----
 
 
@@ -325,6 +373,21 @@ async def test_json_object模式只传类型标记() -> None:
     assert client.calls[0]["response_format"] == {"type": "json_object"}
 
 
+async def test_结构化输出与工具调用也吃配置的max_tokens() -> None:
+    """结构化输出最怕输出被截断，max_tokens 不能只对 chat / stream 生效。"""
+    service = _service(max_tokens=512)
+    client = _FakeClient(completion=_completion('{"name": "苹果", "price": 1.5}'))
+    _attach(service, client)
+
+    _ = await service.chat_structured([user("报价")], Item)
+    assert client.calls[0]["max_tokens"] == 512
+
+    tools_client = _FakeClient(completion=_completion(None))
+    _attach(service, tools_client)
+    _ = await service.chat_tools([user("天气")], [tool("get_weather", "查天气", Item)])
+    assert tools_client.calls[0]["max_tokens"] == 512
+
+
 # ---- 工具调用 ----
 
 
@@ -346,6 +409,28 @@ async def test_工具调用只发一轮() -> None:
     assert reply.tool_calls == (
         ToolCall(id="call_1", name="get_weather", arguments='{"city": "上海"}'),
     )
+
+
+def test_回传工具调用的消息结构() -> None:
+    """第二轮要 assistant(tool_calls=...) + tool_result()，调用方不该为此 import SDK。"""
+    call = ToolCall(id="call_1", name="get_weather", arguments='{"city": "上海"}')
+
+    assert assistant(tool_calls=(call,)) == {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"city": "上海"}'},
+            }
+        ],
+    }
+    assert tool_result(call.id, "晴 26℃") == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "晴 26℃",
+    }
 
 
 # ---- 错误映射 ----

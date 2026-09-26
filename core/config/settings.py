@@ -69,7 +69,7 @@ class LLMSettings(BaseModel):
     """LLM 层配置。
 
     `temperature` / `max_tokens` 为 None 表示「不传该参数」，由服务端决定取值；
-    传给 SDK 前会在调用边界换成 NOT_GIVEN（显式 None 会被序列化成 JSON null）。
+    传给 SDK 前会在调用边界换成 omit（显式 None 会被序列化成 JSON null）。
     """
 
     base_url: str = "https://api.openai.com/v1"
@@ -77,8 +77,8 @@ class LLMSettings(BaseModel):
     chat_model: str = "gpt-4o-mini"
     embed_model: str = ""  # 留空则 embed() 抛 LLMConfigError
     vision_model: str = ""  # 留空复用 chat_model
-    timeout: float = 60.0  # 单次请求超时（秒）
-    retries: int = 2  # SDK 重试次数，0 关闭
+    timeout: float = Field(default=60.0, gt=0)  # 单次请求超时（秒）
+    retries: int = Field(default=2, ge=0)  # SDK 重试次数，0 关闭
     structured_mode: Literal["json_schema", "json_object"] = "json_schema"
     temperature: float | None = None
     max_tokens: int | None = None

@@ -29,6 +29,3 @@ llm:
   structured_mode: json_schema            # 兼容端点不支持时改 json_object
   temperature: null                       # null = 不传该参数，用服务端默认
   max_tokens: null
-
-# 密钥类字段以占位符声明，由 .env 提供值：
-# api_key: ${DEEPSEEK_API_KEY}
