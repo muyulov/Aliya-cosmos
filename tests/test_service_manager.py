@@ -204,7 +204,7 @@ async def test_启动失败时回滚已启动服务() -> None:
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
 
-    assert excinfo.value.service_name == "api"
+    assert excinfo.value.label == "api"
     assert "stop:db" in events
     assert mgr.get(FailingDbService).state is ServiceState.STOPPED
     assert mgr.get(FailingApiService).state is ServiceState.FAILED

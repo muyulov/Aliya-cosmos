@@ -8,11 +8,12 @@ from typing import ClassVar, override
 
 import pytest
 from loguru import logger
+from pydantic import ValidationError
 
 from core.config import LogSettings, ServiceSettings, Settings
 from core.logger import setup_logging
 from core.service.base import UNSET, Service, ServiceState, Unset
-from core.service.manager import ServiceManager, ServiceStartError
+from core.service.manager import HookTimeoutError, ServiceManager, ServiceStartError
 
 #: 同层并发用的事件表：键是服务 label
 entered: dict[str, asyncio.Event] = {}
@@ -149,7 +150,7 @@ async def test_同层某个服务失败时回滚且报错取先注册者() -> No
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
 
-    assert excinfo.value.service_name == "fail-a"
+    assert excinfo.value.label == "fail-a"
 
 
 def _settings(start_timeout: float | None = 30.0, stop_timeout: float | None = 30.0) -> Settings:
@@ -293,7 +294,7 @@ async def test_启动超时判定为失败() -> None:
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
 
-    assert excinfo.value.service_name == "slow-start"
+    assert excinfo.value.label == "slow-start"
     assert isinstance(excinfo.value.cause, TimeoutError)
     assert "启动超时" in str(excinfo.value.cause)
     assert mgr.get(SlowStartService).state is ServiceState.FAILED
@@ -393,7 +394,7 @@ async def test_启动失败的服务自身也会被回滚清理() -> None:
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
 
-    assert excinfo.value.service_name == "half-started"
+    assert excinfo.value.label == "half-started"
     assert order_log == ["open:half-started", "close:half-started"]
     # 已被清理，但启动失败是它的终态标记，不该被抹成 STOPPED
     assert mgr.get(HalfStartedService).state is ServiceState.FAILED
@@ -411,3 +412,207 @@ async def test_回滚同时覆盖成功者与失败者() -> None:
     assert order_log == ["stop:half-outer", "stop:half-inner"]
     assert mgr.get(HalfStartedInner).state is ServiceState.STOPPED
     assert mgr.get(HalfStartedOuter).state is ServiceState.FAILED
+
+
+class BusinessTimeoutOnStart(Service):
+    """start 里抛业务自己的 TimeoutError（socket 超时这类）。"""
+
+    name: ClassVar[str] = "business-timeout"
+
+    @override
+    async def start(self) -> None:
+        msg = "业务侧 socket 超时"
+        raise TimeoutError(msg)
+
+
+class BusinessTimeoutOnStop(Service):
+    """stop 里抛业务自己的 TimeoutError。"""
+
+    name: ClassVar[str] = "business-timeout-stop"
+
+    @override
+    async def stop(self) -> None:
+        msg = "业务侧关闭超时"
+        raise TimeoutError(msg)
+
+
+class RerunInner(Service):
+    """二轮场景：首轮已成功启动的依赖。"""
+
+    name: ClassVar[str] = "rerun-inner"
+
+    @override
+    async def stop(self) -> None:
+        order_log.append("stop:rerun-inner")
+
+
+class RerunOuter(Service):
+    """二轮场景：可切换为「第二次启动失败」。"""
+
+    name: ClassVar[str] = "rerun-outer"
+    dependencies: ClassVar[tuple[type[Service], ...]] = (RerunInner,)
+    #: 置 True 后 start 抛错，用于构造「依赖已 RUNNING、自己启动失败」
+    fail_on_second: ClassVar[bool] = False
+
+    def __init__(self, inner: RerunInner) -> None:
+        super().__init__()
+        self._inner: RerunInner = inner
+
+    @override
+    async def start(self) -> None:
+        if type(self).fail_on_second:
+            msg = "二轮启动失败"
+            raise RuntimeError(msg)
+
+
+async def test_业务_timeout_不被当成启动超时() -> None:
+    """回归：业务抛的 TimeoutError 与框架超时同型，不能被伪装成「启动超时」。"""
+    mgr = ServiceManager()
+    _ = mgr.register(BusinessTimeoutOnStart)
+
+    with pytest.raises(ServiceStartError) as excinfo:
+        await mgr.start_all()
+
+    assert type(excinfo.value.cause) is TimeoutError
+    assert str(excinfo.value.cause) == "业务侧 socket 超时"
+
+
+async def test_业务_timeout_不被当成关闭超时(tmp_path: Path) -> None:
+    """回归：关闭路径同理，必须是「关闭异常」而不是「关闭超时」。"""
+    cfg = _log_cfg(tmp_path)
+    setup_logging(cfg)
+
+    mgr = ServiceManager()
+    _ = mgr.register(BusinessTimeoutOnStop)
+
+    await mgr.start_all()
+    await mgr.stop_all()
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "[business-timeout-stop] 服务关闭异常" in text
+    assert "服务关闭超时" not in text
+
+
+async def test_框架超时用独立的异常类型标记() -> None:
+    """框架侧超时抛 HookTimeoutError，与业务 TimeoutError 从类型上分开。"""
+    mgr = ServiceManager(_settings(start_timeout=0.05))
+    _ = mgr.register(SlowStartService)
+
+    with pytest.raises(ServiceStartError) as excinfo:
+        await mgr.start_all()
+
+    assert type(excinfo.value.cause) is HookTimeoutError
+    assert "启动超时" in str(excinfo.value.cause)
+
+
+async def test_已运行的依赖在启动失败时也会被回滚() -> None:
+    """回归：被跳过的已 RUNNING 依赖同样要进回滚名单。
+
+    二轮 start_all 里依赖已 RUNNING 会被跳过；若不登记，整体失败后它会留在
+    RUNNING——而 lifespan.__aenter__ 抛错时 __aexit__ 不执行、stop_all 不会被调用。
+    """
+    mgr = ServiceManager()
+    _ = mgr.register(RerunInner)
+    _ = mgr.register(RerunOuter)
+    await mgr.start_all()
+
+    # 白盒让外层需要重新启动（依赖保持 RUNNING）
+    mgr.get(RerunOuter).state = ServiceState.STOPPED
+    RerunOuter.fail_on_second = True
+    try:
+        with pytest.raises(ServiceStartError):
+            await mgr.start_all()
+    finally:
+        RerunOuter.fail_on_second = False
+
+    assert "stop:rerun-inner" in order_log
+    assert mgr.get(RerunInner).state is ServiceState.STOPPED
+
+
+def test_超时配置必须为正数() -> None:
+    """回归：0 / 负数会被 asyncio.timeout 变成「立即超时」，须在校验期拦下。"""
+    with pytest.raises(ValidationError):
+        _ = ServiceSettings(start_timeout=-1.0)
+
+    with pytest.raises(ValidationError):
+        _ = ServiceSettings(stop_timeout=0.0)
+
+
+async def test_启停日志走服务门面带前缀与耗时(tmp_path: Path) -> None:
+    """单服务日志与失败日志同形：`[label]` 前缀 + `服务=` 字段 + 数值耗时。
+
+    耗时字段是排查「同层里是谁慢」的唯一依据——整层耗时只能定位到批次。
+    """
+    cfg = _log_cfg(tmp_path)
+    setup_logging(cfg)
+
+    mgr = ServiceManager()
+    _ = mgr.register(QuickService)
+    await mgr.start_all()
+    await mgr.stop_all()
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "[quick] 服务已启动" in text
+    assert "[quick] 服务已停止" in text
+    assert "耗时毫秒: " in text
+    assert "全部服务启动完成" in text
+    assert "全部服务已停止" in text
+    assert "服务数: 1" in text
+
+
+async def test_同层日志列出服务名与一基层号(tmp_path: Path) -> None:
+    """回归：只报「服务数」看不出这一层是谁，层号也给成人读的 1-based。"""
+    cfg = _log_cfg(tmp_path)
+    setup_logging(cfg)
+
+    mgr = ServiceManager()
+    _ = mgr.register(GateA)
+    _ = mgr.register(GateB)
+    await mgr.start_all()
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "同层服务启动完成" in text
+    assert "层: 1" in text
+    assert "服务: gate-a、gate-b" in text
+    assert "耗时毫秒: " in text
+
+
+async def test_回滚会留痕(tmp_path: Path) -> None:
+    """回归：回滚原先完全不留痕，日志里几条「已启动」后凭空冒失败，看不出谁清理的。"""
+    cfg = _log_cfg(tmp_path)
+    setup_logging(cfg)
+
+    mgr = ServiceManager()
+    _ = mgr.register(HalfStartedInner)
+    _ = mgr.register(HalfStartedOuter)
+
+    with pytest.raises(ServiceStartError):
+        await mgr.start_all()
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "启动未完成，回滚本次动过的服务" in text
+    assert "回滚时服务已关闭" in text
+    assert "[half-inner] 回滚时服务已关闭" in text
+    assert "回滚完成" in text
+
+
+async def test_超时日志不重复打错误类型(tmp_path: Path) -> None:
+    """超时的「错误」就是超时本身：消息 + 超时秒数 已经说清，不再拼异常类型。"""
+    cfg = _log_cfg(tmp_path)
+    setup_logging(cfg)
+
+    mgr = ServiceManager(_settings(start_timeout=0.05))
+    _ = mgr.register(SlowStartService)
+
+    with pytest.raises(ServiceStartError):
+        await mgr.start_all()
+    logger.remove()
+
+    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    assert "[slow-start] 服务启动超时" in text
+    assert "超时秒数: 0.05" in text
+    assert "HookTimeoutError" not in text

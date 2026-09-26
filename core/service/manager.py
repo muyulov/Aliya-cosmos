@@ -3,8 +3,8 @@
 职责：
 - 注册服务**类型**（不是实例），服务之间按**类型**声明依赖。
 - 惰性装配：首次访问时校验契约、拓扑排序、按序构造并注入依赖。
-- 启动：按装配期固化的顺序逐个启动并记录耗时；任一失败则逆序回滚。
-- 关闭：按启动顺序的逆序逐个关闭，吞掉单个异常，保证其余服务都能停下。
+- 启动：按依赖分层，同层并发、层间串行；单层有失败或整体被取消都逆序回滚本次动过的服务。
+- 关闭：按启动顺序的逆序逐个关闭，单个超时或异常只记日志，保证其余服务都能停下。
 - 健康检查：聚合所有服务的状态。
 
 装配失败一律 fail fast，抛 ServiceError 子树；ServiceError 不是 AppError，
@@ -76,12 +76,35 @@ def _resolve_timeout(override: float | Unset | None, default: float | None) -> f
 async def _call_with_timeout(
     action: Callable[[], Coroutine[object, object, None]], timeout: float | None
 ) -> None:
-    """按超时调用服务钩子。异常不在这里吞，由调用方决定语义。"""
+    """按超时调用服务钩子，超时统一抛 HookTimeoutError。
+
+    刻意不用 asyncio.timeout / wait_for：它们把「框架超时」也表达成 TimeoutError，
+    与业务自己抛的 TimeoutError 撞型，会把真实原因伪装成「启动超时」。这里改成
+    「定时取消 + 标志位」自行实现，只有本函数发出的取消才算超时；业务异常与外部
+    取消都原样冒泡。异常不在这里吞，由调用方决定语义。
+    """
     if timeout is None:
         await action()
         return
-    async with asyncio.timeout(timeout):
-        await action()
+
+    hook = asyncio.ensure_future(action())
+    loop = asyncio.get_running_loop()
+    timed_out = False
+
+    def _cancel_hook() -> None:
+        nonlocal timed_out
+        timed_out = True
+        _ = hook.cancel()
+
+    handle = loop.call_later(timeout, _cancel_hook)
+    try:
+        await hook
+    except asyncio.CancelledError:
+        if not timed_out:  # 外层取消，不是超时
+            raise
+        raise HookTimeoutError(f"超过 {timeout}s") from None
+    finally:
+        handle.cancel()
 
 
 class ServiceManager:
@@ -167,27 +190,33 @@ class ServiceManager:
         `__aexit__` 不会执行、`stop_all` 也不会被调用，回滚只能在这里做完。
         """
         self._ensure_built()
-        # 本次启动过程中「动过」的服务（含失败者），回滚时都要调一次 stop()：
-        # 只登记成功者会漏掉 start() 中途抛错、已经申请了部分资源的那些。
-        # 登记在协程内部完成：gather 自身被取消时调用方拿不到 outcomes。
+        # 本次启动涉及的服务（含失败者与已 RUNNING 被跳过者），回滚时都要调一次
+        # stop()：只登记成功者会漏掉 start() 中途抛错、已经申请了部分资源的那些；
+        # 不含已 RUNNING 的则会在整体失败、进程退出时把它们留在 RUNNING。
+        # 新启动的登记在协程内部完成：gather 自身被取消时调用方拿不到 outcomes。
         attempted: list[Service] = []
 
         try:
             for index, level in enumerate(self._levels):
                 pending = [
-                    service_type
+                    self._instances[service_type]
                     for service_type in level
                     if self._instances[service_type].state is not ServiceState.RUNNING
                 ]
+                # 已 RUNNING 的也要进回滚名单：整体启动失败意味着进程即将退出，
+                # 而 lifespan.__aenter__ 抛错时 stop_all 不会被调用——只回滚本次
+                # 新启动的那些，会把之前就在跑的服务留在 RUNNING。
+                attempted.extend(
+                    self._instances[service_type]
+                    for service_type in level
+                    if self._instances[service_type].state is ServiceState.RUNNING
+                )
                 if not pending:
                     continue
 
                 begin = time.perf_counter()
                 outcomes = await asyncio.gather(
-                    *(
-                        self._start_one(self._instances[service_type], attempted)
-                        for service_type in pending
-                    ),
+                    *(self._start_one(service, attempted) for service in pending),
                     return_exceptions=True,
                 )
                 elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
@@ -197,12 +226,22 @@ class ServiceManager:
                 if failures:
                     raise failures[0]
 
-                log.info("同层服务启动完成", 层=index, 服务数=len(pending), 耗时=f"{elapsed_ms}ms")
+                # 服务名与耗时都给出来：只报「服务数」看不出慢的是哪一个，
+                # 层号是展示用的 1-based，与代码里的 index 差 1。
+                log.info(
+                    "同层服务启动完成",
+                    层=index + 1,
+                    服务="、".join(service.label for service in pending),
+                    耗时毫秒=elapsed_ms,
+                )
         except BaseException:
+            # 回滚必须留痕：否则日志里只有几条「服务已启动」后凭空冒出失败，
+            # 看不出那些服务是被谁清理掉的。
+            log.warning("启动未完成，回滚本次动过的服务", 服务数=len(attempted))
             await self._rollback(attempted)
             raise
 
-        log.info("全部服务启动完成", 服务数=len(attempted))
+        log.info("全部服务启动完成", 服务数=len(self._instances))
 
     async def _start_one(self, service: Service, attempted: list[Service]) -> None:
         """启动单个服务；超时与失败都收敛成 ServiceStartError。
@@ -215,14 +254,17 @@ class ServiceManager:
         attempted.append(service)
         service.state = ServiceState.STARTING
         timeout = _resolve_timeout(service.start_timeout, self._service_settings.start_timeout)
+        begin = time.perf_counter()
         try:
             await _call_with_timeout(service.start, timeout)
-        except TimeoutError as exc:
+        except HookTimeoutError as exc:
             service.state = ServiceState.FAILED
-            # 裸 TimeoutError 的 str() 是空的，会让 ServiceStartError 的消息
-            # 变成"服务 X 启动失败：TimeoutError: "，这里换成带说明的 cause。
-            cause = TimeoutError(f"启动超时，超过 {timeout}s")
-            service.log_error("服务启动超时", cause, 超时秒数=timeout)
+            # HookTimeoutError 自身只有「超过 Ns」，这里换成带阶段说明的 cause：
+            # ServiceStartError 的消息会拼上 cause 的 str()。
+            cause = HookTimeoutError(f"启动超时，超过 {timeout}s")
+            # 不带 错误= 字段：超时的「错误」就是超时本身，类型与秒数在消息和
+            # 超时秒数 里已经说清，再拼一遍 HookTimeoutError 只是噪声。
+            service.log_error("服务启动超时", 超时秒数=timeout)
             raise ServiceStartError(service.label, cause) from exc
         except Exception as exc:
             service.state = ServiceState.FAILED
@@ -234,7 +276,10 @@ class ServiceManager:
             raise
 
         service.state = ServiceState.RUNNING
-        log.info("服务已启动", face=faces.START, 服务=service.label)
+        elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
+        # 用服务自己的门面：与服务侧的失败日志同形（[label] 前缀 + 服务= 字段），
+        # 单服务耗时也让「同层里是谁慢」有据可查
+        service.log.info("服务已启动", face=faces.START, 耗时毫秒=elapsed_ms)
 
     async def stop_all(self) -> None:
         """按启动的逆序关闭所有服务。
@@ -252,11 +297,12 @@ class ServiceManager:
 
             service.state = ServiceState.STOPPING
             timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
+            begin = time.perf_counter()
             try:
                 await _call_with_timeout(service.stop, timeout)
-            except TimeoutError as exc:
+            except HookTimeoutError:
                 service.state = ServiceState.FAILED
-                service.log_error("服务关闭超时", exc, 超时秒数=timeout)
+                service.log_error("服务关闭超时", 超时秒数=timeout)
                 continue
             except Exception as exc:
                 # 关闭阶段不阻断其他服务，仅记录
@@ -265,9 +311,10 @@ class ServiceManager:
                 continue
 
             service.state = ServiceState.STOPPED
-            log.info("服务已停止", face=faces.BYE, 服务=service.label)
+            elapsed_ms = round((time.perf_counter() - begin) * 1000, 1)
+            service.log.info("服务已停止", face=faces.BYE, 耗时毫秒=elapsed_ms)
 
-        log.info("全部服务已停止")
+        log.info("全部服务已停止", face=faces.BYE, 服务数=len(self._order))
 
     async def _rollback(self, attempted: Sequence[Service]) -> None:
         """逆序清理本次动过的服务；同样套 stop 超时，但不阻断其余回滚。
@@ -284,14 +331,20 @@ class ServiceManager:
             timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
             try:
                 await _call_with_timeout(service.stop, timeout)
-            except TimeoutError as exc:
+            except HookTimeoutError:
                 service.state = ServiceState.FAILED
-                service.log_error("回滚时服务关闭超时", exc, 超时秒数=timeout)
+                service.log_error("回滚时服务关闭超时", 超时秒数=timeout)
             except Exception as exc:
                 service.state = ServiceState.FAILED
                 service.log_error("回滚时服务关闭异常", exc)
             else:
                 service.state = ServiceState.FAILED if was_failed else ServiceState.STOPPED
+                service.log.info("回滚时服务已关闭", face=faces.BYE)
+
+        # 回滚没有「全部服务已停止」那样的收尾，这里补一句，
+        # 免得日志断在半路、看不出清理是否已经做完；颜文字不用默认的 CHEER，
+        # 这是异常路径的收尾，不是喜讯
+        log.info("回滚完成", face=faces.THINK, 服务数=len(attempted))
 
     # ---------- 健康检查 ----------
 
@@ -389,7 +442,7 @@ class ServiceManager:
             # 直接用会让 Any 渗进后面的 isinstance 与 cast。
             annotation: object = field_info.annotation
             node_type = _config_node_type(annotation)
-            if node_type is None or node_type is Settings:  # Settings 走整份注入
+            if node_type is None:
                 continue
             value = cast("BaseModel | None", getattr(settings, field_name))
             if value is None:
@@ -516,6 +569,17 @@ class ServiceError(Exception):
     """
 
 
+class HookTimeoutError(TimeoutError):
+    """框架侧超时：服务钩子（start / stop）超过配置秒数被中断。
+
+    刻意继承 TimeoutError：`ServiceStartError.cause` 的类型契约保持不变，调用方
+    仍可按 TimeoutError 处理；与业务自己抛的 TimeoutError 靠**类型**区分——只有
+    本模块主动抛出的这个子类才代表框架超时。
+
+    不是 ServiceError 子类：它总是被包进 ServiceStartError.cause，不会单独冒泡。
+    """
+
+
 class ServiceContractError(ServiceError):
     """服务契约不合法。
 
@@ -537,13 +601,13 @@ class ServiceNotRegisteredError(ServiceError):
 class ServiceStartError(ServiceError):
     """服务启动失败。"""
 
-    service_name: str
+    label: str
     cause: BaseException
 
-    def __init__(self, service_name: str, cause: BaseException) -> None:
-        self.service_name = service_name
+    def __init__(self, label: str, cause: BaseException) -> None:
+        self.label = label
         self.cause = cause
-        super().__init__(f"服务 {service_name} 启动失败：{type(cause).__name__}: {cause}")
+        super().__init__(f"服务 {label} 启动失败：{type(cause).__name__}: {cause}")
 
 
 class CircularDependencyError(ServiceError):

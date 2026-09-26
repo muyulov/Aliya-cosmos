@@ -85,8 +85,8 @@ log:
 | `log.rotation` | `00:00` | 轮转阈值（默认按天），写进 YAML 时必须加引号 |
 | `log.retention` | `7 days` | 保留时长 |
 | `log.compression` | `zip` | 归档压缩方式 |
-| `service.start_timeout` | `30` | 单个服务 `start()` 的超时秒数；写 `null` 表示不限制 |
-| `service.stop_timeout` | `30` | 单个服务 `stop()` 的超时秒数；同上 |
+| `service.start_timeout` | `30` | 单个服务 `start()` 的超时秒数，必须为正数；写 `null` 表示不限制 |
+| `service.stop_timeout` | `30` | 单个服务 `stop()` 的超时秒数，必须为正数；同上 |
 | `clock.tz` | `UTC` | 时钟服务的时区，如 `Asia/Shanghai` |
 
 ### 失败行为
@@ -200,9 +200,9 @@ _ = manager.register(CacheService)
 | 整份配置注入 | 需要全局视野时在构造器声明 `settings: Settings`，容器注入应用持有的那份实例 |
 | 超时覆盖 | 默认走 `service.start_timeout` / `service.stop_timeout`；单独调整时写 `start_timeout: ClassVar[float \| Unset \| None] = 300.0`（需 `from core.service.base import Unset`），`None` 表示该服务不限制，不写即跟随全局 |
 
-启停语义：`start` / `stop` 需幂等（重复调用不应报错），并且 **`stop()` 必须能安全作用在「从未成功启动过」的服务上**——启动失败者同样会被回滚调用。启动按依赖**分层**：同层并发、层间串行；单个服务超时或抛错都判该服务失败，并逆序回滚本次动过的服务（**含失败者**：`start()` 可能已经申请了部分资源，`stop()` 是它唯一的回收入口；失败者的状态保持 `FAILED`，清理成功不等于它启动成功过），随后抛出 `ServiceStartError`；**被取消时（外层 `asyncio.timeout`、`task.cancel()`）走同一条回滚路径**——`lifespan()` 的 `__aenter__` 抛错时 `__aexit__` 不会执行、`stop_all` 不会被调用，所以回滚必须在 `start_all` 内部完成，已启动的服务不会留在 `RUNNING`。关闭按启动的逆序**串行**执行，单个服务超时或出错只记日志（状态置 `FAILED`），不影响其余服务停下。
+启停语义：`start` / `stop` 需幂等（重复调用不应报错），并且 **`stop()` 必须能安全作用在「从未成功启动过」的服务上**——启动失败者同样会被回滚调用。启动按依赖**分层**：同层并发、层间串行；单个服务超时或抛错都判该服务失败，并逆序回滚本次动过的服务（**含失败者**：`start()` 可能已经申请了部分资源，`stop()` 是它唯一的回收入口；失败者的状态保持 `FAILED`，清理成功不等于它启动成功过；**已 RUNNING、被本次跳过启动的服务也在回滚名单里**——整体启动失败意味着进程即将退出，而那时 `stop_all` 不会被调用），随后抛出 `ServiceStartError`；**被取消时（外层 `asyncio.timeout`、`task.cancel()`）走同一条回滚路径**——`lifespan()` 的 `__aenter__` 抛错时 `__aexit__` 不会执行、`stop_all` 不会被调用，所以回滚必须在 `start_all` 内部完成，已启动的服务不会留在 `RUNNING`。关闭按启动的逆序**串行**执行，单个服务超时或出错只记日志（状态置 `FAILED`），不影响其余服务停下。
 
-超时靠 `asyncio.timeout` 的取消实现，因此服务的 `start` / `stop` **不要吞掉 `CancelledError`**（写 `except Exception` 是安全的，它不会捕获 `CancelledError`）。
+超时靠「定时取消 + 标志位」实现（不用 `asyncio.timeout`，好与业务自己抛的 `TimeoutError` 区分开），因此服务的 `start` / `stop` **不要吞掉 `CancelledError`**（写 `except Exception` 是安全的，它不会捕获 `CancelledError`）。框架侧超时抛 `HookTimeoutError`（`TimeoutError` 的**子类**），它会作为 `ServiceStartError.cause` 出现；业务自己抛的 `TimeoutError` 原样保留，记为「启动失败 / 关闭异常」。
 
 装配期的错误都是 `ServiceError` 的子类，只会让启动失败、进程退出（fail fast）。调用 `get()` 查一个未注册的类型属于编程错误，会抛 `ServiceNotRegisteredError`。
 
@@ -212,4 +212,4 @@ _ = manager.register(CacheService)
 | `ServiceNotRegisteredError` | `get()` 查的类型未注册 |
 | `MissingDependencyError` | `dependencies` 里的类型没注册 |
 | `CircularDependencyError` | 依赖成环 |
-| `ServiceStartError` | 某个服务 `start()` 抛错（携带 `service_name` 与 `cause`） |
+| `ServiceStartError` | 某个服务 `start()` 抛错（携带 `label` 与 `cause`；超时场景的 `cause` 是 `HookTimeoutError`） |

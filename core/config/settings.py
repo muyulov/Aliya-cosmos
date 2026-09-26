@@ -55,8 +55,8 @@ class LogSettings(BaseModel):
 class ServiceSettings(BaseModel):
     """服务生命周期配置。"""
 
-    start_timeout: float | None = 30.0  # 秒；None 表示不限制
-    stop_timeout: float | None = 30.0
+    start_timeout: float | None = Field(default=30.0, gt=0)  # 秒；None 表示不限制
+    stop_timeout: float | None = Field(default=30.0, gt=0)
 
 
 class ClockSettings(BaseModel):

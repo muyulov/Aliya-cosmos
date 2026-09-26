@@ -429,13 +429,13 @@ def test_可选配置节点为_none_时报错并说明原因() -> None:
         _ = mgr.services
 
 
-async def test_时钟按配置时区取值() -> None:
+def test_时钟按配置时区取值() -> None:
     clock = ClockService(ClockSettings(tz="Asia/Shanghai"))
 
     assert clock.now().utcoffset() == timedelta(hours=8)
 
 
-async def test_时钟默认时区为_utc() -> None:
+def test_时钟默认时区为_utc() -> None:
     assert ClockService(ClockSettings()).now().utcoffset() == timedelta(0)
 
 
@@ -447,7 +447,7 @@ async def test_非法时区在启动期失败() -> None:
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
 
-    assert excinfo.value.service_name == "clock"
+    assert excinfo.value.label == "clock"
     assert mgr.get(ClockService).state is ServiceState.FAILED
 
 

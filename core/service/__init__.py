@@ -4,6 +4,7 @@ from core.service.base import UNSET, HealthStatus, Service, ServiceState, Unset
 from core.service.clock_service import ClockService
 from core.service.manager import (
     CircularDependencyError,
+    HookTimeoutError,
     MissingDependencyError,
     ServiceContractError,
     ServiceError,
@@ -18,6 +19,7 @@ __all__ = [
     "CircularDependencyError",
     "ClockService",
     "HealthStatus",
+    "HookTimeoutError",
     "MissingDependencyError",
     "Service",
     "ServiceContractError",
