@@ -281,7 +281,6 @@ async def main(svc: EmbeddingService, texts: list[str]) -> None:
 | 原样透传、不归一化 | 返回的是模型原始向量，模长信息不丢；要不要 L2 归一化由调用方决定 |
 | 空序列早退 | `embed_many([])` 返回 `[]`，不发请求、不查密钥（空输入不需要服务）；空串与全空白串在本地抛 `EmbeddingInputError` |
 | 缺密钥不 fail fast | 没配 `api_key` 时只警告、不建内核，健康检查 unhealthy，调用时才抛 `EmbeddingConfigError` |
-| 内核可替换 | 换本地模型（ONNX 等）时覆盖 `EmbeddingService._make_encoder()` 返回一个 `Encoder` 即可；归位与校验仍由服务层做 |
 | 重试交给 SDK | 超时与重试由端点的 `timeout` / `retries` 控制 |
 | 不记正文 | 日志只记模型 / 端点 / 文本数 / 维度 / 耗时 / 输入 token |
 

@@ -15,7 +15,7 @@
 
 - **向量存储与检索**：不引入向量库、不做相似度检索 / 聚类 / 重排。这些是调用方的事。
 - **相似度计算工具**：`cosine` / 归一化之类不需要模型与配置，不塞进服务。
-- **本地模型实现**：只留出协议接缝，ONNX 实现等真正要用时再写。
+- **本地模型实现**：不做，也不留接缝（真出现第二个实现再说）。
 - **多供应商抽象、自研重试、健康检查探测**：与 llm 层同取舍（见决策记录）。
 - 归一化：**原样透传**模型输出，不减不除（决策 7）。
 
@@ -25,7 +25,7 @@
 | --- | --- | --- | --- |
 | 1 | 定位 | 本体提供通用文本向量化能力，归忆后续适配 | 直接给归忆做（归忆契约规定不 import 本体，会被迫改它的注入方式）；只给本体内部用（能力面被过度收窄） |
 | 2 | 向量来源 | 远程 OpenAI 兼容端点（复用 `openai` SDK 的 `embeddings.create`） | 本地 ONNX（`onnxruntime` + `tokenizers` + 模型文件管理，本次无此需求）；纯 HTTP 直调（把刚删掉的 `httpx` 又加回来） |
-| 3 | 内核可替换性 | 抽 `Encoder` 协议，默认实现 `RemoteEncoder`；接入本地实现时**子类覆盖 `_make_encoder()`** | 现在加 `backend: Literal["remote","local"]` 配置项（本地实现不存在，属提前预留）；构造注入（DI 契约不允许，见下） |
+| 3 | 内核抽象 | **不做**：只有 `RemoteEncoder` 一个实现，服务直接持有它，不留协议与覆盖点（2026-09-26 清掉预留，见实施补记第 3 条） | 抽 `Encoder` 协议 + `_make_encoder()` 覆盖点（没有第二个实现，抽象就是预留）；`backend: Literal["remote","local"]` 配置项（同上）；构造注入（DI 契约不允许，见下） |
 | 4 | 能力面 | `embed(text)` + `embed_many(texts)` | 只要单条（调用方自己循环，一条一次请求）；再加相似度工具（混淆服务职责） |
 | 5 | 模块形态 | 独立包 + `EmbeddingService(Service)` 注册进 registry，`build_manager()` 的注册顺序为 clock → embedding → llm | 纯对象不进 service 层（不入 registry、无健康检查）；写成 Service 但不注册（默认启动就少一块能力） |
 | 6 | 配置 | `Settings.embedding` 独立端点，一套 `base_url` / `api_key` / `model` / `timeout` / `retries` / `batch_size` / `dimensions` | 复用 `llm.chat` 的连接信息（两个能力被强绑到同一供应商，而 DeepSeek 没有 embedding 端点）；抽公共基类（要改已稳定的 llm 层与测试） |
@@ -43,11 +43,11 @@
 
 `ServiceManager._validate_contract()`（`core/service/manager.py:478`）会逐个遍历 `__init__` 形参，
 注解必须是 `Settings`、`Service` 子类或 `Settings` 顶层配置节点，否则直接抛
-`ServiceContractError("… 容器只支持 Service 与配置节点")`。`Encoder` 三者都不是，因此
-`__init__(self, config, encoder=None)` 会让**整个容器装配失败**。
+`ServiceContractError("… 容器只支持 Service 与配置节点")`。因此 `__init__(self, config, encoder=None)`
+会让**整个容器装配失败**。
 
-结论：`__init__` 只吃 `EmbeddingSettings`；换内核算「覆盖受保护工厂方法」，测试替身走白盒注入 `_encoder`
-（与 llm 层测试注入 `_chat` / `_vision` 同法）。
+结论：`__init__` 只吃 `EmbeddingSettings`，内核由服务自己在 `start()` 里建；测试替身走白盒注入
+`_encoder`（与 llm 层测试注入 `_chat` / `_vision` 同法）。
 
 ## 三、配置层改动
 
@@ -91,8 +91,8 @@ embedding:
 
 ```
 core/embedding/
-  __init__.py    # 对外出口：EmbeddingService、Encoder、RemoteEncoder、错误树
-  encoder.py     # Encoder 协议 + RemoteEncoder + build_encoder()：唯一 new 出 SDK 客户端的地方
+  __init__.py    # 对外出口：EmbeddingService、RemoteEncoder、EncodedVector / EncodeResult、错误树
+  encoder.py     # RemoteEncoder + EncodedVector / EncodeResult + build_encoder()：唯一 new 出 SDK 客户端的地方
   errors.py      # EmbeddingError 树
   service.py     # EmbeddingService：进 DI 容器，持有 encoder
 ```
@@ -103,10 +103,10 @@ core/embedding/
 无导入环：`core/service/__init__.py` 已在 llm 层摘掉 registry 导出，链路是
 `core.service.__init__ → (base / clock_service / manager)`，不再触碰 registry 与本层。
 
-## 五、内核协议（`encoder.py`）
+## 五、内核（`encoder.py`）
 
-协议出口带结构而不是纯向量：纯向量下调用方拿不到 `index` 与 `usage`，归位只能塞进内核，
-而乱序恰恰是端点的行为，不该由可替换的内核替服务层兜（见实施补记第 1 条）。
+只有一个实现 `RemoteEncoder`，不做协议抽象。出口带结构而不是纯向量：纯向量下调用方拿不到
+`index` 与 `usage`，归位只能塞进内核，而乱序恰恰是端点的行为（见实施补记第 1 条）。
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -119,31 +119,22 @@ class EncodedVector:
 class EncodeResult:
     items: tuple[EncodedVector, ...]
     prompt_tokens: int | None = None
-
-
-class Encoder(Protocol):
-    async def encode(
-        self, texts: Sequence[str], *, dimensions: int | None = None
-    ) -> EncodeResult: ...
-
-    async def aclose(self) -> None: ...
 ```
 
-四条约定（写进 docstring，实现者必须遵守）：
+三条约定（写进 `RemoteEncoder` 的 docstring）：
 
 1. **一次调用 = 一次请求一批文本**，`items` 条数必须与入参相等。
-2. **归位责任在调用方**：每条向量带 `index`（入参位置），内核不得自行重排或丢弃。
-3. **`dimensions` 非 None 时必须兑现**：拿不到该维度就抛错，**禁止静默忽略**。
-   本地 bge 这类没有截断能力的实现，遇到该参数应当显式报错而不是返回原始维度——
-   否则调用方以为拿到 512 维、实际是 1024 维，错得很晚。
-4. `aclose()` 是资源回收入口；没有资源的本地实现写空实现即可（协议化的小代价）。
+2. **归位责任在服务层**：每条向量带 `index`（入参位置），内核不得自行重排或丢弃。
+3. **`dimensions` 非 None 时必须兑现**：拿不到该维度就抛错，**禁止静默忽略**——
+   否则调用方以为拿到 512 维、实际是别的维数，错得很晚。
+
+`RemoteEncoder(AsyncOpenAI, model)`：`encode()` 里 `dimensions` 走 `omit` 表达「不传」
+（显式 `None` 会被 SDK 序列化成 JSON `null`）；`aclose()` 转交客户端的 `close()`。
+`build_encoder(config)` 是全仓库除 `core/llm/client.py` 外唯一 `AsyncOpenAI(...)` 的地方，
+`timeout` / `max_retries` 都显式给值。
 
 `prompt_tokens` 为 None 表示端点没返回用量：`CreateEmbeddingResponse.usage` 在 SDK 类型里
 是必填，但兼容端点不返回时 `construct_type` 会把它填成 `None`（实测），实现侧要按可空处理。
-
-`RemoteEncoder(AsyncOpenAI, model)`：`encode()` 里 `dimensions` 走 `omit` 表达「不传」
-（显式 `None` 会被 SDK 序列化成 JSON `null`）。`build_encoder(config)` 是全仓库除
-`core/llm/client.py` 外唯一 `AsyncOpenAI(...)` 的地方，`timeout` / `max_retries` 都显式给值。
 
 ## 六、服务接口（`service.py`）
 
@@ -160,8 +151,6 @@ class EmbeddingService(Service):
     async def embed_many(
         self, texts: Sequence[str], *, dimensions: int | None = None
     ) -> list[list[float]]: ...
-
-    def _make_encoder(self, config: EmbeddingSettings) -> Encoder: ...
 ```
 
 生命周期：
@@ -173,7 +162,7 @@ async def start(self) -> None:
     if not self._config.api_key:
         self.log.warning(NO_API_KEY, 端点=self._config.base_url)
         return                      # 只警告：脚手架不该因为没密钥就起不来
-    self._encoder = self._make_encoder(self._config)
+    self._encoder = build_encoder(self._config)
 
 async def stop(self) -> None:
     encoder, self._encoder = self._encoder, None
@@ -251,10 +240,11 @@ async def stop(self) -> None:
 
 ## 十、测试策略（`tests/test_embedding_service.py`）
 
-假内核白盒注入（构造器不能收 `Encoder`）：
+假内核白盒注入（构造器不能收内核）：
 
 ```python
-service._encoder = cast("Encoder", FakeEncoder(...))  # pyright: ignore[reportPrivateUsage]
+# 两个类型不重叠，先转 object 再转目标类型，否则撞 reportInvalidCast
+service._encoder = cast("RemoteEncoder", cast("object", FakeEncoder(...)))  # pyright: ignore[reportPrivateUsage]
 ```
 
 | 用例 | 断言 |
@@ -283,14 +273,11 @@ service._encoder = cast("Encoder", FakeEncoder(...))  # pyright: ignore[reportPr
   写进 README，免得日后被当成 bug 修掉。
 - **串行切分在大批量下偏慢**：100 条按 10 切 = 10 次请求串行。当前场景（批量巩固、离线）
   可接受；真要吞吐时再引入并发，那会带来部分失败语义，不在本次范围。
-- **`dimensions` 与本地内核存在能力差**：协议已规定「做不到必须抛错」，因此本地 bge 接入后
-  调用方传 `dimensions` 会报错而不是拿到错误维度——这是刻意选择。
 - **与 `llm/client.py` 的 5 行重复**：`AsyncOpenAI(api_key, base_url, timeout, max_retries)`
   两处各写一遍。抽公共基类会动已稳定的 llm 层，本次接受重复。
 - **`request_id` 未必存在**：`APIStatusError.request_id` 可能是 None，字段保留但不保证有值。
 - **`EmbeddingResponseError` 的 `index` 归位**：`index` 由端点给出，归位在服务层 `_reorder`，
   越界 / 重复 / 条数不符按异常处理而不是猜测顺序。
-- **`Encoder.aclose()` 让本地实现多写一个空方法**：比在 `stop()` 里 `isinstance` 判断实现类型更干净。
 - **新层不在 coverage omit 里**：只 omit `core/main.py`，`core/embedding/*` 需要真实测试覆盖。
 
 ## 十二、验收标准
@@ -311,12 +298,16 @@ service._encoder = cast("Encoder", FakeEncoder(...))  # pyright: ignore[reportPr
 
 ## 实施补记（2026-09-26）
 
-1. **协议出口从纯向量改成带结构**（实施中按用户要求回改）。原方案的
+1. **出口从纯向量改成带结构**（实施中按用户要求回改）。原方案的
    `encode() -> list[list[float]]` 有两个表达不出来的事实：`index` 只有内核拿得到
-   （归位被迫下沉进内核，与「内核可替换」的定位冲突），`usage` 也没有出口
-   （`输入token` 永远取不到）。现协议返回 `EncodeResult`，归位（`_reorder`）与
-   `输入token` 日志都回到服务层，内核只上报位置与用量。
+   （归位被迫下沉进内核），`usage` 也没有出口（`输入token` 永远取不到）。现出口返回
+   `EncodeResult`，归位（`_reorder`）与 `输入token` 日志都回到服务层，内核只上报位置与用量。
 2. **`CreateEmbeddingResponse.usage` 必须按可空处理**：SDK 类型里它是必填，但用
    `construct_type` 实测——数据里没有 `usage` 时该字段被填成 `None`，直接取属性会炸。
    basedpyright 会把变量注解收窄回 `Usage`（`usage is None` 报 `reportUnnecessaryComparison`），
    只能写 `cast("Usage | None", cast("object", response.usage))`——双重 cast 与 llm 层同一踩坑。
+3. **内核抽象已移除**（2026-09-26 按用户要求）：删掉 `Encoder` 协议与 `_make_encoder()` 覆盖点，
+   服务 `start()` 直接 `build_encoder(self._config)`、`_encoder` 标注 `RemoteEncoder | None`；
+   设计文档里为本地实现留的措辞（非目标、决策 3、§五 协议、风险两条）同步改掉，
+   README 的「内核可替换」一行删除。测试注入改 `cast("RemoteEncoder", cast("object", fake))`，
+   原来靠子类覆盖计数的那条幂等用例改成「两次 start 后 `_encoder` 是同一对象」。
