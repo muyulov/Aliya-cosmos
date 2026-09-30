@@ -48,7 +48,7 @@ from core.llm.errors import (
     LLMTimeoutError,
 )
 from core.llm.messages import ToolCall
-from core.service.base import HealthStatus, Service, ServiceState
+from core.service.base import HealthStatus, Service, ServiceState, not_running_detail
 
 #: 结构化输出的 schema 类型
 T = TypeVar("T", bound=BaseModel)
@@ -158,9 +158,14 @@ class LLMService(Service):
 
         两个端点全没配才算不健康：只启用一头也是能用的。
         """
-        healthy = self._chat is not None or self._vision is not None
-        detail = "" if healthy else NO_API_KEY
-        return HealthStatus(name=self.label, healthy=healthy, state=self.state, detail=detail)
+        if self._chat is not None or self._vision is not None:
+            return HealthStatus(name=self.label, healthy=True, state=self.state, detail="")
+        # 没客户端分两种：跑着但没配 api_key（问题在配置），以及还没启动 / 已停止
+        # （问题在状态）。后者套用 NO_API_KEY 会误导——密钥其实是配了的。
+        detail = (
+            NO_API_KEY if self.state is ServiceState.RUNNING else not_running_detail(self.state)
+        )
+        return HealthStatus(name=self.label, healthy=False, state=self.state, detail=detail)
 
     # ---------- 调用能力 ----------
 

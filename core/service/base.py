@@ -74,6 +74,15 @@ class HealthStatus:
         return payload
 
 
+def not_running_detail(state: ServiceState) -> str:
+    """服务未运行时的健康检查详情。
+
+    措辞收在一处：基类默认实现与 llm / embedding 这类自建连接的服务都复用它，
+    免得同一句话在三处各写一遍、改一处漏一处。
+    """
+    return f"服务未运行，当前状态 {state.value}"
+
+
 class Service:
     """服务基类。
 
@@ -150,7 +159,7 @@ class Service:
     async def health(self) -> HealthStatus:
         """健康检查，默认按状态判断。"""
         healthy = self.state is ServiceState.RUNNING
-        detail = "" if healthy else f"服务未运行，当前状态 {self.state.value}"
+        detail = "" if healthy else not_running_detail(self.state)
         return HealthStatus(name=self.label, healthy=healthy, state=self.state, detail=detail)
 
     @override

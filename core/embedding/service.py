@@ -28,7 +28,7 @@ from core.embedding.errors import (
     EmbeddingResponseError,
     EmbeddingTimeoutError,
 )
-from core.service.base import HealthStatus, Service
+from core.service.base import HealthStatus, Service, ServiceState, not_running_detail
 
 #: 没配密钥时的统一措辞：start 的警告、health 的详情、调用时的报错共用
 NO_API_KEY = "未配置 api_key，向量功能不可用"
@@ -107,10 +107,17 @@ class EmbeddingService(Service):
 
     @override
     async def health(self) -> HealthStatus:
-        """只看有没有内核：健康检查不该发请求（有副作用、花钱、受网络抖动影响）。"""
-        healthy = self._encoder is not None
-        detail = "" if healthy else NO_API_KEY
-        return HealthStatus(name=self.label, healthy=healthy, state=self.state, detail=detail)
+        """只看有没有内核：健康检查不该发请求（有副作用、花钱、受网络抖动影响）。
+
+        没内核分两种：跑着但没配 api_key（问题在配置），以及还没启动 / 已停止
+        （问题在状态）。后者套用 NO_API_KEY 会误导——密钥其实是配了的。
+        """
+        if self._encoder is not None:
+            return HealthStatus(name=self.label, healthy=True, state=self.state, detail="")
+        detail = (
+            NO_API_KEY if self.state is ServiceState.RUNNING else not_running_detail(self.state)
+        )
+        return HealthStatus(name=self.label, healthy=False, state=self.state, detail=detail)
 
     # ---------- 调用能力 ----------
 
@@ -135,6 +142,10 @@ class EmbeddingService(Service):
         空序列直接返回 []，不发请求、不查密钥（空输入不需要服务）。
         先全量校验再发第一批：否则传到第 5 条才发现空串，前几批白花钱。
         """
+        if isinstance(texts, str):
+            # str 本身就是 Sequence[str]，类型检查器拦不住；不拦就会把一段文本按
+            # 字符拆成 N 条向量（条数还自洽），静默给出错结果而不是报错。
+            raise EmbeddingInputError("请传文本序列；单个字符串请用 embed()")
         if not texts:
             return []
         self._check_texts(texts)

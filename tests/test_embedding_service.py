@@ -15,13 +15,14 @@ from typing import cast
 import httpx2
 import pytest
 from loguru import logger
-from openai import APIConnectionError, APIStatusError, APITimeoutError
+from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 from pydantic import ValidationError
 
 from core.config import EmbeddingSettings, LogSettings, Settings
 from core.embedding import (
     EmbeddingConfigError,
     EmbeddingConnectionError,
+    EmbeddingError,
     EmbeddingInputError,
     EmbeddingRequestError,
     EmbeddingResponseError,
@@ -182,6 +183,21 @@ async def test_stop幂等() -> None:
     assert fake.close_count == 1
 
 
+async def test_停止后health报未运行而不是未配密钥() -> None:
+    """stop() 之后内核被清空，但密钥是配了的——不能再说「未配置 api_key」。"""
+    mgr = ServiceManager(Settings(embedding=_settings()))
+    _ = mgr.register(EmbeddingService)
+    await mgr.start_all()
+    await mgr.stop_all()
+
+    status = await mgr.get(EmbeddingService).health()
+
+    assert status.healthy is False
+    assert status.state is ServiceState.STOPPED
+    assert "未配置" not in status.detail
+    assert "未运行" in status.detail
+
+
 def test_非法配置被拒() -> None:
     with pytest.raises(ValidationError):
         _ = EmbeddingSettings(timeout=0)
@@ -189,6 +205,12 @@ def test_非法配置被拒() -> None:
         _ = EmbeddingSettings(retries=-1)
     with pytest.raises(ValidationError):
         _ = EmbeddingSettings(batch_size=0)
+    # dimensions 是唯一的可空数值项：None 合法，0 / 负数不是
+    assert EmbeddingSettings(dimensions=None).dimensions is None
+    with pytest.raises(ValidationError):
+        _ = EmbeddingSettings(dimensions=0)
+    with pytest.raises(ValidationError):
+        _ = EmbeddingSettings(dimensions=-1)
 
 
 # ---- 单条 ----
@@ -295,6 +317,22 @@ async def test_空序列未配key也返回空() -> None:
     assert await service.embed_many([]) == []
 
 
+async def test_传字符串而不是序列时抛错() -> None:
+    """str 本身就是 Sequence[str]：不拦就会按字符拆成 N 条向量（条数还自洽），静默出错。
+
+    空串也要报错而不是走「空序列早退」——所以这道判断在早退之前。
+    """
+    service = EmbeddingService(_settings())
+    fake = _FakeEncoder()
+    _attach(service, fake)
+
+    for text in ("你好", ""):
+        with pytest.raises(EmbeddingInputError, match="embed"):
+            _ = await service.embed_many(text)
+
+    assert fake.calls == []
+
+
 async def test_空串与全空白串抛EmbeddingInputError() -> None:
     service = EmbeddingService(_settings())
     fake = _FakeEncoder()
@@ -375,6 +413,21 @@ async def test_连接错误映射成EmbeddingConnectionError() -> None:
 
     with pytest.raises(EmbeddingConnectionError):
         _ = await service.embed("你好")
+
+
+async def test_未知API错误映射成基类EmbeddingError() -> None:
+    """不落在超时 / 状态码 / 连接三支里的 APIError，兜底映射到基类（不是某个子类）。"""
+    service = EmbeddingService(_settings())
+    _attach(
+        service,
+        _FakeEncoder(error=APIError("未知错误", httpx2.Request("POST", _URL), body=None)),
+    )
+
+    with pytest.raises(EmbeddingError) as info:
+        _ = await service.embed("你好")
+
+    assert type(info.value) is EmbeddingError
+    assert "未知错误" in str(info.value)
 
 
 # ---- 日志 ----

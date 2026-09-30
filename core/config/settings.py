@@ -86,7 +86,7 @@ class EmbeddingSettings(BaseModel):
     timeout: float = Field(default=60.0, gt=0)  # 单次请求超时（秒）
     retries: int = Field(default=2, ge=0)  # SDK 重试次数，0 关闭
     batch_size: int = Field(default=10, gt=0)  # 单次请求最多几条文本
-    dimensions: int | None = None  # None = 用模型原始维度；设值则请求截断
+    dimensions: int | None = Field(default=None, gt=0)  # None = 用模型原始维度；设值则请求截断
 
 
 class LLMEndpointSettings(BaseModel):

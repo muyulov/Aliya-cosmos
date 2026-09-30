@@ -223,6 +223,21 @@ async def test_只启用一个端点也算健康() -> None:
     assert status.detail == ""
 
 
+async def test_停止后health报未运行而不是未配密钥() -> None:
+    """stop() 之后客户端被清空，但密钥是配了的——不能再说「未配置 api_key」。"""
+    mgr = ServiceManager(Settings(llm=LLMSettings(chat=_endpoint(), vision=_endpoint())))
+    _ = mgr.register(LLMService)
+    await mgr.start_all()
+    await mgr.stop_all()
+
+    status = await mgr.get(LLMService).health()
+
+    assert status.healthy is False
+    assert status.state is ServiceState.STOPPED
+    assert "未配置" not in status.detail
+    assert "未运行" in status.detail
+
+
 async def test_start重复调用不重建客户端() -> None:
     """重复 start 不该建出第二个客户端（前一个会被覆盖、没人 close）。"""
     service = _service()
