@@ -6,7 +6,14 @@ app:
 log:
   level: INFO
   json: false
+  layout: tree # tree（字段缩进成树）/ line（字段内联成一行，便于 grep 与按行采集）
+  color: auto # 控制台着色：auto（仅终端）/ always / never；日志文件永远不带颜色
   dir: logs
+  # 文件名支持 loguru 时间模板，装配时求值 → 每次启动写一组独立文件。
+  # 保留 {…} 占位符不只是命名方便：loguru 的 retention 靠它识别同族文件，
+  # 写成固定名（app.log）时旧文件永远清不掉。
+  file_name: "app-{time:%Y%m%d-%H%M%S}.log"
+  error_file_name: "error-{time:%Y%m%d-%H%M%S}.log"
   rotation: "00:00"
   retention: 7 days
   compression: zip
