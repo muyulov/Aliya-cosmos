@@ -129,20 +129,25 @@ class InterceptHandler(logging.Handler):
     @override
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            level_name = logger.level(record.levelname).name
+            level: str | int = logger.level(record.levelname).name
         except ValueError:
-            level_name = str(record.levelno)
+            # 未注册的级别名（某个库自定义的级别，如 NOTICE）：loguru 收数字级别，
+            # 却不收未知的级别字符串（`log("25")` 会抛 ValueError），故退回 levelno。
+            level = record.levelno
 
-        frame: FrameType | None = logging.currentframe()
+        # 从 emit 的调用者（logging 内部）起步往上走，跳过 logging 自己的每一帧。
+        # 起点必须落在 logging 里——若从 emit 自己的帧起步，这个循环一次都不会执行，
+        # 记出来的来源就是 logging:handle 而不是真正的调用点。
+        frame: FrameType | None = logging.currentframe().f_back
         depth = 1
         while frame is not None and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
 
         logger.bind(
-            face=faces_module.DEFAULT_BY_LEVEL.get(level_name.upper(), ""),
+            face=faces_module.DEFAULT_BY_LEVEL.get(record.levelname.upper(), ""),
             fields=context_module.current(),
-        ).opt(depth=depth, exception=record.exc_info).log(level_name, record.getMessage())
+        ).opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
 def setup_logging(settings: LogSettings | None = None) -> LogFiles:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Protocol, cast
@@ -11,6 +12,7 @@ from loguru import logger
 
 from core.config import LogSettings
 from core.logger import setup_logging
+from core.logger.setup import InterceptHandler
 
 
 @pytest.fixture(autouse=True)
@@ -353,3 +355,102 @@ def test_color_never_即使终端也不着色(
     logger.remove()
 
     assert "\x1b[" not in capsys.readouterr().err
+
+
+def test_json_模式端到端(tmp_path: Path) -> None:
+    """回归：sink 侧要按配置挑到 JSON 渲染器，此前只有 formatters 层的单测。"""
+    from core.logger import log
+
+    files = setup_logging(_cfg(tmp_path, json_output=True, color="always"))
+    # 必须走本项目的门面：裸 logger.info 的 kwargs 会被 loguru 当成 str.format 参数，
+    # 不会进 extra，也就成不了结构化字段
+    log.info("平铺", 参与人="qq:1")
+    logger.remove()
+
+    raw = files.app.read_text(encoding="utf-8").strip().splitlines()[-1]
+    payload = cast("dict[str, object]", json.loads(raw))
+
+    assert payload["message"] == "平铺"
+    assert payload["level"] == "INFO"
+    assert payload["参与人"] == "qq:1"
+    # JSON 模式忽略颜色：ANSI 会被 json.dumps 转义成字面量，采集端拿到的是垃圾
+    assert "\x1b[" not in raw
+
+
+def test_门面各级别方法都能落盘(tmp_path: Path) -> None:
+    """回归：debug / success / critical 也要能走到 sink（此前只覆盖了 info / error）。"""
+    from core.logger import log
+
+    files = setup_logging(_cfg(tmp_path, level="TRACE"))
+    log.debug("调试")
+    log.success("成功")
+    log.critical("严重")
+    logger.remove()
+
+    text = files.app.read_text(encoding="utf-8")
+    assert "[D] (・_・;) 调试" in text
+    assert "[S] 成功" in text  # SUCCESS 没有默认颜文字，消息直接跟在标记后
+    assert "[C] (╯°□°)╯ 严重" in text
+
+
+def test_session_path_无占位符时按字面拼接(tmp_path: Path) -> None:
+    """回归：固定文件名没有模板要反查，直接拼路径即可。"""
+    import core.logger.sinks as sinks_module
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    resolved = sinks_module._session_path(  # pyright: ignore[reportPrivateUsage]
+        log_dir,
+        "app.log",
+    )
+
+    assert resolved == log_dir / "app.log"
+
+
+def test_session_path_找不到候选时回退字面路径(tmp_path: Path) -> None:
+    """回归：模板还没落盘（目录为空）时也要给出确定路径，而不是在 max() 上抛错。"""
+    import core.logger.sinks as sinks_module
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    resolved = sinks_module._session_path(  # pyright: ignore[reportPrivateUsage]
+        log_dir,
+        "app-{time:%Y%m%d}.log",
+    )
+
+    assert resolved == log_dir / "app-{time:%Y%m%d}.log"
+
+
+def test_桥接未注册的级别名时退回数字级别(tmp_path: Path) -> None:
+    """回归：第三方库自定义的级别名 loguru 不认识，退回 `str(levelno)` 会被二次拒绝。"""
+    files = setup_logging(_cfg(tmp_path))
+
+    record = logging.LogRecord("probe", 25, "/tmp/probe.py", 7, "自定义级别", None, None)
+    record.levelname = "NOTICE"
+
+    InterceptHandler().emit(record)  # 不能抛错：loguru 只认数字级别
+    logger.remove()
+
+    assert "自定义级别" in files.app.read_text(encoding="utf-8")
+
+
+def test_桥接日志的来源指向真正的调用点(tmp_path: Path) -> None:
+    """回归：帧遍历必须从 emit 的调用者起步，否则来源算成 logging:handle。"""
+    _ = setup_logging(_cfg(tmp_path))
+    origins: list[str] = []
+
+    def _capture(message: object) -> None:
+        origins.append(str(message))
+
+    _ = logger.add(_capture, level=0, format="{name}:{function}")
+
+    def _caller() -> None:
+        logging.getLogger("sqlalchemy.engine").info("来源检查")
+
+    _caller()
+    logger.remove()
+
+    # loguru 会在格式化结果后补一个换行，比对前先去掉
+    assert [origin.strip() for origin in origins] == [f"{__name__}:_caller"]
