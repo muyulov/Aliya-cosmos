@@ -382,14 +382,14 @@ async def test_连接错误映射成EmbeddingConnectionError() -> None:
 
 async def test_批数大于1时打汇总行(tmp_path: Path) -> None:
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
     service = EmbeddingService(_settings(batch_size=2))
     _attach(service, _FakeEncoder(prompt_tokens=7))
 
     _ = await service.embed_many(["a", "bb", "ccc"])
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "[embedding] 向量化完成" in text
     assert "[embedding] 批量向量化完成" in text
     assert "批数: 2" in text
@@ -402,14 +402,14 @@ async def test_批数大于1时打汇总行(tmp_path: Path) -> None:
 async def test_单批不打汇总行且无用量时省略字段(tmp_path: Path) -> None:
     """端点没返回 usage 时省略该字段，不因为没得记而报错。"""
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
     service = EmbeddingService(_settings())
     _attach(service, _FakeEncoder(prompt_tokens=None))
 
     _ = await service.embed("你好")
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "[embedding] 向量化完成" in text
     assert "批量向量化完成" not in text
     assert "输入token" not in text

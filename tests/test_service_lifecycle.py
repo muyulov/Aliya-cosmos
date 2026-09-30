@@ -348,7 +348,7 @@ async def test_关闭超时不阻断其他服务() -> None:
 async def test_关闭超时会写进日志字段(tmp_path: Path) -> None:
     """超时日志必须带 超时秒数，否则排查时看不出配的是多少。"""
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager(_settings(stop_timeout=0.05))
     _ = mgr.register(HangingStopService)
@@ -357,7 +357,7 @@ async def test_关闭超时会写进日志字段(tmp_path: Path) -> None:
     await mgr.stop_all()
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "[hanging-stop] 服务关闭超时" in text
     assert "超时秒数: 0.05" in text
 
@@ -480,7 +480,7 @@ async def test_业务_timeout_不被当成启动超时() -> None:
 async def test_业务_timeout_不被当成关闭超时(tmp_path: Path) -> None:
     """回归：关闭路径同理，必须是「关闭异常」而不是「关闭超时」。"""
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager()
     _ = mgr.register(BusinessTimeoutOnStop)
@@ -489,7 +489,7 @@ async def test_业务_timeout_不被当成关闭超时(tmp_path: Path) -> None:
     await mgr.stop_all()
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "[business-timeout-stop] 服务关闭异常" in text
     assert "服务关闭超时" not in text
 
@@ -545,7 +545,7 @@ async def test_启停日志走服务门面带前缀与耗时(tmp_path: Path) -> 
     耗时字段是排查「同层里是谁慢」的唯一依据——整层耗时只能定位到批次。
     """
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager()
     _ = mgr.register(QuickService)
@@ -553,7 +553,7 @@ async def test_启停日志走服务门面带前缀与耗时(tmp_path: Path) -> 
     await mgr.stop_all()
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "[quick] 服务已启动" in text
     assert "[quick] 服务已停止" in text
     assert "耗时毫秒: " in text
@@ -565,7 +565,7 @@ async def test_启停日志走服务门面带前缀与耗时(tmp_path: Path) -> 
 async def test_同层日志列出服务名与一基层号(tmp_path: Path) -> None:
     """回归：只报「服务数」看不出这一层是谁，层号也给成人读的 1-based。"""
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager()
     _ = mgr.register(GateA)
@@ -573,7 +573,7 @@ async def test_同层日志列出服务名与一基层号(tmp_path: Path) -> Non
     await mgr.start_all()
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "同层服务启动完成" in text
     assert "层: 1" in text
     assert "服务: gate-a、gate-b" in text
@@ -583,14 +583,14 @@ async def test_同层日志列出服务名与一基层号(tmp_path: Path) -> Non
 async def test_单服务层不重复打层摘要(tmp_path: Path) -> None:
     """单服务层没有并发：层摘要与它的「服务已启动」是同一条信息，不再重复打印。"""
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager()
     _ = mgr.register(QuickService)
     await mgr.start_all()
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "[quick] 服务已启动" in text
     assert "同层服务启动完成" not in text
 
@@ -598,7 +598,7 @@ async def test_单服务层不重复打层摘要(tmp_path: Path) -> None:
 async def test_启动汇总带总耗时(tmp_path: Path) -> None:
     """逐服务耗时只在层内可比；跨层的等待只有汇总行的墙钟时间能反映。"""
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager()
     _ = mgr.register(InnerService)
@@ -606,7 +606,7 @@ async def test_启动汇总带总耗时(tmp_path: Path) -> None:
     await mgr.start_all()
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "全部服务启动完成" in text
     assert "服务数: 2" in text
     assert "耗时毫秒: " in text.split("全部服务启动完成", 1)[1]
@@ -615,7 +615,7 @@ async def test_启动汇总带总耗时(tmp_path: Path) -> None:
 async def test_启动失败日志也带耗时(tmp_path: Path) -> None:
     """失败与成功同形：既有 `错误=` 也有数值耗时，能看出是立刻失败还是卡了很久。"""
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager()
     _ = mgr.register(BusinessTimeoutOnStart)
@@ -624,7 +624,7 @@ async def test_启动失败日志也带耗时(tmp_path: Path) -> None:
         await mgr.start_all()
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "[business-timeout] 服务启动失败" in text
     assert "错误: TimeoutError: 业务侧 socket 超时" in text
     # 该场景没有成功日志、也没有层摘要，带 耗时毫秒 的只有这条失败日志
@@ -634,7 +634,7 @@ async def test_启动失败日志也带耗时(tmp_path: Path) -> None:
 async def test_回滚会留痕(tmp_path: Path) -> None:
     """回归：回滚原先完全不留痕，日志里几条「已启动」后凭空冒失败，看不出谁清理的。"""
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager()
     _ = mgr.register(HalfStartedInner)
@@ -644,7 +644,7 @@ async def test_回滚会留痕(tmp_path: Path) -> None:
         await mgr.start_all()
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "启动未完成，回滚本次动过的服务" in text
     assert "回滚时服务已关闭" in text
     assert "[half-inner] 回滚时服务已关闭" in text
@@ -656,7 +656,7 @@ async def test_回滚会留痕(tmp_path: Path) -> None:
 async def test_超时日志不重复打错误类型(tmp_path: Path) -> None:
     """超时的「错误」就是超时本身：消息 + 超时秒数 已经说清，不再拼异常类型。"""
     cfg = _log_cfg(tmp_path)
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager(_settings(start_timeout=0.05))
     _ = mgr.register(SlowStartService)
@@ -665,7 +665,7 @@ async def test_超时日志不重复打错误类型(tmp_path: Path) -> None:
         await mgr.start_all()
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     assert "[slow-start] 服务启动超时" in text
     assert "超时秒数: 0.05" in text
     assert "HookTimeoutError" not in text

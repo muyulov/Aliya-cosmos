@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from types import TracebackType
@@ -10,13 +11,20 @@ from typing import cast
 
 from core.logger import faces
 from core.logger.formatters import (
-    colorize,
     format_exception,
     format_json,
+    format_line,
     format_tree,
     render_value,
 )
 from core.logger.types import Record
+
+#: 匹配 ANSI 转义序列，用于验证「着色只是包一层、不改内容」
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI.sub("", text)
 
 
 @dataclass
@@ -153,12 +161,61 @@ def test_json_模式下堆栈不被业务字段覆盖() -> None:
     assert "KeyError" in payload["exception"]
 
 
-def test_着色只包裹第一行() -> None:
-    text = "第一行\n    └─ 键: 值"
-    colored = colorize(text, "ERROR")
-    first, _, rest = colored.partition("\n")
-    assert first.startswith("\x1b[31m") and first.endswith("\x1b[0m")
-    assert "\x1b[" not in rest
+def test_单行布局内联字段() -> None:
+    line = format_line(make_record("用户消息", face=faces.LOVE, 参与者="Alice"))
+    assert line == "2026-08-27 23:09:52 [I] (*^▽^*) 用户消息 | 参与者=Alice"
+
+
+def test_单行布局无字段时仍是单行() -> None:
+    line = format_line(make_record("无字段"))
+    assert "\n" not in line
+    assert line == "2026-08-27 23:09:52 [I] (^_^)/ 无字段"
+
+
+def test_单行布局保持字段声明顺序() -> None:
+    line = format_line(make_record("顺序", 甲=1, 乙=2, 丙=3))
+    assert line.endswith("甲=1 | 乙=2 | 丙=3")
+
+
+def test_单行布局下堆栈独立成块() -> None:
+    """堆栈压成一行会失去可读性，它单独成块；字段部分仍在一行里。"""
+    stack = format_exception(make_record(exception=_make_exception()))
+    lines = format_line(make_record("未捕获异常", 路径="/x"), stack=stack).split("\n")
+
+    assert lines[0].endswith("未捕获异常 | 路径=/x")
+    assert lines[1] == "    └─ 堆栈"
+    assert "KeyError" in "\n".join(lines[2:])
+
+
+def test_单行布局转义内嵌换行() -> None:
+    """消息与字段值里的换行必须转义，否则「一条记录一行」不成立。"""
+    line = format_line(make_record("第一行\n第二行", 正文="甲\n乙"))
+
+    assert "\n" not in line
+    assert "第一行\\n第二行" in line
+    assert "正文=甲\\n乙" in line
+
+
+def test_默认不着色() -> None:
+    record = make_record("消息", 键="值")
+    assert "\x1b[" not in format_tree(record)
+    assert "\x1b[" not in format_line(record)
+
+
+def test_着色给元数据与字段名分别上色() -> None:
+    """时间戳走暗灰、级别与消息走级别色，字段名走暗灰——整行同一个颜色看不出重点。"""
+    line = format_tree(make_record("消息", 键="值"), color=True)
+
+    assert line.startswith("\x1b[90m2026-08-27 23:09:52\x1b[0m \x1b[32m[I]\x1b[0m")
+    assert "\x1b[90m    └─ 键:\x1b[0m 值" in line
+
+
+def test_着色只包一层转义序列不改文本() -> None:
+    """同一 record 的着色版与无色版，剥掉转义序列后必须逐字节相同。"""
+    record = make_record("用户回合已入队", 参与者="qq:1", 已取消旧计划=0)
+
+    assert _strip_ansi(format_tree(record, color=True)) == format_tree(record)
+    assert _strip_ansi(format_line(record, color=True)) == format_line(record)
 
 
 def test_渲染各类值() -> None:

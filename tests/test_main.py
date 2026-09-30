@@ -112,7 +112,7 @@ class UnhealthyProbe(Service):
 async def test_健康检查日志只在异常时带状态与详情(tmp_path: Path) -> None:
     """回归：健康时 `状态` 恒为 running、`详情` 恒为空，无条件带上只有冗余。"""
     cfg = LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day")
-    setup_logging(cfg)
+    files = setup_logging(cfg)
 
     mgr = ServiceManager()
     _ = mgr.register(HealthyProbe)
@@ -121,7 +121,7 @@ async def test_健康检查日志只在异常时带状态与详情(tmp_path: Pat
     await main_module._report_health(mgr)  # pyright: ignore[reportPrivateUsage]
     logger.remove()
 
-    text = (Path(cfg.dir) / cfg.file_name).read_text(encoding="utf-8")
+    text = files.app.read_text(encoding="utf-8")
     _, rest = text.split("服务: healthy-probe", 1)
     healthy_block, unhealthy_block = rest.split("服务: unhealthy-probe", 1)
 
