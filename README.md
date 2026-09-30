@@ -152,7 +152,7 @@ log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消�
     └─ 已取消旧计划: 0
 ```
 
-颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集；`time` / `level` / `message` / `face` / `exception` 是保留键，业务字段与它们同名时以保留键为准（树形格式没有这个限制——业务字段独立成行，不与元数据混排）。
+颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集；`time` / `level` / `message` / `face` / `exception` 是保留键，业务字段与它们同名时以保留键为准（单行与树形格式没有这个限制——业务字段独立于元数据，不与之混排）。
 
 `log.layout: line` 换成单行布局，字段内联成 `键=值`，一条记录（除堆栈外）只占一行：
 

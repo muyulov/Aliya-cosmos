@@ -39,7 +39,8 @@ class LogSettings(BaseModel):
     注意 json 字段用别名 json_output：json 与 pydantic 自带的序列化方法撞名，
     直接命名 json 会冲突。YAML 里写 json，代码里读 json_output。
 
-    - `layout`：树形（多行、字段缩进成树）或单行（字段内联，一条日志一行）。
+    - `layout`：单行（默认，字段内联成 `键=值`，便于 grep 与按行采集）或树形
+      （字段缩进成树，人读更清楚）。
     - `color`：仅控制台生效，文件永远不带 ANSI 转义；`auto` 仅在终端下着色。
     - `file_name` / `error_file_name`：支持 loguru 的时间模板，启动时间戳在装配时
       求值，因此每次启动都写到独立文件；模板里的 `{}` 同时让 loguru 的 retention
@@ -50,7 +51,7 @@ class LogSettings(BaseModel):
 
     level: str = "INFO"
     json_output: bool = Field(default=False, alias="json")
-    layout: Literal["tree", "line"] = "tree"
+    layout: Literal["tree", "line"] = "line"
     color: Literal["auto", "always", "never"] = "auto"
     dir: str = "logs"
     file_name: str = "app-{time:%Y%m%d-%H%M%S}.log"

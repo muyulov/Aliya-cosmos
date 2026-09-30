@@ -111,7 +111,8 @@ class UnhealthyProbe(Service):
 
 async def test_健康检查日志只在异常时带状态与详情(tmp_path: Path) -> None:
     """回归：健康时 `状态` 恒为 running、`详情` 恒为空，无条件带上只有冗余。"""
-    cfg = LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day")
+    # 布局钉成 tree：下面的断言写的是树形字段格式（`键: 值`），与默认布局解耦
+    cfg = LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day", layout="tree")
     files = setup_logging(cfg)
 
     mgr = ServiceManager()

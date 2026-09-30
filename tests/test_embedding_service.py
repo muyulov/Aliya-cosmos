@@ -121,8 +121,11 @@ def _status_error(status: int = 500, request_id: str = "req-1") -> APIStatusErro
 
 
 def _log_cfg(tmp_path: Path) -> LogSettings:
-    """构造只关心落盘位置的日志配置。"""
-    return LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day")
+    """构造只关心落盘位置的日志配置。
+
+    布局显式钉成 tree：下面的断言写的是树形字段格式（`键: 值`），与默认布局解耦。
+    """
+    return LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day", layout="tree")
 
 
 # ---- 生命周期与配置 ----

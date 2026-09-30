@@ -6,7 +6,7 @@ app:
 log:
   level: INFO
   json: false
-  layout: tree # tree（字段缩进成树）/ line（字段内联成一行，便于 grep 与按行采集）
+  layout: line # line（默认，字段内联成一行，便于 grep 与按行采集）/ tree（字段缩进成树）
   color: auto # 控制台着色：auto（仅终端）/ always / never；日志文件永远不带颜色
   dir: logs
   # 文件名支持 loguru 时间模板，装配时求值 → 每次启动写一组独立文件。

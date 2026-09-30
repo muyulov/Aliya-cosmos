@@ -26,6 +26,9 @@ def _cfg(tmp_path: Path, **overrides: object) -> LogSettings:
         "level": "INFO",
         "dir": str(tmp_path / "logs"),
         "retention": "1 day",
+        # 这些用例断言的是「字段有没有被记下来」，钉住树形格式以免与默认布局耦合；
+        # 默认布局与单行渲染各有专门用例覆盖。
+        "layout": "tree",
     }
     base.update(overrides)
     # 覆盖项是动态拼进来的，**base 无法静态校验，这里显式抑制
@@ -79,6 +82,24 @@ def test_默认文件名带启动时间模板() -> None:
     """文件名带 {time} 模板：每次启动一组新文件，且 retention 能跨启动识别同族文件。"""
     assert LogSettings().file_name == "app-{time:%Y%m%d-%H%M%S}.log"
     assert LogSettings().error_file_name == "error-{time:%Y%m%d-%H%M%S}.log"
+
+
+def test_默认布局是单行() -> None:
+    assert LogSettings().layout == "line"
+
+
+def test_默认输出单行内联字段(tmp_path: Path) -> None:
+    """默认布局即单行：不做任何配置时，字段就内联在同一条记录里。"""
+    from core.logger import log
+
+    cfg = LogSettings(level="INFO", dir=str(tmp_path / "logs"), retention="1 day")
+    files = setup_logging(cfg)
+    log.info("用户回合已入队", 参与者="qq:1")
+    logger.remove()
+
+    text = files.app.read_text(encoding="utf-8")
+    assert "用户回合已入队 | 参与者=qq:1" in text
+    assert "├─" not in text
 
 
 def test_门面自动携带上下文字段(tmp_path: Path) -> None:

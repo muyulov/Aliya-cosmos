@@ -21,7 +21,11 @@ def _restore_logger():
 
 
 def _cfg(tmp_path: Path) -> LogSettings:
-    return LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day")
+    """构造只关心落盘位置的日志配置。
+
+    布局显式钉成 tree：下面的断言写的是树形字段格式（`键: 值`），与默认布局解耦。
+    """
+    return LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day", layout="tree")
 
 
 class DemoService(Service):
