@@ -22,7 +22,7 @@ from loguru import logger
 import core.logger.context as context_module
 import core.logger.faces as faces_module
 from core.config import LogSettings, get_settings
-from core.logger.sinks import add_console_sink, add_file_sinks
+from core.logger.sinks import LogFiles, add_console_sink, add_file_sinks
 
 _INTERCEPTED_LOGGERS = (
     "sqlalchemy",
@@ -145,8 +145,8 @@ class InterceptHandler(logging.Handler):
         ).opt(depth=depth, exception=record.exc_info).log(level_name, record.getMessage())
 
 
-def setup_logging(settings: LogSettings | None = None) -> None:
-    """装配日志。可重复调用，会先移除已有 sink。"""
+def setup_logging(settings: LogSettings | None = None) -> LogFiles:
+    """装配日志，返回本次启动实际写入的文件。可重复调用，会先移除已有 sink。"""
     # 同上：显式判 None，避免配置模型定义 __bool__ / __len__ 后静默回退
     cfg = settings if settings is not None else get_settings().log
 
@@ -154,7 +154,7 @@ def setup_logging(settings: LogSettings | None = None) -> None:
     _ = logger.remove()
 
     add_console_sink(cfg)
-    app_log, error_log = add_file_sinks(cfg)
+    files = add_file_sinks(cfg)
 
     _intercept_stdlib()
 
@@ -162,9 +162,10 @@ def setup_logging(settings: LogSettings | None = None) -> None:
         "日志已就绪",
         face=faces_module.START,
         级别=cfg.level.upper(),
-        主日志=str(app_log),
-        错误日志=str(error_log),
+        主日志=str(files.app),
+        错误日志=str(files.error),
     )
+    return files
 
 
 def _intercept_stdlib() -> None:

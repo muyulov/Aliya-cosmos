@@ -19,16 +19,18 @@ context / faces 先行，formatters 次之，setup 最后。
 from __future__ import annotations
 
 from core.logger import context, faces
-from core.logger.formatters import colorize, format_exception, format_json, format_tree
+from core.logger.formatters import format_exception, format_json, format_line, format_tree
 from core.logger.setup import Log, log, setup_logging
+from core.logger.sinks import LogFiles
 
 __all__ = [
     "Log",
-    "colorize",
+    "LogFiles",
     "context",
     "faces",
     "format_exception",
     "format_json",
+    "format_line",
     "format_tree",
     "log",
     "setup_logging",

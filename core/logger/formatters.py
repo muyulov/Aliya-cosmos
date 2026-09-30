@@ -1,13 +1,20 @@
 """日志格式化（纯函数，无副作用）。
 
-两种输出形态：
+三种输出形态：
 - 树形（默认）：时间 [级别] 颜文字 消息，结构化字段以 ├─ / └─ 缩进成树。
+- 单行：字段以 `键=值` 内联到同一行，便于 grep 与按行采集。
 - JSON：每行一个 JSON 对象，字段平铺，便于日志采集。
 
 参考样式：
     2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队
         ├─ 参与者: qq:6329133635628374381
         └─ 已取消旧计划: 0
+
+单行样式：
+    2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队 | 参与者=qq:6329133635628374381 | 已取消旧计划=0
+
+着色由各 format_* 的 color 参数控制，关掉时输出与不带颜色时逐字节一致，
+因此文件 sink 复用同一套渲染逻辑而不必担心 ANSI 转义写进日志文件。
 
 本模块只依赖 types 与 faces，不导入 setup，因此不构成导入环。
 """
@@ -44,8 +51,13 @@ LEVEL_COLORS: dict[str, str] = {
     "CRITICAL": "\x1b[1;31m",
 }
 
-RESET = "\x1b[0m"
+#: 时间戳与字段名用暗灰：彩色只为突出级别，不喧宾夺主
+ANSI_GRAY = "\x1b[90m"
+ANSI_RESET = "\x1b[0m"
 FIELD_INDENT = "    "
+
+#: 单行布局里字段之间的分隔符
+LINE_SEPARATOR = " | "
 
 #: JSON 输出的保留键：由日志框架写入，业务字段同名时一律让位
 RESERVED_KEYS: frozenset[str] = frozenset({"time", "level", "message", "face", "exception"})
@@ -58,7 +70,7 @@ def _pick_face(face: object, level_name: str) -> str:
     return faces_module.DEFAULT_BY_LEVEL.get(level_name, "")
 
 
-def format_tree(record: Record, *, stack: str | None = None) -> str:
+def format_tree(record: Record, *, stack: str | None = None, color: bool = False) -> str:
     """树形格式化，供控制台与文件 sink 使用。
 
     返回不带结尾换行的字符串，换行由 loguru 负责，避免多行内容被拼接。
@@ -70,22 +82,75 @@ def format_tree(record: Record, *, stack: str | None = None) -> str:
     level_name = _level_name_of(record)
     face = _pick_face(extra.get("face"), level_name)
     fields = _fields_of(extra)
-    timestamp = _time_of(record).strftime("%Y-%m-%d %H:%M:%S")
 
-    head = f"{timestamp} [{LEVEL_TAGS.get(level_name, 'I')}]"
-    if face:
-        head = f"{head} {face}"
-    lines = [f"{head} {_message_of(record)}"]
+    lines = [_head(record, level_name, face, color=color)]
 
     items = list(fields.items())
     for index, (key, value) in enumerate(items):
         # 有堆栈时末项也用 ├─：把 └─ 留给堆栈块，否则同一层会出现两个末项符号
         last = index == len(items) - 1 and not stack
         branch = "└─" if last else "├─"
-        lines.append(f"{FIELD_INDENT}{branch} {key}: {render_value(value)}")
+        label = _paint(f"{FIELD_INDENT}{branch} {key}:", ANSI_GRAY, color=color)
+        lines.append(f"{label} {render_value(value)}")
 
     lines.extend(_stack_lines(stack))
     return "\n".join(lines)
+
+
+def format_line(record: Record, *, stack: str | None = None, color: bool = False) -> str:
+    """单行格式化：结构化字段以 `键=值` 内联，一条记录占一行。
+
+    消息与字段值里内嵌的换行会转义成字面 `\\n`，兑现「一条记录一行」；堆栈例外——
+    它单独缩进成块，把 traceback 压成一行会彻底失去可读性，而按行采集的读取方
+    本来也只关心消息与字段。
+    """
+    extra = _extra_of(record)
+    level_name = _level_name_of(record)
+    face = _pick_face(extra.get("face"), level_name)
+
+    parts = [_head(record, level_name, face, color=color, one_line=True)]
+    parts.extend(
+        f"{_paint(key, ANSI_GRAY, color=color)}={_escape_newlines(render_value(value))}"
+        for key, value in _fields_of(extra).items()
+    )
+
+    lines = [LINE_SEPARATOR.join(parts)]
+    lines.extend(_stack_lines(stack))
+    return "\n".join(lines)
+
+
+def _head(
+    record: Record, level_name: str, face: str, *, color: bool, one_line: bool = False
+) -> str:
+    """渲染首段：时间 [级别] 颜文字 消息。两种布局共用。
+
+    one_line=True 时把消息里内嵌的换行一并转义，见 format_line 的约定。
+    """
+    timestamp = _time_of(record).strftime("%Y-%m-%d %H:%M:%S")
+    level_color = LEVEL_COLORS.get(level_name, "")
+    message = _message_of(record)
+    parts = [
+        _paint(timestamp, ANSI_GRAY, color=color),
+        _paint(f"[{LEVEL_TAGS.get(level_name, 'I')}]", level_color, color=color),
+    ]
+    if face:
+        parts.append(_paint(face, level_color, color=color))
+    parts.append(
+        _paint(_escape_newlines(message) if one_line else message, level_color, color=color)
+    )
+    return " ".join(parts)
+
+
+def _escape_newlines(text: str) -> str:
+    """把内嵌换行转成字面 `\\n`。"""
+    return text.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n")
+
+
+def _paint(text: str, code: str, *, color: bool) -> str:
+    """按需给片段上色。color=False、无色码或空文本时原样返回。"""
+    if not color or not code or not text:
+        return text
+    return f"{code}{text}{ANSI_RESET}"
 
 
 def format_exception(record: Record) -> str | None:
@@ -150,16 +215,6 @@ def render_value(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
-def colorize(text: str, level_name: str) -> str:
-    """按级别给整行着色，仅控制台使用。只包裹第一行，避免字段块被染色。"""
-    color = LEVEL_COLORS.get(level_name, "")
-    if not color:
-        return text
-    head, separator, tail = text.partition("\n")
-    colored = f"{color}{head}{RESET}"
-    return f"{colored}{separator}{tail}" if separator else colored
-
-
 def _extra_of(record: Record) -> dict[str, object]:
     """取出 record 的 extra。Record 是 TypedDict，extra 始终存在。"""
     extra = record["extra"]
@@ -199,9 +254,9 @@ __all__ = [
     "LEVEL_COLORS",
     "LEVEL_TAGS",
     "RESERVED_KEYS",
-    "colorize",
     "format_exception",
     "format_json",
+    "format_line",
     "format_tree",
     "render_value",
 ]

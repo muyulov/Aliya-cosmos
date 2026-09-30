@@ -1,9 +1,12 @@
 """日志 sink 装配。
 
 三个 sink 共用同一套渲染逻辑，仅在输出目标、级别门槛与着色上有差异：
-- 控制台 stderr：级别跟随配置，仅在 TTY 下着色。
-- 主日志文件：级别跟随配置，按天轮转。
+- 控制台 stderr：级别跟随配置，着色策略见 `LogSettings.color`。
+- 主日志文件：级别跟随配置，按天轮转，文件名带启动时间戳。
 - 错误日志文件：级别固定 ERROR，按天轮转，便于运维只翻错误。
+
+着色的边界：只有控制台可能带 ANSI 转义，文件永远不带（`colorize=False`），
+否则 `cat` / `less` 看到的是满屏乱码。
 
 为什么用 filter 而不是 format 函数：loguru 的 format 传函数时，返回值里的换行
 会被它自己追加的换行逻辑吃掉，多行日志会挤成一行；而 filter 能在输出前改写
@@ -12,23 +15,44 @@ record，配合 format="{message}" 可原样保留换行。
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from loguru import logger
 
 from core.config import LogSettings
-from core.logger.formatters import colorize, format_exception, format_json, format_tree
+from core.logger.formatters import format_exception, format_json, format_line, format_tree
 from core.logger.types import FilterFunction, Record
 
 #: 错误日志文件的级别门槛
 ERROR_LEVEL = "ERROR"
+
+#: 文件名里的 loguru 时间模板占位符，如 app-{time:%Y%m%d}.log
+_TEMPLATE_FIELD = re.compile(r"\{[^{}]*\}")
+
+
+class LogFiles(NamedTuple):
+    """本次启动实际写入的日志文件。"""
+
+    app: Path
+    error: Path
 
 
 def _is_tty() -> bool:
     """当前 stderr 是否连接到终端。"""
     stream = sys.stderr
     return hasattr(stream, "isatty") and bool(stream.isatty())
+
+
+def _use_color(cfg: LogSettings) -> bool:
+    """控制台是否着色。auto 只在终端下开，避免重定向到文件时混入转义序列。"""
+    if cfg.color == "always":
+        return True
+    if cfg.color == "never":
+        return False
+    return _is_tty()
 
 
 def build_filter(cfg: LogSettings, *, color: bool) -> FilterFunction:
@@ -69,18 +93,23 @@ def build_filter(cfg: LogSettings, *, color: bool) -> FilterFunction:
         raw = extra.get(raw_key)
         stack = extra.get(stack_key)
         record["message"] = raw if isinstance(raw, str) else ""
+        record["message"] = _render(cfg, record, stack if isinstance(stack, str) else None, color)
 
-        rendered = (
-            format_json(record, stack=stack if isinstance(stack, str) else None)
-            if cfg.json_output
-            else format_tree(record, stack=stack if isinstance(stack, str) else None)
-        )
-        if color and not cfg.json_output:
-            rendered = colorize(rendered, record["level"].name)
-        record["message"] = rendered
         return True
 
     return _filter
+
+
+def _render(cfg: LogSettings, record: Record, stack: str | None, color: bool) -> str:
+    """按配置挑渲染器。
+
+    JSON 模式忽略颜色：ANSI 码会被 `json.dumps` 转义成字面量，采集端拿到的是垃圾。
+    """
+    if cfg.json_output:
+        return format_json(record, stack=stack)
+    if cfg.layout == "line":
+        return format_line(record, stack=stack, color=color)
+    return format_tree(record, stack=stack, color=color)
 
 
 def add_console_sink(cfg: LogSettings) -> None:
@@ -92,7 +121,7 @@ def add_console_sink(cfg: LogSettings) -> None:
         colorize=False,
         backtrace=False,
         diagnose=False,
-        filter=build_filter(cfg, color=_is_tty()),
+        filter=build_filter(cfg, color=_use_color(cfg)),
     )
 
 
@@ -119,20 +148,42 @@ def _add_file_sink(target: Path, level: str, cfg: LogSettings) -> None:
     )
 
 
-def add_file_sinks(cfg: LogSettings) -> tuple[Path, Path]:
-    """装配主日志与错误日志两个文件 sink，返回两者的路径。"""
+def add_file_sinks(cfg: LogSettings) -> LogFiles:
+    """装配主日志与错误日志两个文件 sink，返回本次启动实际写入的路径。
+
+    文件名支持 loguru 的时间模板（`{time:...}`），装配时才求值，因此每次启动
+    都落到一组新文件上；模板占位符同时让 loguru 的 retention 能跨启动识别同族
+    文件（写死文件名时它只扫得到本进程自己轮转出的小文件）。
+    """
     log_dir = Path(cfg.dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    app_log = log_dir / cfg.file_name
-    error_log = log_dir / cfg.error_file_name
 
-    _add_file_sink(app_log, cfg.level.upper(), cfg)
-    _add_file_sink(error_log, ERROR_LEVEL, cfg)
-    return app_log, error_log
+    _add_file_sink(log_dir / cfg.file_name, cfg.level.upper(), cfg)
+    _add_file_sink(log_dir / cfg.error_file_name, ERROR_LEVEL, cfg)
+    return LogFiles(
+        app=_session_path(log_dir, cfg.file_name),
+        error=_session_path(log_dir, cfg.error_file_name),
+    )
+
+
+def _session_path(log_dir: Path, name: str) -> Path:
+    """解析文件名模板对应的实际文件（装配时 loguru 已把它建出来）。
+
+    带占位符时拼不出文件名，只能按模板反查目录并取最新写入的一个；没有占位符
+    就是字面路径，直接拼。同一秒内多次装配会撞同名文件——它们本来就是同一个。
+    """
+    pattern = _TEMPLATE_FIELD.sub("*", name)
+    if pattern == name:
+        return log_dir / name
+    candidates = [path for path in log_dir.glob(pattern) if path.is_file()]
+    if not candidates:
+        return log_dir / name
+    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 __all__ = [
     "ERROR_LEVEL",
+    "LogFiles",
     "add_console_sink",
     "add_file_sinks",
     "build_filter",

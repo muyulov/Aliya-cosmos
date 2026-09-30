@@ -80,7 +80,8 @@ def _threadsafe_handler(
 
 def main() -> None:
     settings = get_settings()
-    setup_logging(settings.log)
+    # 本次启动的日志文件路径只有排查时才需要，正常流程里不消费
+    _ = setup_logging(settings.log)
 
     log.info(
         "应用启动中",
