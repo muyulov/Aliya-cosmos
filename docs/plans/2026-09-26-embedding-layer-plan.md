@@ -107,7 +107,7 @@ git commit -m "feat(embedding): 新增错误树与向量化内核"
 
 **Step 2: `core/embedding/__init__.py`**
 
-导出 `EmbeddingService`、`Encoder` / `RemoteEncoder` / `build_encoder`、错误树。
+导出 `EmbeddingService`、`RemoteEncoder` / `EncodedVector` / `EncodeResult` / `build_encoder`、错误树。
 
 **Step 3: 验证**
 

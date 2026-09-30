@@ -227,7 +227,7 @@ async def stop(self) -> None:
 | `core/config/settings.py` | 新增 `EmbeddingSettings`，`Settings` 加 `embedding` 字段 |
 | `core/config/__init__.py` | 导出 `EmbeddingSettings` |
 | `core/embedding/__init__.py` | 新增，门面导出 |
-| `core/embedding/encoder.py` | 新增，`Encoder` / `RemoteEncoder` / `build_encoder` |
+| `core/embedding/encoder.py` | 新增，`RemoteEncoder` / `EncodedVector` / `EncodeResult` / `build_encoder` |
 | `core/embedding/errors.py` | 新增，`EmbeddingError` 树 |
 | `core/embedding/service.py` | 新增，`EmbeddingService` |
 | `core/service/registry.py` | `register(EmbeddingService)`，插在 clock 与 llm 之间 |
