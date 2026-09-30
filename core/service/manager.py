@@ -152,17 +152,6 @@ class ServiceManager:
         self._types.append(service_type)
         return service_type
 
-    def register_all(self, service_types: Sequence[type[Service]]) -> None:
-        """批量注册。全部校验通过后才一次性落盘，避免中途失败留下半截注册表。"""
-        self._ensure_not_built()
-        pending: list[type[Service]] = []
-        for service_type in service_types:
-            _ensure_service_subclass(service_type)
-            if service_type in self._types or service_type in pending:
-                raise ServiceContractError(f"服务类型重复注册：{service_type.__name__}")
-            pending.append(service_type)
-        self._types.extend(pending)
-
     # ---------- 查找 ----------
 
     def get(self, service_type: type[S]) -> S:
@@ -211,7 +200,7 @@ class ServiceManager:
                 pending = [
                     self._instances[service_type]
                     for service_type in level
-                    if self._instances[service_type].state is not ServiceState.RUNNING
+                    if not self._instances[service_type].running
                 ]
                 # 已 RUNNING 的也要进回滚名单：整体启动失败意味着进程即将退出，
                 # 而 lifespan.__aenter__ 抛错时 stop_all 不会被调用——只回滚本次
@@ -219,7 +208,7 @@ class ServiceManager:
                 attempted.extend(
                     self._instances[service_type]
                     for service_type in level
-                    if self._instances[service_type].state is ServiceState.RUNNING
+                    if self._instances[service_type].running
                 )
                 if not pending:
                     continue

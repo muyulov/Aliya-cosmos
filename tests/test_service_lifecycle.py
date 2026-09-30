@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from core.config import LogSettings, ServiceSettings, Settings
 from core.logger import setup_logging
-from core.service.base import UNSET, Service, ServiceState, Unset
+from core.service.base import UNSET, HealthStatus, Service, ServiceState, Unset
 from core.service.manager import HookTimeoutError, ServiceManager, ServiceStartError
 
 #: 同层并发用的事件表：键是服务 label
@@ -672,3 +672,133 @@ async def test_超时日志不重复打错误类型(tmp_path: Path) -> None:
     assert "[slow-start] 服务启动超时" in text
     assert "超时秒数: 0.05" in text
     assert "HookTimeoutError" not in text
+
+
+# ---- 回滚的失败分支、健康兜底与 lifespan ----
+
+
+class RollbackFailStart(Service):
+    """启动即失败：把同层服务一起拉进回滚路径。"""
+
+    name: ClassVar[str] = "rollback-fail"
+
+    @override
+    async def start(self) -> None:
+        msg = "启动就炸"
+        raise RuntimeError(msg)
+
+
+class RollbackHangingStop(Service):
+    """启动成功但 stop 挂住：触发 _rollback 的超时分支。"""
+
+    name: ClassVar[str] = "rollback-hang"
+
+    @override
+    async def stop(self) -> None:
+        await asyncio.sleep(10)
+
+
+class RollbackRaisingStop(Service):
+    """启动成功但 stop 抛错：触发 _rollback 的异常分支。"""
+
+    name: ClassVar[str] = "rollback-raise"
+
+    @override
+    async def stop(self) -> None:
+        msg = "清理失败"
+        raise RuntimeError(msg)
+
+
+class BoomHealthService(Service):
+    """health() 抛错：容器要兜住它，别让一次健康检查整体失败。"""
+
+    name: ClassVar[str] = "boom-health"
+
+    @override
+    async def health(self) -> HealthStatus:
+        msg = "探针坏了"
+        raise RuntimeError(msg)
+
+
+async def test_回滚时关闭超时只记日志不阻断(tmp_path: Path) -> None:
+    """回归：_rollback 的超时分支此前无用例——它必须留痕，且不盖掉启动失败的原因。"""
+    cfg = _log_cfg(tmp_path)
+    files = setup_logging(cfg)
+
+    mgr = ServiceManager(_settings(stop_timeout=0.05))
+    _ = mgr.register(RollbackHangingStop)
+    _ = mgr.register(RollbackFailStart)
+
+    with pytest.raises(ServiceStartError) as excinfo:
+        await mgr.start_all()
+    logger.remove()
+
+    assert excinfo.value.label == "rollback-fail"  # 回滚超时不篡改失败原因
+    text = files.app.read_text(encoding="utf-8")
+    assert "[rollback-hang] 回滚时服务关闭超时" in text
+    assert "超时秒数: 0.05" in text
+    assert mgr.get(RollbackHangingStop).state is ServiceState.FAILED
+
+
+async def test_回滚时关闭异常只记日志不阻断(tmp_path: Path) -> None:
+    """回归：_rollback 的异常分支同样只记日志，回滚要跑完剩下的服务。"""
+    cfg = _log_cfg(tmp_path)
+    files = setup_logging(cfg)
+
+    mgr = ServiceManager()
+    _ = mgr.register(RollbackRaisingStop)
+    _ = mgr.register(RollbackFailStart)
+
+    with pytest.raises(ServiceStartError) as excinfo:
+        await mgr.start_all()
+    logger.remove()
+
+    assert excinfo.value.label == "rollback-fail"
+    text = files.app.read_text(encoding="utf-8")
+    assert "[rollback-raise] 回滚时服务关闭异常" in text
+    assert "错误: RuntimeError: 清理失败" in text
+    assert "回滚完成" in text  # 单个服务清理失败不阻断整轮回滚
+    assert mgr.get(RollbackRaisingStop).state is ServiceState.FAILED
+
+
+async def test_健康检查抛错时兜底成不健康() -> None:
+    """回归：单个服务 health() 抛错只影响它自己，其余服务照常出结果。"""
+    mgr = ServiceManager()
+    _ = mgr.register(BoomHealthService)
+    _ = mgr.register(QuickService)
+
+    await mgr.start_all()
+    statuses = await mgr.health()
+
+    assert [status.name for status in statuses] == ["boom-health", "quick"]
+    boom, quick = statuses
+    assert boom.healthy is False
+    assert boom.state is ServiceState.RUNNING  # 服务本身在跑，坏的是这次探测
+    assert boom.detail == "健康检查抛错：RuntimeError: 探针坏了"
+    assert quick.healthy is True
+
+
+async def test_lifespan_进入启动退出关闭() -> None:
+    """回归：lifespan 是入口唯一的装配面——进则全启，出则全停。"""
+    mgr = ServiceManager()
+    _ = mgr.register(InnerService)
+
+    async with mgr.lifespan() as entered:
+        assert entered is mgr
+        assert mgr.get(InnerService).running is True
+
+    assert mgr.get(InnerService).state is ServiceState.STOPPED
+
+
+async def test_lifespan_体内抛错也会关闭服务() -> None:
+    """回归：体里抛错时 `finally` 仍要停下服务，不能把进程留在 RUNNING。"""
+    mgr = ServiceManager()
+    _ = mgr.register(InnerService)
+
+    with pytest.raises(RuntimeError, match="体内炸了"):
+        async with mgr.lifespan():
+            assert mgr.get(InnerService).running is True
+            msg = "体内炸了"
+            raise RuntimeError(msg)
+
+    assert mgr.get(InnerService).state is ServiceState.STOPPED

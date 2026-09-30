@@ -144,6 +144,11 @@ class Service:
 
     @property
     def running(self) -> bool:
+        """服务是否处于 RUNNING。
+
+        判「服务在不在跑」统一走这里，不要在调用点散写 `state is ServiceState.RUNNING`：
+        状态机的比较语义只留一个出口，改判定规则时不必全仓搜。
+        """
         return self.state is ServiceState.RUNNING
 
     async def start(self) -> None:
@@ -158,7 +163,7 @@ class Service:
 
     async def health(self) -> HealthStatus:
         """健康检查，默认按状态判断。"""
-        healthy = self.state is ServiceState.RUNNING
+        healthy = self.running
         detail = "" if healthy else not_running_detail(self.state)
         return HealthStatus(name=self.label, healthy=healthy, state=self.state, detail=detail)
 

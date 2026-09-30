@@ -12,7 +12,7 @@ from typing import ClassVar, override
 from zoneinfo import ZoneInfo
 
 from core.config import ClockSettings
-from core.service.base import Service, ServiceState
+from core.service.base import HealthStatus, Service
 
 
 class ClockService(Service):
@@ -31,9 +31,16 @@ class ClockService(Service):
         只校验不缓存：zoneinfo 内部有缓存，now() 每次取时区开销可忽略，
         这样 now() 也就不依赖 start() 是否跑过。
         """
-        if self.state is ServiceState.RUNNING:
+        if self.running:
             return
         _ = ZoneInfo(self._config.tz)
+
+    @override
+    async def health(self) -> HealthStatus:
+        """健康检查：额外报出配置的时区，日志上一眼看出这个进程用的是哪个时区。"""
+        status = await super().health()
+        status.extra["时区"] = self._config.tz
+        return status
 
     def now(self) -> datetime:
         """当前时间（配置时区）。"""

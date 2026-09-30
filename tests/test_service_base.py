@@ -164,3 +164,33 @@ def test_to_dict_的保留键不被_extra_覆盖() -> None:
     assert payload["state"] == "running"
     assert payload["detail"] == "正常"
     assert payload["延迟"] == 3
+
+
+def test_running_只在_RUNNING_为真() -> None:
+    """回归：`running` 是判「服务在不在跑」的唯一出口，别再散写状态比较。"""
+    service = DemoService()
+    assert service.running is False
+
+    for state in ServiceState:
+        service.state = state
+        assert service.running is (state is ServiceState.RUNNING)
+
+
+async def test_默认健康检查不塞额外字段() -> None:
+    """extra 是留给服务自报信息的通道，基类不往里塞东西；运行中也不带 detail。"""
+    service = DemoService()
+    service.state = ServiceState.RUNNING
+
+    status = await service.health()
+
+    assert status.healthy is True
+    assert status.detail == ""
+    assert status.extra == {}
+
+
+def test_repr_带展示名与状态() -> None:
+    """排障时 repr 要能直接看出是哪个服务、什么状态。"""
+    service = DemoService()
+    service.state = ServiceState.RUNNING
+
+    assert repr(service) == "<DemoService label='demo' state=running>"

@@ -271,6 +271,11 @@ async def test_默认注册表装配后可启动并健康() -> None:
     assert mgr.get(ClockService).running is True
     statuses = await mgr.health()
     assert [status.name for status in statuses] == ["clock", "embedding", "llm"]
+    # 三个内置服务都自报身份：健康日志里能直接看出接的模型 / 端点 / 时区
+    by_name = {status.name: status for status in statuses}
+    assert "时区" in by_name["clock"].extra
+    assert "模型" in by_name["embedding"].extra
+    assert "对话模型" in by_name["llm"].extra
 
 
 async def test_健康检查用展示名() -> None:
@@ -360,6 +365,41 @@ class DuplicateNodeSettings(Settings):
     extra_clock: ClockSettings = ClockSettings()
 
 
+class PlainFieldSettings(Settings):
+    """顶层混了一个标量字段：索引配置节点时必须跳过它。"""
+
+    version: str = "0.1.0"
+
+
+def test_顶层标量字段不影响配置节点注入() -> None:
+    """回归：`Settings` 顶层可能有非配置节点字段（子类扩展），索引要跳过它们。"""
+    own = PlainFieldSettings(clock=ClockSettings(tz="Asia/Shanghai"))
+    mgr = ServiceManager(own)
+    _ = mgr.register(NodeConsumerService)
+
+    assert mgr.get(NodeConsumerService).config.tz == "Asia/Shanghai"
+
+
+def test_配置节点判定只认单一模型或可选模型() -> None:
+    """契约：`X | Y` 无法确定注入哪个、`list[X]` 不是节点，都判为「不是节点」。"""
+    node_type = manager_module._config_node_type  # pyright: ignore[reportPrivateUsage]
+
+    assert node_type(ClockSettings) is ClockSettings
+    assert node_type(ClockSettings | None) is ClockSettings
+    assert node_type(ClockSettings | AppSettings) is None
+    assert node_type(list[ClockSettings]) is None
+
+
+async def test_未装配的容器停止时不构造服务() -> None:
+    """回归：停止不是装配触发点——没有实例可停时不该为了「停止」去构造服务。"""
+    mgr = ServiceManager()
+    _ = mgr.register(LazyProbeService)
+
+    await mgr.stop_all()
+
+    assert built == []
+
+
 def test_配置节点按类型注入() -> None:
     own = Settings(clock=ClockSettings(tz="Asia/Shanghai"))
     mgr = ServiceManager(own)
@@ -437,6 +477,26 @@ def test_时钟按配置时区取值() -> None:
 
 def test_时钟默认时区为_utc() -> None:
     assert ClockService(ClockSettings()).now().utcoffset() == timedelta(0)
+
+
+async def test_运行中的时钟不再重复校验时区() -> None:
+    """幂等：已是 RUNNING 时 start() 直接返回，早退发生在 ZoneInfo 之前。"""
+    clock = ClockService(ClockSettings(tz="Not/AZone"))
+    clock.state = ServiceState.RUNNING
+
+    await clock.start()  # 非法时区也不该抛
+
+    assert clock.running is True
+
+
+async def test_时钟健康检查报出时区() -> None:
+    """回归：health() 除健康与否外，还报出这个进程实际用的时区。"""
+    clock = ClockService(ClockSettings(tz="Asia/Shanghai"))
+
+    status = await clock.health()
+
+    assert status.healthy is False  # 未启动，但配置身份照样报
+    assert status.extra["时区"] == "Asia/Shanghai"
 
 
 async def test_非法时区在启动期失败() -> None:
