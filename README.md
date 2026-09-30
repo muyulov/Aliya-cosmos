@@ -35,7 +35,7 @@ uv run python -m core.main
 core/
   main.py        入口：装配服务容器并驱动生命周期
   service/       业务层：服务基类、容器、注册表、具体服务实现
-  logger/        日志层：颜文字、结构化上下文、树形/JSON 格式化、sink 装配
+  logger/        日志层：颜文字、结构化上下文、单行/树形/JSON 格式化、sink 装配
   config/        配置层：YAML 骨架加载与占位符插值
   embedding/     向量层：单条 / 批量文本向量化
   llm/           LLM 层：对话 / 流式 / 结构化 / 工具调用 / 多模态
@@ -43,7 +43,7 @@ data/           配置与运行数据：config/app.yaml 为配置骨架，可安
 tests/           测试
 ```
 
-依赖方向单向：`service → (config, logger)`、`embedding → (config, logger, service)`、`llm → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。
+依赖方向单向：`service → (config, logger)`、`embedding → (config, logger, service)`、`llm → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
 
 ## 配置
 
@@ -55,7 +55,7 @@ app:
 log:
   level: INFO
   json: false
-  layout: tree               # tree（字段成树）/ line（字段内联成一行）
+  layout: line               # line（默认，字段内联成一行）/ tree（字段成树）
   color: auto                # auto（仅终端）/ always / never
 ```
 
@@ -83,7 +83,7 @@ log:
 | `app.debug` | `true` | 调试开关 |
 | `log.level` | `INFO` | 日志级别 |
 | `log.json` | `false` | 是否输出 JSON 日志 |
-| `log.layout` | `tree` | 输出布局：`tree`（字段缩进成树）/ `line`（字段内联成一行，便于 grep 与按行采集） |
+| `log.layout` | `line` | 输出布局：`line`（字段内联成一行，便于 grep 与按行采集）/ `tree`（字段缩进成树） |
 | `log.color` | `auto` | 控制台着色：`auto`（仅终端）/ `always` / `never`；日志文件永远不带颜色 |
 | `log.dir` | `logs` | 日志目录 |
 | `log.file_name` | `app-{time:%Y%m%d-%H%M%S}.log` | 主日志文件名，支持 loguru 时间模板（装配时求值，故每次启动一个独立文件） |
@@ -130,13 +130,14 @@ log:
 | 配置文件不是合法 UTF-8，或读不动（权限等） | 报错退出 |
 | YAML 语法错误或顶层不是映射 | 报错退出 |
 | 占位符取不到值且没写默认值 | 报错退出，并指出是哪个变量 |
-| 字段取值非法（如 `env: staging`） | 报错退出 |
+| 字段取值非法（如 `env: staging`、`log.level: BOGUS`） | 报错退出 |
+| 某个服务的 `start()` 抛错或超时 | 回滚本次启动过的服务，记录 `应用启动失败，进程退出`（带堆栈），以非零码退出 |
 
 启动日志里的 `配置源` 字段会写明本次配置来自哪个文件，路径是相对工作目录解析的，从别处启动时请核对这一项。
 
 ## 日志
 
-定位问题最快的方式是看结构化字段，而不是把变量拼进字符串。传进 `log.info` 的额外 kwargs 会自动渲染成树：
+定位问题最快的方式是看结构化字段，而不是把变量拼进字符串。传进 `log.info` 的额外 kwargs 会自动渲染成结构化字段：
 
 ```python
 from core.logger import log
@@ -144,7 +145,13 @@ from core.logger import log
 log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消旧计划=0)
 ```
 
-输出：
+默认布局是单行（`log.layout: line`）：字段内联成 `键=值`，一条记录（除堆栈外）只占一行，便于 grep 与按行采集：
+
+```text
+2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队 | 参与者=qq:6329133635628374381 | 已取消旧计划=0
+```
+
+`log.layout: tree` 换成缩进树，人读更清楚：
 
 ```text
 2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队
@@ -153,12 +160,6 @@ log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消�
 ```
 
 颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集；`time` / `level` / `message` / `face` / `exception` 是保留键，业务字段与它们同名时以保留键为准（单行与树形格式没有这个限制——业务字段独立于元数据，不与之混排）。
-
-`log.layout: line` 换成单行布局，字段内联成 `键=值`，一条记录（除堆栈外）只占一行：
-
-```text
-2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队 | 参与者=qq:6329133635628374381 | 已取消旧计划=0
-```
 
 `log.color` 控制控制台着色（时间戳暗灰、级别与消息按级别上色、字段名暗灰），`always` 可在 IDE 输出窗、CI 面板这类拿不到 `isatty` 的地方强制打开。**颜色只进控制台**：文件 sink 永远不写着 ANSI 转义序列。
 
@@ -356,6 +357,8 @@ _ = manager.register(CacheService)
 | 配置节点注入 | 需要局部配置时，把配置类定义在 `core/config/settings.py` 并挂成 `Settings` 的**顶层字段**，构造器声明该类型即可（如 `config: CacheSettings`），容器按类型注入。字段允许写成 `X \| None`（PEP 604），但只有当前值不是 `None` 时才建索引——可选字段为 `None` 时容器无法注入，装配期报 `ServiceContractError` |
 | 整份配置注入 | 需要全局视野时在构造器声明 `settings: Settings`，容器注入应用持有的那份实例 |
 | 超时覆盖 | 默认走 `service.start_timeout` / `service.stop_timeout`；单独调整时写 `start_timeout: ClassVar[float \| Unset \| None] = 300.0`（需 `from core.service.base import Unset`），`None` 表示该服务不限制，不写即跟随全局 |
+| 判「在跑」用 `running` | `Service.running` 是 `state is ServiceState.RUNNING` 的统一出口，调用点不要再散写状态比较，改判定规则时才不必全仓搜 |
+| 健康检查可附带信息 | `health()` 返回的 `HealthStatus.extra` 会作为字段带进启动时的「服务健康」日志（内置服务用它报身份：clock 报 `时区`，embedding 报 `模型` / `端点`，llm 报 `对话模型` / `对话端点` / `多模态模型` / `多模态端点`）。与保留名同名的一律让位：`name` / `healthy` / `state` / `detail`，以及日志侧的 `服务` / `健康` / `状态` / `详情` |
 
 启停语义：`start` / `stop` 需幂等（重复调用不应报错），并且 **`stop()` 必须能安全作用在「从未成功启动过」的服务上**——启动失败者同样会被回滚调用。启动按依赖**分层**：同层并发、层间串行；单个服务超时或抛错都判该服务失败，并逆序回滚本次动过的服务（**含失败者**：`start()` 可能已经申请了部分资源，`stop()` 是它唯一的回收入口；失败者的状态保持 `FAILED`，清理成功不等于它启动成功过；**已 RUNNING、被本次跳过启动的服务也在回滚名单里**——整体启动失败意味着进程即将退出，而那时 `stop_all` 不会被调用），随后抛出 `ServiceStartError`；**被取消时（外层 `asyncio.timeout`、`task.cancel()`）走同一条回滚路径**——`lifespan()` 的 `__aenter__` 抛错时 `__aexit__` 不会执行、`stop_all` 不会被调用，所以回滚必须在 `start_all` 内部完成，已启动的服务不会留在 `RUNNING`。关闭按启动的逆序**串行**执行，单个服务超时或出错只记日志（状态置 `FAILED`），不影响其余服务停下。
 
