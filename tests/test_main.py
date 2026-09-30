@@ -16,7 +16,7 @@ import pytest
 from loguru import logger
 
 import core.main as main_module
-from core.config import LogSettings
+from core.config import LogSettings, Settings
 from core.logger import setup_logging
 from core.service.base import HealthStatus, Service, ServiceState
 from core.service.manager import ServiceManager
@@ -132,3 +132,75 @@ async def test_健康检查日志只在异常时带状态与详情(tmp_path: Pat
     assert "健康: false" in unhealthy_block
     assert "状态: failed" in unhealthy_block
     assert "详情: 探测失败" in unhealthy_block
+
+
+class ExtraProbe(Service):
+    """自报额外健康字段；并故意用保留名试探，验证它不让位。"""
+
+    name: ClassVar[str] = "extra-probe"
+
+    @override
+    async def health(self) -> HealthStatus:
+        return HealthStatus(
+            name=self.label,
+            healthy=True,
+            state=ServiceState.RUNNING,
+            extra={"模型": "deepseek-flash", "健康": "伪造"},
+        )
+
+
+async def test_健康检查日志带出服务自报的额外字段(tmp_path: Path) -> None:
+    """回归：extra 是服务往外报信息的通道，日志要带出；与保留字段同名的一律让位。"""
+    cfg = LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day", layout="tree")
+    files = setup_logging(cfg)
+
+    mgr = ServiceManager()
+    _ = mgr.register(ExtraProbe)
+    await main_module._report_health(mgr)  # pyright: ignore[reportPrivateUsage]
+    logger.remove()
+
+    _, block = files.app.read_text(encoding="utf-8").split("服务: extra-probe", 1)
+
+    assert "模型: deepseek-flash" in block
+    # 保留字段以日志框架写的为准，服务自报的同名值不生效
+    assert "健康: true" in block
+    assert "健康: 伪造" not in block
+
+
+class BoomProbe(Service):
+    """启动即失败。"""
+
+    name: ClassVar[str] = "boom-probe"
+
+    @override
+    async def start(self) -> None:
+        msg = "启动就炸"
+        raise RuntimeError(msg)
+
+
+def test_启动失败时记录收口日志并以非零码退出(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：装配 / 启动失败要有收口日志，而不是只留一段裸 traceback、不打结论。"""
+    cfg = LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day", layout="tree")
+    monkeypatch.setattr(main_module, "get_settings", lambda: Settings(log=cfg))
+
+    mgr = ServiceManager()
+    _ = mgr.register(BoomProbe)
+
+    def _fake_build(_settings: Settings | None = None) -> ServiceManager:
+        return mgr
+
+    monkeypatch.setattr(main_module, "build_manager", _fake_build)
+
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            main_module.main()
+    finally:
+        logger.remove()
+
+    assert excinfo.value.code == 1
+    text = max((tmp_path / "logs").glob("app-*.log")).read_text(encoding="utf-8")
+    assert "应用启动失败，进程退出" in text
+    assert "RuntimeError: 启动就炸" in text
+    assert "应用已关闭" not in text

@@ -18,6 +18,10 @@ from core.logger import faces, log, setup_logging
 from core.service import ServiceManager
 from core.service.registry import build_manager
 
+#: 健康检查日志的保留字段：服务自报的 extra 与它们同名时一律让位，
+#: 免得服务把 健康=true 这类元数据覆盖掉（与 HealthStatus.to_dict 同一条规则）。
+HEALTH_LOG_RESERVED_KEYS: frozenset[str] = frozenset({"服务", "健康", "状态", "详情"})
+
 
 async def _run(manager: ServiceManager) -> None:
     """启动全部服务并常驻，直到收到退出信号。"""
@@ -32,13 +36,19 @@ async def _report_health(manager: ServiceManager) -> None:
     健康时状态恒为 running、`detail` 恒为空，「服务健康 健康=true」已经说完；
     不健康时这两项才是定位所需，按需附加即可，正常日志不会多出冗余字段
     （`detail` 尤其：健康检查抛错的原因就写在这里，丢了就看不到）。
+
+    服务自报的 `HealthStatus.extra`（模型 / 端点 / 时区…）一并带出：诊断「接的
+    是哪一家」时它就写在同一条日志上，不必再去翻配置或代码。
     """
     for status in await manager.health():
-        # 值声明成 str：`**extra` 会被类型检查器逐个形参对账，object 连 face 都对不上
-        extra: dict[str, str] = {} if status.healthy else {"状态": status.state.value}
+        # 值声明成 str：`**fields` 会被类型检查器逐个形参对账，object 连 face 都对不上
+        fields: dict[str, str] = {} if status.healthy else {"状态": status.state.value}
         if status.detail:
-            extra["详情"] = status.detail
-        log.info("服务健康", 服务=status.name, 健康=status.healthy, **extra)
+            fields["详情"] = status.detail
+        for key, value in status.extra.items():
+            if key not in HEALTH_LOG_RESERVED_KEYS:
+                fields[key] = str(value)
+        log.info("服务健康", 服务=status.name, 健康=status.healthy, **fields)
 
 
 async def _wait_for_shutdown() -> None:
@@ -90,7 +100,13 @@ def main() -> None:
         环境=settings.app.env,
         配置源=settings.config_source,
     )
-    asyncio.run(_run(build_manager(settings)))
+    try:
+        asyncio.run(_run(build_manager(settings)))
+    except Exception as exc:
+        # 装配 / 启动失败是 fail fast：日志要收口（含堆栈）再以非零码退出。
+        # 不捕获的话只剩一段裸 traceback，日志文件里也没有「这次是整体失败」的结论。
+        log.exception("应用启动失败，进程退出", 错误=f"{type(exc).__name__}: {exc}")
+        raise SystemExit(1) from exc
     log.info("应用已关闭", face=faces.BYE, 应用=settings.app.app_name)
 
 
