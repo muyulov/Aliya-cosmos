@@ -22,6 +22,9 @@
    `model=svc.vision_model` 且 vision 已启用时走 vision；vision 未启用时不接管自己的
    模型（两头 model 常常同名，否则 chat 会被 vision 的缺失密钥拖垮）。`embed()`
    与 `embed_model` 一并删除。
+4. **`health()` 的 `detail` 按状态区分**（2026-09-30，与向量层一起改）：没客户端时只有
+   `state is RUNNING` 才说 `NO_API_KEY`，否则复用 `core/service/base.not_running_detail()`——
+   `stop()` 之后客户端被清空、但密钥其实是配了的，一律套用 `NO_API_KEY` 是误导。
 
 ## 一、目标与范围
 

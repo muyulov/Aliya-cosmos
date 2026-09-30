@@ -311,3 +311,13 @@ service._encoder = cast("RemoteEncoder", cast("object", FakeEncoder(...)))  # py
    设计文档里为本地实现留的措辞（非目标、决策 3、§五 协议、风险两条）同步改掉，
    README 的「内核可替换」一行删除。测试注入改 `cast("RemoteEncoder", cast("object", fake))`，
    原来靠子类覆盖计数的那条幂等用例改成「两次 start 后 `_encoder` 是同一对象」。
+4. **代码审查后补的三处**（2026-09-30）：
+   - `embed_many` 拒收裸字符串。`str` 本身就是 `Sequence[str]`，不拦就被按字符拆成 N 条向量，
+     而且条数自洽、`_check_texts` / `_reorder` 全程不报错——**静默给出错结果**（实测
+     `embed_many("你好")` 返回 2 条）。这道判断必须排在「空序列早退」之前，否则
+     `embed_many("")` 会静默返回 `[]`。
+   - `dimensions` 补 `Field(gt=0)`：它是唯一没有取值校验的数值项，`0` / 负数此前会被接受、
+     一路传到端点换一个 400。
+   - `health()` 的 `detail` 按状态区分：没内核时只有 `state is RUNNING` 才说 `NO_API_KEY`，
+     否则说「服务未运行，当前状态 …」。`stop()` 之后内核被清空但密钥是配了的，套用
+     `NO_API_KEY` 属误导。措辞抽成 `core/service/base.not_running_detail()`，llm 层同步改。

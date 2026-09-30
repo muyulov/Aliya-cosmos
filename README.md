@@ -294,6 +294,7 @@ async def main(svc: EmbeddingService, texts: list[str]) -> None:
 | --- | --- |
 | 原样透传、不归一化 | 返回的是模型原始向量，模长信息不丢；要不要 L2 归一化由调用方决定 |
 | 空序列早退 | `embed_many([])` 返回 `[]`，不发请求、不查密钥（空输入不需要服务）；空串与全空白串在本地抛 `EmbeddingInputError` |
+| `embed_many` 只收序列 | 传裸字符串（`str` 本身就是 `Sequence[str]`）会抛 `EmbeddingInputError`，否则会被静默按字符拆成 N 条向量；单个字符串请用 `embed()` |
 | 缺密钥不 fail fast | 没配 `api_key` 时只警告、不建内核，健康检查 unhealthy，调用时才抛 `EmbeddingConfigError` |
 | 重试交给 SDK | 超时与重试由端点的 `timeout` / `retries` 控制 |
 | 不记正文 | 日志只记模型 / 端点 / 文本数 / 维度 / 耗时 / 输入 token |
