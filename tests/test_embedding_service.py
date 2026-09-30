@@ -15,7 +15,9 @@ from typing import cast
 import httpx2
 import pytest
 from loguru import logger
-from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
+from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AsyncOpenAI, omit
+from openai.types.create_embedding_response import CreateEmbeddingResponse, Usage
+from openai.types.embedding import Embedding
 from pydantic import ValidationError
 
 from core.config import EmbeddingSettings, LogSettings, Settings
@@ -31,6 +33,7 @@ from core.embedding import (
     EncodedVector,
     EncodeResult,
     RemoteEncoder,
+    build_encoder,
 )
 from core.logger import setup_logging
 from core.service.base import ServiceState
@@ -142,6 +145,9 @@ async def test_未配key时start不建内核() -> None:
     status = await service.health()
     assert status.healthy is False
     assert "未配置" in status.detail
+    # 缺密钥时也报出配置的身份：日志上才看得出这个服务接的是谁
+    assert status.extra["模型"] == "embed-m"
+    assert status.extra["端点"] == "https://embed.test/v1"
 
 
 async def test_未配key时调用才报错() -> None:
@@ -173,6 +179,7 @@ async def test_有内核时health健康且不发请求() -> None:
 
     assert status.healthy is True
     assert status.detail == ""
+    assert status.extra == {"模型": "embed-m", "端点": "https://embed.test/v1"}
     assert fake.calls == []
 
 
@@ -469,3 +476,112 @@ async def test_单批不打汇总行且无用量时省略字段(tmp_path: Path) 
     assert "[embedding] 向量化完成" in text
     assert "批量向量化完成" not in text
     assert "输入token" not in text
+
+
+# ---- 远程内核（真适配层）----
+
+
+class _FakeEmbeddings:
+    """embeddings 资源替身：记录入参并返回预设响应。"""
+
+    def __init__(self, response: object) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.response: object = response
+
+    async def create(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        return self.response
+
+
+class _FakeSDKClient:
+    """AsyncOpenAI 替身：只实现 RemoteEncoder 用到的那两个入口。"""
+
+    def __init__(self, response: object) -> None:
+        self.embeddings: _FakeEmbeddings = _FakeEmbeddings(response)
+        self.close_count: int = 0
+
+    async def close(self) -> None:
+        self.close_count += 1
+
+
+def _remote(*, usage: bool = True) -> tuple[RemoteEncoder, _FakeSDKClient]:
+    """构造真内核 + SDK 替身。
+
+    返回体故意把 index 倒序，用来验证内核不自行重排；usage=False 时不带用量字段。
+    """
+    data = [
+        Embedding(embedding=[0.3, 0.4], index=1, object="embedding"),
+        Embedding(embedding=[0.1, 0.2], index=0, object="embedding"),
+    ]
+    if usage:
+        response: object = CreateEmbeddingResponse(
+            data=data, model="embed-m", object="list", usage=Usage(prompt_tokens=7, total_tokens=7)
+        )
+    else:
+        # 兼容端点不返回 usage 时该字段会被填成 None，类型上表达不出来，只能绕过校验构造
+        response = CreateEmbeddingResponse.model_construct(
+            data=data, model="embed-m", object="list", usage=None
+        )
+    client = _FakeSDKClient(response)
+    return RemoteEncoder(cast("AsyncOpenAI", cast("object", client)), "embed-m"), client
+
+
+async def test_远程内核把位置与用量原样报出() -> None:
+    """回归：SDK 返回体到 EncodeResult 的映射只有这里验证，真适配层没有别处覆盖。"""
+    encoder, client = _remote()
+
+    result = await encoder.encode(["a", "b"], dimensions=None)
+
+    assert [item.index for item in result.items] == [1, 0]  # 不重排，位置原样上报
+    assert [item.vector for item in result.items] == [[0.3, 0.4], [0.1, 0.2]]
+    assert result.prompt_tokens == 7
+    call = client.embeddings.calls[0]
+    assert call["model"] == "embed-m"
+    assert call["input"] == ["a", "b"]
+
+
+async def test_未声明维度时传_omit_而不是_none() -> None:
+    """回归：显式 None 会被序列化成 JSON null（端点多半 400），「不传」必须走 omit。"""
+    encoder, client = _remote()
+
+    _ = await encoder.encode(["a"], dimensions=None)
+
+    assert client.embeddings.calls[0]["dimensions"] is omit
+
+
+async def test_声明的维度原样传下去() -> None:
+    encoder, client = _remote()
+
+    _ = await encoder.encode(["a"], dimensions=512)
+
+    assert client.embeddings.calls[0]["dimensions"] == 512
+
+
+async def test_端点不返回用量时用量为空() -> None:
+    """回归：缺 usage 时 construct_type 会把字段填成 None，直接取属性会炸。"""
+    encoder, _ = _remote(usage=False)
+
+    result = await encoder.encode(["a"], dimensions=None)
+
+    assert result.prompt_tokens is None
+
+
+async def test_远程内核关闭时转发给_SDK_客户端() -> None:
+    encoder, client = _remote()
+
+    await encoder.aclose()
+
+    assert client.close_count == 1
+
+
+async def test_工厂显式传入超时与重试() -> None:
+    """SDK 默认 timeout 是 10 分钟、max_retries 是 2：不能让默认值随版本漂移。"""
+    config = EmbeddingSettings(api_key="k", model="embed-m", timeout=12.5, retries=3)
+    encoder = build_encoder(config)
+    client = cast("AsyncOpenAI", cast("object", encoder._client))  # pyright: ignore[reportPrivateUsage]
+
+    try:
+        assert client.max_retries == 3
+        assert client.timeout == 12.5
+    finally:
+        await encoder.aclose()

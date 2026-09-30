@@ -28,7 +28,7 @@ from core.embedding.errors import (
     EmbeddingResponseError,
     EmbeddingTimeoutError,
 )
-from core.service.base import HealthStatus, Service, ServiceState, not_running_detail
+from core.service.base import HealthStatus, Service, not_running_detail
 
 #: 没配密钥时的统一措辞：start 的警告、health 的详情、调用时的报错共用
 NO_API_KEY = "未配置 api_key，向量功能不可用"
@@ -111,13 +111,17 @@ class EmbeddingService(Service):
 
         没内核分两种：跑着但没配 api_key（问题在配置），以及还没启动 / 已停止
         （问题在状态）。后者套用 NO_API_KEY 会误导——密钥其实是配了的。
+        extra 里带上配置的模型与端点，健康与否都能看出这次接的是哪一家。
         """
+        extra: dict[str, object] = {"模型": self.model, "端点": self._config.base_url}
         if self._encoder is not None:
-            return HealthStatus(name=self.label, healthy=True, state=self.state, detail="")
-        detail = (
-            NO_API_KEY if self.state is ServiceState.RUNNING else not_running_detail(self.state)
+            return HealthStatus(
+                name=self.label, healthy=True, state=self.state, detail="", extra=extra
+            )
+        detail = NO_API_KEY if self.running else not_running_detail(self.state)
+        return HealthStatus(
+            name=self.label, healthy=False, state=self.state, detail=detail, extra=extra
         )
-        return HealthStatus(name=self.label, healthy=False, state=self.state, detail=detail)
 
     # ---------- 调用能力 ----------
 
