@@ -65,7 +65,9 @@ def read_yaml(config_file: Path = CONFIG_FILE) -> tuple[dict[str, object], bool]
         raise ConfigError(f"配置文件不是合法的 UTF-8 文本：{config_file}：{exc}") from exc
     except OSError as exc:
         raise ConfigError(f"配置文件读取失败：{config_file}：{exc}") from exc
-    except yaml.MarkedYAMLError as exc:
+    except yaml.YAMLError as exc:
+        # 捕基类而非 MarkedYAMLError：ReaderError（控制字符、非法字节）只是 YAMLError
+        # 的子类、不带行列标记，漏掉它就会有裸异常绕过「加载期错误统一为 ConfigError」。
         raise ConfigError(f"配置文件解析失败：{config_file}：{exc}") from exc
     if loaded is None:  # 空文件
         return {}, True

@@ -128,6 +128,37 @@ def test_yaml编码非法时报_ConfigError(tmp_path: Path) -> None:
         _ = read_yaml(config_file)
 
 
+def test_yaml含控制字符时报_ConfigError(tmp_path: Path) -> None:
+    """回归：ReaderError 是 YAMLError 的子类却不是 MarkedYAMLError，只捕后者会裸冒出去。"""
+    config_file = tmp_path / "app.yaml"
+    _ = config_file.write_bytes(b"app:\n  app_name: \x00bad\n")
+
+    with pytest.raises(ConfigError, match="解析失败"):
+        _ = read_yaml(config_file)
+
+
+def test_读yaml遇_OSError_时报_ConfigError(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """回归：读不动（权限等）也要收敛成 ConfigError，而不是裸 OSError。"""
+    config_file = _write(tmp_path / "app.yaml", "app: {}\n")
+
+    def _boom(*_args: object, **_kwargs: object) -> str:
+        raise PermissionError("没有权限")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+
+    with pytest.raises(ConfigError, match="读取失败"):
+        _ = read_yaml(config_file)
+
+
+def test_空yaml文件按未配置骨架处理(tmp_path: Path) -> None:
+    config_file = _write(tmp_path / "app.yaml", "")
+
+    data, found = read_yaml(config_file)
+
+    assert data == {}
+    assert found is True
+
+
 # ---- 文件级加载 ----
 
 
@@ -217,6 +248,16 @@ def test_引号包住的轮转值保持字符串(tmp_path: Path) -> None:
 def test_非法枚举值被pydantic拦截(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         _ = _load(tmp_path, "app:\n  env: staging\n")
+
+
+def test_非法日志级别在加载期被拦下(tmp_path: Path) -> None:
+    """回归：级别写错要在配置加载期报错，而不是等 setup_logging 抛裸 ValueError。"""
+    with pytest.raises(ValidationError, match="level"):
+        _ = _load(tmp_path, "log:\n  level: BOGUS\n")
+
+
+def test_日志级别大小写不敏感(tmp_path: Path) -> None:
+    assert _load(tmp_path, "log:\n  level: debug\n").log.level == "DEBUG"
 
 
 # ---- 单例与路径语义 ----

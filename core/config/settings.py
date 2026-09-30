@@ -13,11 +13,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from core.config.loader import CONFIG_FILE, ENV_FILE, interpolate, read_env, read_yaml
 
 Environment = Literal["dev", "test", "prod"]
+
+#: 日志级别的合法取值：与 formatters 里 LEVEL_TAGS / LEVEL_COLORS 认识的那几个一致。
+#: 写错级别在配置加载期就被 pydantic 拦下（ValidationError），
+#: 而不是等到 setup_logging 交给 loguru 时才抛裸 ValueError。
+LogLevel = Literal["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"]
 
 #: 未找到 YAML 骨架文件时的来源描述前缀
 SOURCE_DEFAULT = "内置默认值"
@@ -49,7 +54,7 @@ class LogSettings(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(populate_by_name=True)
 
-    level: str = "INFO"
+    level: LogLevel = "INFO"
     json_output: bool = Field(default=False, alias="json")
     layout: Literal["tree", "line"] = "line"
     color: Literal["auto", "always", "never"] = "auto"
@@ -59,6 +64,12 @@ class LogSettings(BaseModel):
     rotation: str = "00:00"
     retention: str = "7 days"
     compression: str = "zip"
+
+    @field_validator("level", mode="before")
+    @classmethod
+    def _normalize_level(cls, value: object) -> object:
+        """级别大小写不敏感：YAML 里写 info / Info 都先归一成 INFO 再校验。"""
+        return value.upper() if isinstance(value, str) else value
 
 
 class ServiceSettings(BaseModel):
