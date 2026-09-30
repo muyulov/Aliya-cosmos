@@ -55,6 +55,8 @@ app:
 log:
   level: INFO
   json: false
+  layout: tree               # tree（字段成树）/ line（字段内联成一行）
+  color: auto                # auto（仅终端）/ always / never
 ```
 
 ### 占位符
@@ -81,9 +83,11 @@ log:
 | `app.debug` | `true` | 调试开关 |
 | `log.level` | `INFO` | 日志级别 |
 | `log.json` | `false` | 是否输出 JSON 日志 |
+| `log.layout` | `tree` | 输出布局：`tree`（字段缩进成树）/ `line`（字段内联成一行，便于 grep 与按行采集） |
+| `log.color` | `auto` | 控制台着色：`auto`（仅终端）/ `always` / `never`；日志文件永远不带颜色 |
 | `log.dir` | `logs` | 日志目录 |
-| `log.file_name` | `app.log` | 主日志文件名 |
-| `log.error_file_name` | `error.log` | 错误日志文件名 |
+| `log.file_name` | `app-{time:%Y%m%d-%H%M%S}.log` | 主日志文件名，支持 loguru 时间模板（装配时求值，故每次启动一个独立文件） |
+| `log.error_file_name` | `error-{time:%Y%m%d-%H%M%S}.log` | 错误日志文件名，同上 |
 | `log.rotation` | `00:00` | 轮转阈值（默认按天），写进 YAML 时必须加引号 |
 | `log.retention` | `7 days` | 保留时长 |
 | `log.compression` | `zip` | 归档压缩方式 |
@@ -150,6 +154,14 @@ log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消�
 
 颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集；`time` / `level` / `message` / `face` / `exception` 是保留键，业务字段与它们同名时以保留键为准（树形格式没有这个限制——业务字段独立成行，不与元数据混排）。
 
+`log.layout: line` 换成单行布局，字段内联成 `键=值`，一条记录（除堆栈外）只占一行：
+
+```text
+2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队 | 参与者=qq:6329133635628374381 | 已取消旧计划=0
+```
+
+`log.color` 控制控制台着色（时间戳暗灰、级别与消息按级别上色、字段名暗灰），`always` 可在 IDE 输出窗、CI 面板这类拿不到 `isatty` 的地方强制打开。**颜色只进控制台**：文件 sink 永远不写着 ANSI 转义序列。
+
 `context.request_scope` 作用域内的 `request_id` 会自动携带，调用点无需手写字段；标准库与第三方库（`sqlalchemy` / `httpx` / `asyncio`）经桥接后的日志同样携带这些上下文：
 
 ```python
@@ -178,7 +190,9 @@ with log.context(会话="qq:123"):
        KeyError: 'item_id'
 ```
 
-日志文件有两个：`logs/app.log`（跟随 `log.level`）与 `logs/error.log`（固定 ERROR 级），均按天轮转。
+日志文件有两个：`logs/app-<启动时间戳>.log`（跟随 `log.level`）与 `logs/error-<启动时间戳>.log`（固定 ERROR 级），均按天轮转。文件名默认带 `{time}` 模板，**每次启动写一组独立文件**，两次启动的内容不会混在一起；`setup_logging()` 返回的 `LogFiles(app=…, error=…)` 就是本次实际写入的路径。
+
+保留 `{…}` 占位符不只是为了命名：loguru 的 `retention` 靠它识别同族文件，改成固定名（`app.log`）后旧文件将永远清不掉。
 
 ## LLM 层
 
