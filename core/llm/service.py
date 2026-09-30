@@ -48,7 +48,7 @@ from core.llm.errors import (
     LLMTimeoutError,
 )
 from core.llm.messages import ToolCall
-from core.service.base import HealthStatus, Service, ServiceState, not_running_detail
+from core.service.base import HealthStatus, Service, not_running_detail
 
 #: 结构化输出的 schema 类型
 T = TypeVar("T", bound=BaseModel)
@@ -110,7 +110,7 @@ async def _wrap_errors(endpoint: str, model: str) -> AsyncGenerator[None, None]:
 
 
 class LLMService(Service):
-    """LLM 服务：持有客户端，暴露六项调用能力。"""
+    """LLM 服务：持有客户端，暴露五项调用能力。"""
 
     name: ClassVar[str] = "llm"
 
@@ -137,7 +137,7 @@ class LLMService(Service):
     @override
     async def start(self) -> None:
         """两个端点各建一个客户端。没配 api_key 的端点只警告：脚手架不该因为没密钥就起不来。"""
-        if self.state is ServiceState.RUNNING:
+        if self.running:
             return
         self._chat = self._build("chat", self._config.chat, self._chat)
         self._vision = self._build("vision", self._config.vision, self._vision)
@@ -157,15 +157,25 @@ class LLMService(Service):
         """只看有没有客户端：健康检查不该发请求（有副作用、花钱、受网络抖动影响）。
 
         两个端点全没配才算不健康：只启用一头也是能用的。
+        extra 里带出两个端点各自配置的模型与地址——「未配置 api_key」时也照样报，
+        否则看不出缺的是哪一个端点的密钥。
         """
+        extra: dict[str, object] = {
+            "对话模型": self._config.chat.model,
+            "对话端点": self._config.chat.base_url,
+            "多模态模型": self._config.vision.model,
+            "多模态端点": self._config.vision.base_url,
+        }
         if self._chat is not None or self._vision is not None:
-            return HealthStatus(name=self.label, healthy=True, state=self.state, detail="")
+            return HealthStatus(
+                name=self.label, healthy=True, state=self.state, detail="", extra=extra
+            )
         # 没客户端分两种：跑着但没配 api_key（问题在配置），以及还没启动 / 已停止
         # （问题在状态）。后者套用 NO_API_KEY 会误导——密钥其实是配了的。
-        detail = (
-            NO_API_KEY if self.state is ServiceState.RUNNING else not_running_detail(self.state)
+        detail = NO_API_KEY if self.running else not_running_detail(self.state)
+        return HealthStatus(
+            name=self.label, healthy=False, state=self.state, detail=detail, extra=extra
         )
-        return HealthStatus(name=self.label, healthy=False, state=self.state, detail=detail)
 
     # ---------- 调用能力 ----------
 

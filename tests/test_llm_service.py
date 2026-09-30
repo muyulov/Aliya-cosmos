@@ -15,6 +15,7 @@ import httpx2
 import pytest
 from openai import (
     APIConnectionError,
+    APIError,
     APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
@@ -38,6 +39,7 @@ from core.config import LLMEndpointSettings, LLMSettings, Settings
 from core.llm import (
     LLMConfigError,
     LLMConnectionError,
+    LLMError,
     LLMRequestError,
     LLMResponseError,
     LLMSchemaError,
@@ -45,7 +47,9 @@ from core.llm import (
     LLMTimeoutError,
     ToolCall,
     assistant,
+    image_base64,
     image_url,
+    system,
     tool,
     tool_result,
     user,
@@ -194,7 +198,12 @@ def _status_error(status: int = 500, request_id: str = "req-1") -> APIStatusErro
 
 async def test_未配key时start不建客户端() -> None:
     mgr = ServiceManager(
-        Settings(llm=LLMSettings(chat=_endpoint(api_key=""), vision=_endpoint(api_key="")))
+        Settings(
+            llm=LLMSettings(
+                chat=_endpoint(api_key="", model="chat-m"),
+                vision=_endpoint(api_key="", model="vision-m"),
+            )
+        )
     )
     _ = mgr.register(LLMService)
     await mgr.start_all()
@@ -204,6 +213,9 @@ async def test_未配key时start不建客户端() -> None:
     status = await service.health()
     assert status.healthy is False
     assert "未配置" in status.detail
+    # 两头都没密钥时仍报出各自配置的模型：否则看不出缺的是哪一头的密钥
+    assert status.extra["对话模型"] == "chat-m"
+    assert status.extra["多模态模型"] == "vision-m"
 
 
 async def test_未配key时调用才报错() -> None:
@@ -215,12 +227,14 @@ async def test_未配key时调用才报错() -> None:
 
 
 async def test_只启用一个端点也算健康() -> None:
-    service = _service(vision=_endpoint(api_key=""))
+    service = _service(vision=_endpoint(api_key="", model="vision-m"))
     await service.start()
 
     status = await service.health()
     assert status.healthy is True
     assert status.detail == ""
+    assert status.extra["对话模型"] == "chat-m"
+    assert status.extra["多模态模型"] == "vision-m"
 
 
 async def test_停止后health报未运行而不是未配密钥() -> None:
@@ -492,3 +506,60 @@ def test_多模态消息结构() -> None:
         {"type": "text", "text": "描述一下"},
         {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
     ]
+
+
+# ---- 消息构造器 ----
+
+
+def test_系统消息构造器() -> None:
+    """统一用 system 而非 developer：第三方兼容端点普遍只认前者。"""
+    assert system("你是助手") == {"role": "system", "content": "你是助手"}
+
+
+# ---- 兜底分支 ----
+
+
+async def test_未分类的_APIError_兜底成_LLMError() -> None:
+    """回归：不是 StatusError / Connection / Timeout 的 APIError 要落到基类，别漏出去。"""
+    service = _service()
+    _attach(
+        service,
+        _FakeClient(error=APIError("未知错误", httpx2.Request("POST", _URL), body=None)),
+    )
+
+    with pytest.raises(LLMError) as info:
+        _ = await service.chat([user("你好")])
+
+    assert type(info.value) is LLMError  # 是基类，不是某个更具体的子类
+    assert "未知错误" in str(info.value)
+
+
+async def test_返回体没有_choices_时报_LLMResponseError() -> None:
+    """回归：兼容端点偶尔返回空 choices——`_content` 与 `chat_tools` 都不能抛 IndexError。"""
+    empty = ChatCompletion(id="c1", choices=[], created=0, model="chat-m", object="chat.completion")
+    service = _service()
+    _attach(service, _FakeClient(completion=empty))
+
+    with pytest.raises(LLMResponseError, match="没有 choices"):
+        _ = await service.chat([user("你好")])
+
+    with pytest.raises(LLMResponseError, match="没有 choices"):
+        _ = await service.chat_tools([user("你好")], [tool("get_weather", "查天气", Item)])
+
+
+async def test_已在运行时_start_直接返回() -> None:
+    """幂等之一：状态已是 RUNNING 时直接返回，连没建过的端点也不再补建。"""
+    service = _service()
+    service.state = ServiceState.RUNNING
+
+    await service.start()
+
+    assert service._chat is None  # pyright: ignore[reportPrivateUsage]
+    assert service._vision is None  # pyright: ignore[reportPrivateUsage]
+    await service.stop()
+
+
+def test_图片_base64_构造器() -> None:
+    part = image_base64("QUJD", media_type="image/jpeg")
+
+    assert part == {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,QUJD"}}
