@@ -153,18 +153,30 @@ class Settings(BaseModel):
         self._source = source
 
 
+def _describe_source(config_file: Path, raw: dict[str, object] | None) -> str:
+    """把「文件是否存在、是否为空」翻译成启动日志里的一句话。"""
+    if raw is None:
+        return f"{SOURCE_DEFAULT}（未找到 {config_file}）"
+    if not raw:
+        return f"{config_file}（空文件，全部走默认值）"
+    return str(config_file)
+
+
 def load_settings(
     config_file: Path = CONFIG_FILE,
     env_file: Path = ENV_FILE,
+    *,
+    expand_rounds: int = 1,
 ) -> Settings:
     """加载配置：读 YAML → 占位符插值 → 校验，并记录配置来源。
 
     文件缺失不报错（全部走默认值），占位符取不到值则抛 ConfigError。
+    `expand_rounds` 透传给 interpolate：默认单趟，需要链式占位符时传 2 及以上。
     """
-    raw, found = read_yaml(config_file)
-    data = interpolate(raw, read_env(env_file))
+    raw = read_yaml(config_file)
+    data = interpolate(raw if raw is not None else {}, read_env(env_file), rounds=expand_rounds)
     settings = Settings.model_validate(data)
-    settings.mark_source(str(config_file) if found else f"{SOURCE_DEFAULT}（未找到 {config_file}）")
+    settings.mark_source(_describe_source(config_file, raw))
     return settings
 
 

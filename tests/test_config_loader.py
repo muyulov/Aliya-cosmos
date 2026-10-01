@@ -59,6 +59,29 @@ def test_报错信息带键路径() -> None:
         _ = interpolate({"app": {"app_name": "${MISSING_KEY}"}}, {})
 
 
+def test_双美元符号转义为字面占位符() -> None:
+    """$${A} 里的 {A} 不再参与取值，配置里因此能写出字面 ${VAR}。"""
+    assert interpolate("$${A}", {"A": "1"}) == "${A}"
+
+
+def test_双美元符号转义为字面美元() -> None:
+    assert interpolate("价格：100$$", {}) == "价格：100$"
+
+
+def test_单个美元符号保持原样() -> None:
+    assert interpolate("$A ${A}", {"A": "1"}) == "$A 1"
+
+
+def test_多趟展开链式变量() -> None:
+    """rounds=2 时变量值里的占位符继续展开，支持 A → B 的链式取值。"""
+    assert interpolate("${A}", {"A": "${B}", "B": "2"}, rounds=2) == "2"
+
+
+def test_多趟展开不改动已转义的字面占位符() -> None:
+    """回归：转义记录必须留到全部展开结束才还原，中途还原会被下一趟当成占位符吃掉。"""
+    assert interpolate("$${A}", {"A": "1"}, rounds=2) == "${A}"
+
+
 # ---- 纯函数：读环境变量 ----
 
 
@@ -90,19 +113,14 @@ def test_env文件缺失时只返回进程环境变量(tmp_path: Path, monkeypat
 # ---- 纯函数：读 YAML ----
 
 
-def test_读yaml文件缺失时返回空与未找到标记(tmp_path: Path) -> None:
-    data, found = read_yaml(tmp_path / "missing.yaml")
-    assert data == {}
-    assert found is False
+def test_读yaml文件缺失时返回空值(tmp_path: Path) -> None:
+    assert read_yaml(tmp_path / "missing.yaml") is None
 
 
-def test_读yaml正常返回数据与已找到标记(tmp_path: Path) -> None:
+def test_读yaml正常返回数据(tmp_path: Path) -> None:
     config_file = _write(tmp_path / "app.yaml", "app:\n  port: 9000\n")
 
-    data, found = read_yaml(config_file)
-
-    assert data == {"app": {"port": 9000}}
-    assert found is True
+    assert read_yaml(config_file) == {"app": {"port": 9000}}
 
 
 def test_yaml语法错误报_ConfigError(tmp_path: Path) -> None:
@@ -150,13 +168,10 @@ def test_读yaml遇_OSError_时报_ConfigError(tmp_path: Path, monkeypatch: pyte
         _ = read_yaml(config_file)
 
 
-def test_空yaml文件按未配置骨架处理(tmp_path: Path) -> None:
+def test_空yaml文件返回空字典(tmp_path: Path) -> None:
     config_file = _write(tmp_path / "app.yaml", "")
 
-    data, found = read_yaml(config_file)
-
-    assert data == {}
-    assert found is True
+    assert read_yaml(config_file) == {}
 
 
 # ---- 文件级加载 ----
@@ -196,6 +211,15 @@ def test_正常文件覆盖默认值并记录来源(tmp_path: Path) -> None:
     assert settings.app.env == "prod"
     assert settings.log.level == "DEBUG"
     assert settings.config_source == str(config_file)
+
+
+def test_空文件来源标出全部走默认值(tmp_path: Path) -> None:
+    config_file = _write(tmp_path / "app.yaml", "")
+
+    settings = load_settings(config_file=config_file, env_file=tmp_path / ".env")
+
+    assert settings.app.app_name == "aliya-cosmos"
+    assert settings.config_source == f"{config_file}（空文件，全部走默认值）"
 
 
 def test_未知配置项被忽略(tmp_path: Path) -> None:
@@ -240,6 +264,17 @@ def test_引号包住的轮转值保持字符串(tmp_path: Path) -> None:
     """PyYAML 兼容 YAML 1.1，不加引号的 00:00 会被解析成整数 0。"""
     settings = _load(tmp_path, 'log:\n  rotation: "00:00"\n')
     assert settings.log.rotation == "00:00"
+
+
+def test_加载时可开启多趟展开(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认单趟，expand_rounds=2 时变量值里的占位符继续展开。"""
+    monkeypatch.setenv("HOST_INNER", "api.example.com")
+    config_file = _write(tmp_path / "app.yaml", "app:\n  app_name: ${HOST_OUTER}\n")
+    env_file = _write(tmp_path / ".env", "HOST_OUTER=${HOST_INNER}\n")
+
+    settings = load_settings(config_file=config_file, env_file=env_file, expand_rounds=2)
+
+    assert settings.app.app_name == "api.example.com"
 
 
 # ---- pydantic 校验 ----
