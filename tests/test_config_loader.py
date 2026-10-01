@@ -118,20 +118,20 @@ def test_读yaml文件缺失时返回空值(tmp_path: Path) -> None:
 
 
 def test_读yaml正常返回数据(tmp_path: Path) -> None:
-    config_file = _write(tmp_path / "app.yaml", "app:\n  port: 9000\n")
+    config_file = _write(tmp_path / "cosmos.yaml", "app:\n  port: 9000\n")
 
     assert read_yaml(config_file) == {"app": {"port": 9000}}
 
 
 def test_yaml语法错误报_ConfigError(tmp_path: Path) -> None:
-    config_file = _write(tmp_path / "app.yaml", "app: [未闭合\n")
+    config_file = _write(tmp_path / "cosmos.yaml", "app: [未闭合\n")
 
     with pytest.raises(ConfigError, match="解析失败"):
         _ = read_yaml(config_file)
 
 
 def test_yaml顶层不是映射时报错(tmp_path: Path) -> None:
-    config_file = _write(tmp_path / "app.yaml", "- a\n- b\n")
+    config_file = _write(tmp_path / "cosmos.yaml", "- a\n- b\n")
 
     with pytest.raises(ConfigError, match="顶层"):
         _ = read_yaml(config_file)
@@ -139,7 +139,7 @@ def test_yaml顶层不是映射时报错(tmp_path: Path) -> None:
 
 def test_yaml编码非法时报_ConfigError(tmp_path: Path) -> None:
     """回归：非 UTF-8 的配置文件也要收敛成 ConfigError，而不是裸 UnicodeDecodeError。"""
-    config_file = tmp_path / "app.yaml"
+    config_file = tmp_path / "cosmos.yaml"
     _ = config_file.write_bytes(b"app: \xff\xfe\n")
 
     with pytest.raises(ConfigError, match="UTF-8"):
@@ -148,7 +148,7 @@ def test_yaml编码非法时报_ConfigError(tmp_path: Path) -> None:
 
 def test_yaml含控制字符时报_ConfigError(tmp_path: Path) -> None:
     """回归：ReaderError 是 YAMLError 的子类却不是 MarkedYAMLError，只捕后者会裸冒出去。"""
-    config_file = tmp_path / "app.yaml"
+    config_file = tmp_path / "cosmos.yaml"
     _ = config_file.write_bytes(b"app:\n  app_name: \x00bad\n")
 
     with pytest.raises(ConfigError, match="解析失败"):
@@ -157,7 +157,7 @@ def test_yaml含控制字符时报_ConfigError(tmp_path: Path) -> None:
 
 def test_读yaml遇_OSError_时报_ConfigError(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """回归：读不动（权限等）也要收敛成 ConfigError，而不是裸 OSError。"""
-    config_file = _write(tmp_path / "app.yaml", "app: {}\n")
+    config_file = _write(tmp_path / "cosmos.yaml", "app: {}\n")
 
     def _boom(*_args: object, **_kwargs: object) -> str:
         raise PermissionError("没有权限")
@@ -169,7 +169,7 @@ def test_读yaml遇_OSError_时报_ConfigError(tmp_path: Path, monkeypatch: pyte
 
 
 def test_空yaml文件返回空字典(tmp_path: Path) -> None:
-    config_file = _write(tmp_path / "app.yaml", "")
+    config_file = _write(tmp_path / "cosmos.yaml", "")
 
     assert read_yaml(config_file) == {}
 
@@ -179,7 +179,7 @@ def test_空yaml文件返回空字典(tmp_path: Path) -> None:
 
 def _load(tmp_path: Path, yaml_text: str, env_text: str | None = None) -> Settings:
     """把 YAML（可选 .env）写进临时目录后加载。"""
-    config_file = _write(tmp_path / "app.yaml", yaml_text)
+    config_file = _write(tmp_path / "cosmos.yaml", yaml_text)
     env_file = tmp_path / ".env"
     if env_text is not None:
         env_file = _write(env_file, env_text)
@@ -204,7 +204,7 @@ def test_直接构造的实例标记为外部注入() -> None:
 
 
 def test_正常文件覆盖默认值并记录来源(tmp_path: Path) -> None:
-    config_file = _write(tmp_path / "app.yaml", "app:\n  env: prod\nlog:\n  level: DEBUG\n")
+    config_file = _write(tmp_path / "cosmos.yaml", "app:\n  env: prod\nlog:\n  level: DEBUG\n")
 
     settings = load_settings(config_file=config_file, env_file=tmp_path / ".env")
 
@@ -214,7 +214,7 @@ def test_正常文件覆盖默认值并记录来源(tmp_path: Path) -> None:
 
 
 def test_空文件来源标出全部走默认值(tmp_path: Path) -> None:
-    config_file = _write(tmp_path / "app.yaml", "")
+    config_file = _write(tmp_path / "cosmos.yaml", "")
 
     settings = load_settings(config_file=config_file, env_file=tmp_path / ".env")
 
@@ -269,7 +269,7 @@ def test_引号包住的轮转值保持字符串(tmp_path: Path) -> None:
 def test_加载时可开启多趟展开(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """默认单趟，expand_rounds=2 时变量值里的占位符继续展开。"""
     monkeypatch.setenv("HOST_INNER", "api.example.com")
-    config_file = _write(tmp_path / "app.yaml", "app:\n  app_name: ${HOST_OUTER}\n")
+    config_file = _write(tmp_path / "cosmos.yaml", "app:\n  app_name: ${HOST_OUTER}\n")
     env_file = _write(tmp_path / ".env", "HOST_OUTER=${HOST_INNER}\n")
 
     settings = load_settings(config_file=config_file, env_file=env_file, expand_rounds=2)
@@ -306,7 +306,7 @@ def test_单例缓存且配置文件按工作目录解析(tmp_path: Path, monkey
         assert get_settings() is first
         assert first.config_source.startswith("内置默认值")
 
-        _ = _write(tmp_path / "data" / "config" / "app.yaml", "app:\n  app_name: from-file\n")
+        _ = _write(tmp_path / "data" / "config" / "cosmos.yaml", "app:\n  app_name: from-file\n")
         get_settings.cache_clear()
         assert get_settings().app.app_name == "from-file"
     finally:

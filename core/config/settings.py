@@ -1,7 +1,7 @@
 """配置模块。
 
 约定：
-- data/config/app.yaml 是配置的唯一骨架，字段缺失时用这里的默认值。
+- data/config/cosmos.yaml 是配置的唯一骨架，字段缺失时用这里的默认值。
 - 需要密钥等隐私值时不写明文，在 YAML 里写 ${VAR} 占位符，值由 .env 提供。
 - 通过 get_settings() 获取单例；测试中可用 get_settings.cache_clear() 重置，
   或用 load_settings(config_file=..., env_file=...) 显式指定文件。

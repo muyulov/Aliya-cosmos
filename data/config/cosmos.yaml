@@ -1,36 +1,44 @@
+# 配置骨架：只列常改项，缺的字段一律用 core/config/settings.py 里的默认值。
+# 占位符（取值来源是进程环境变量与 .env，进程环境优先）：
+#   ${VAR}        取不到就报错退出（写密钥时要确认 .env 里有值）
+#   ${VAR:默认值} 取不到时用默认值；冒号后留空即默认空串
+#   $$            字面 $，例如 $${RAW} 会展开成 ${RAW}
+#   默认只展开一趟：变量值里再写 ${...} 不会继续展开，避免链式取值的隐式依赖；
+#   确需链式时由 load_settings(expand_rounds=2) 开启（见 README「占位符」）。
+
 app:
-  app_name: aliya-cosmos
-  env: dev
-  debug: true
+  app_name: aliya-cosmos # 应用名，启动 / 关闭日志与健康检查都用它
+  env: dev # 运行环境：dev / test / prod
+  debug: true # 调试开关
 
 log:
-  level: INFO
-  json: false
+  level: INFO # TRACE / DEBUG / INFO / SUCCESS / WARNING / ERROR / CRITICAL，大小写不敏感
+  json: false # true 则输出 JSON 行，便于采集端直接解析
   layout: line # line（默认，字段内联成一行，便于 grep 与按行采集）/ tree（字段缩进成树）
   color: auto # 控制台着色：auto（仅终端）/ always / never；日志文件永远不带颜色
-  dir: logs
+  dir: logs # 日志目录，相对当前工作目录
   # 文件名支持 loguru 时间模板，装配时求值 → 每次启动写一组独立文件。
   # 保留 {…} 占位符不只是命名方便：loguru 的 retention 靠它识别同族文件，
   # 写成固定名（app.log）时旧文件永远清不掉。
-  file_name: "app-{time:%Y%m%d-%H%M%S}.log"
-  error_file_name: "error-{time:%Y%m%d-%H%M%S}.log"
-  rotation: "00:00"
-  retention: 7 days
-  compression: zip
+  file_name: "cosmos-{time:%Y%m%d-%H%M%S}.log"
+  error_file_name: "cosmos-error-{time:%Y%m%d-%H%M%S}.log"
+  rotation: "00:00" # 轮转阈值（默认按天）；不加引号会被 YAML 当成整数 0
+  retention: 7 days # 保留时长，超期文件自动清理
+  compression: zip # 轮转出的旧文件压缩格式
 
 service:
-  start_timeout: 30
-  stop_timeout: 30
+  start_timeout: 30 # 单个服务 start() 的超时秒数，必须为正数；null 表示不限制
+  stop_timeout: 30 # 单个服务 stop() 的超时秒数，必须为正数；同上
 
 clock:
-  tz: UTC
+  tz: UTC # 时钟服务的时区，如 Asia/Shanghai；非法时区在启动期报错
 
 # 文本向量化端点。与 llm 分开配：DeepSeek 没有 embedding 端点，两家通常不是同一个服务。
 # 没配 api_key 时只警告、健康检查 unhealthy，进程照常启动（不 fail fast）。
 embedding:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1 # OpenAI 兼容端点
   api_key: ${DASHSCOPE_API_KEY:} # 冒号后为空：.env 里没配时取空串，该端点不可用
-  model: text-embedding-v3
+  model: text-embedding-v3 # 向量化模型
   timeout: 60 # 单次请求超时（秒），必须为正数
   retries: 2 # SDK 重试次数，0 关闭
   batch_size: 10 # 单次请求最多几条文本。阿里 v3 上限 10（v1/v2 为 25，OpenAI 为 2048），超了会 400
@@ -42,7 +50,7 @@ llm:
   chat:
     base_url: https://api.deepseek.com/v1 # 端点地址；OpenAI 兼容端点（vLLM / Ollama / Moonshot）改这里即可
     api_key: ${DEEPSEEK_API_KEY:} # 冒号后为空：.env 里没配时取空串，该端点不可用
-    model: deepseek-flash
+    model: deepseek-flash # 该端点的模型
     timeout: 60 # 单次请求超时（秒），必须为正数
     retries: 2 # SDK 重试次数，0 关闭；流式一旦开始消费就不再重试
     structured_mode: json_schema # 兼容端点不支持时改 json_object（该模式要求提示词里出现 json 字样）

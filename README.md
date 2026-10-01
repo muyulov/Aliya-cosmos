@@ -14,7 +14,7 @@ uv sync
 uv run python -m core.main
 ```
 
-无需任何配置即可启动，所有配置项都有默认值。要自定义时改 `data/config/app.yaml`；密钥类配置写在 `.env`（参考 `.env.example`）。
+无需任何配置即可启动，所有配置项都有默认值。要自定义时改 `data/config/cosmos.yaml`；密钥类配置写在 `.env`（参考 `.env.example`）。
 
 进程常驻，`SIGINT` / `SIGTERM` 触发优雅关闭。信号注册优先交给事件循环（POSIX 的标准做法）；Windows 的事件循环不实现 `add_signal_handler`，会自动退回 `signal.signal`，并经 `call_soon_threadsafe` 置位。
 
@@ -39,7 +39,7 @@ core/
   config/        配置层：YAML 骨架加载与占位符插值
   embedding/     向量层：单条 / 批量文本向量化
   llm/           LLM 层：对话 / 流式 / 结构化 / 工具调用 / 多模态
-data/           配置与运行数据：config/app.yaml 为配置骨架，可安全提交
+data/           配置与运行数据：config/cosmos.yaml 为配置骨架，可安全提交
 tests/           测试
 ```
 
@@ -47,7 +47,7 @@ tests/           测试
 
 ## 配置
 
-配置以 `data/config/app.yaml` 为唯一来源（路径相对当前工作目录）。该文件可安全提交，因为它不含任何明文密钥。要调整配置，改这个文件即可。
+配置以 `data/config/cosmos.yaml` 为唯一来源（路径相对当前工作目录）。该文件可安全提交，因为它不含任何明文密钥。要调整配置，改这个文件即可。
 
 ```yaml
 app:
@@ -69,7 +69,7 @@ log:
 | `${APP_ENV:dev}` | 取不到值时用 `dev` |
 | `$${VAR}` | 字面 `${VAR}`，不取值（`$$` 转义成 `$`） |
 
-占位符只作用于字符串值，`app.yaml` 里 dict 的键不会被替换；展开后一律是字符串，类型由 pydantic 转换（如 `"true"` → `bool`）。
+占位符只作用于字符串值，`cosmos.yaml` 里 dict 的键不会被替换；展开后一律是字符串，类型由 pydantic 转换（如 `"true"` → `bool`）。
 
 默认只展开一趟：变量值里再写 `${B}` 不会继续展开，避免链式取值带来的隐式依赖。确实需要链式引用时，用 `load_settings(..., expand_rounds=2)` 显式开启。
 
@@ -129,8 +129,8 @@ log:
 
 | 场景 | 行为 |
 | --- | --- |
-| `data/config/app.yaml` 不存在 | 全部走默认值继续启动，启动日志显示 `配置源=内置默认值（未找到 …）` |
-| `data/config/app.yaml` 存在但为空 | 同上（全部走默认值），启动日志显示 `配置源=…（空文件，全部走默认值）` |
+| `data/config/cosmos.yaml` 不存在 | 全部走默认值继续启动，启动日志显示 `配置源=内置默认值（未找到 …）` |
+| `data/config/cosmos.yaml` 存在但为空 | 同上（全部走默认值），启动日志显示 `配置源=…（空文件，全部走默认值）` |
 | 配置文件不是合法 UTF-8，或读不动（权限等） | 报错退出 |
 | YAML 语法错误或顶层不是映射 | 报错退出 |
 | 占位符取不到值且没写默认值 | 报错退出，并指出是哪个变量 |

@@ -19,7 +19,7 @@ import yaml
 from dotenv import dotenv_values
 
 #: 配置骨架文件，相对当前工作目录
-CONFIG_FILE = Path("data/config/app.yaml")
+CONFIG_FILE = Path("data/config/cosmos.yaml")
 #: 存放密钥等隐私值的文件，相对当前工作目录
 ENV_FILE = Path(".env")
 
