@@ -205,7 +205,7 @@ async def test_未配key时start不建客户端() -> None:
             )
         )
     )
-    _ = mgr.register(LLMService)
+    mgr.register(LLMService)
     await mgr.start_all()
 
     service = mgr.get(LLMService)
@@ -240,7 +240,7 @@ async def test_只启用一个端点也算健康() -> None:
 async def test_停止后health报未运行而不是未配密钥() -> None:
     """stop() 之后客户端被清空，但密钥是配了的——不能再说「未配置 api_key」。"""
     mgr = ServiceManager(Settings(llm=LLMSettings(chat=_endpoint(), vision=_endpoint())))
-    _ = mgr.register(LLMService)
+    mgr.register(LLMService)
     await mgr.start_all()
     await mgr.stop_all()
 

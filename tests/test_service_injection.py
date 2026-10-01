@@ -96,7 +96,7 @@ def _clear_built() -> None:
 def test_装配是惰性的() -> None:
     """register 之后、首次访问之前不构造任何实例。"""
     mgr = ServiceManager()
-    _ = mgr.register(LazyProbeService)
+    mgr.register(LazyProbeService)
     assert built == []
 
     _ = mgr.get(LazyProbeService)
@@ -106,14 +106,14 @@ def test_装配是惰性的() -> None:
 def test_配置注入容器持有的实例() -> None:
     settings = Settings(app=AppSettings(app_name="注入校验"))
     mgr = ServiceManager(settings)
-    _ = mgr.register(SettingsAwareService)
+    mgr.register(SettingsAwareService)
 
     assert mgr.get(SettingsAwareService).settings is settings
 
 
 def test_查找未注册类型报错() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
+    mgr.register(DbService)
 
     with pytest.raises(ServiceNotRegisteredError):
         _ = mgr.get(SettingsAwareService)
@@ -123,30 +123,57 @@ def test_注册非_Service_子类报错() -> None:
     mgr = ServiceManager()
 
     with pytest.raises(ServiceContractError):
-        _ = mgr.register(cast("type[Service]", NotAService))
+        mgr.register(cast("type[Service]", NotAService))
 
 
 def test_重复注册同一类型报错() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
+    mgr.register(DbService)
 
     with pytest.raises(ServiceContractError, match="重复注册"):
-        _ = mgr.register(DbService)
+        mgr.register(DbService)
+
+
+def test_一次注册多个服务() -> None:
+    """批量注册：登记顺序即传入顺序。"""
+    mgr = ServiceManager()
+    mgr.register(SettingsAwareService, DbService)
+
+    assert [service.label for service in mgr.services] == ["settings-aware", "db"]
+
+
+def test_批量注册内部重复报错() -> None:
+    """同一次调用里重复传入同一类型，同样按重复注册处理。"""
+    mgr = ServiceManager()
+
+    with pytest.raises(ServiceContractError, match="重复注册"):
+        mgr.register(DbService, DbService)
+
+
+def test_批量注册有一项非法则整批不生效() -> None:
+    """原子性：整批里任何一项不合法，前面已通过的也不登记。"""
+    mgr = ServiceManager()
+
+    with pytest.raises(ServiceContractError):
+        mgr.register(DbService, cast("type[Service]", NotAService))
+
+    # 白盒断言：没有公开 API 能观察「是否部分登记」，只能读注册表
+    assert mgr._types == []  # pyright: ignore[reportPrivateUsage]
 
 
 def test_装配后不能再注册() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
+    mgr.register(DbService)
     _ = mgr.services  # 触发装配
 
     with pytest.raises(ServiceContractError, match="不能再注册"):
-        _ = mgr.register(LazyProbeService)
+        mgr.register(LazyProbeService)
 
 
 def test_声明了依赖但签名没有对应参数() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(DeclaredButMissingParam)
+    mgr.register(DbService)
+    mgr.register(DeclaredButMissingParam)
 
     with pytest.raises(ServiceContractError, match="构造器没有对应参数"):
         _ = mgr.services
@@ -154,8 +181,8 @@ def test_声明了依赖但签名没有对应参数() -> None:
 
 def test_签名有依赖参数但未声明() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(UndeclaredParam)
+    mgr.register(DbService)
+    mgr.register(UndeclaredParam)
 
     with pytest.raises(ServiceContractError, match="未在 dependencies 中声明"):
         _ = mgr.services
@@ -163,7 +190,7 @@ def test_签名有依赖参数但未声明() -> None:
 
 def test_注解类型无法注入() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(UnknownAnnotation)
+    mgr.register(UnknownAnnotation)
 
     with pytest.raises(ServiceContractError, match="容器只支持"):
         _ = mgr.services
@@ -171,7 +198,7 @@ def test_注解类型无法注入() -> None:
 
 def test_可变参数无法注入() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(VarArgs)
+    mgr.register(VarArgs)
 
     with pytest.raises(ServiceContractError, match="可变参数"):
         _ = mgr.services
@@ -191,8 +218,8 @@ class DuplicateDependencyService(Service):
 def test_dependencies_重复类型报错() -> None:
     """回归：旧实现用集合对账，重复类型会被静默吃掉。"""
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(DuplicateDependencyService)
+    mgr.register(DbService)
+    mgr.register(DuplicateDependencyService)
 
     with pytest.raises(ServiceContractError, match="重复类型"):
         _ = mgr.services
@@ -213,7 +240,7 @@ class MissingAnnotationService(Service):
 
 def test_参数缺少类型注解报错() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(MissingAnnotationService)
+    mgr.register(MissingAnnotationService)
 
     with pytest.raises(ServiceContractError, match="缺少类型注解"):
         _ = mgr.services
@@ -234,8 +261,8 @@ class BrokenDependentService(Service):
 def test_装配失败不留下半成品实例() -> None:
     """构造期失败时容器保持未装配，不会留下已构造的前序服务。"""
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(BrokenDependentService)
+    mgr.register(DbService)
+    mgr.register(BrokenDependentService)
 
     with pytest.raises(RuntimeError, match="构造失败"):
         _ = mgr.services
@@ -258,8 +285,8 @@ class ClockConsumerService(Service):
 def test_容器按类型注入依赖实例() -> None:
     """注入的是容器里那个实例，而不是新建副本。"""
     mgr = ServiceManager()
-    _ = mgr.register(ClockService)
-    _ = mgr.register(ClockConsumerService)
+    mgr.register(ClockService)
+    mgr.register(ClockConsumerService)
 
     assert mgr.get(ClockConsumerService).clock is mgr.get(ClockService)
 
@@ -291,7 +318,7 @@ def test_配置注入的是容器持有的实例而非全局单例() -> None:
     """防止装配退化成读 get_settings() 全局单例，丢掉调用方传入的配置。"""
     own = Settings(app=AppSettings(app_name="容器持有"))
     mgr = ServiceManager(own)
-    _ = mgr.register(SettingsAwareService)
+    mgr.register(SettingsAwareService)
 
     injected = mgr.get(SettingsAwareService).settings
 
@@ -310,7 +337,7 @@ def test_未传配置时回退到全局单例(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(manager_module, "get_settings", lambda: own)
 
     mgr = ServiceManager()
-    _ = mgr.register(SettingsAwareService)
+    mgr.register(SettingsAwareService)
 
     assert mgr.get(SettingsAwareService).settings is own
 
@@ -330,7 +357,7 @@ def test_假值配置不会被当成未传() -> None:
     """
     own = FalsySettings(app=AppSettings(app_name="假值配置"))
     mgr = ServiceManager(own)
-    _ = mgr.register(SettingsAwareService)
+    mgr.register(SettingsAwareService)
 
     assert mgr.get(SettingsAwareService).settings is own
 
@@ -375,7 +402,7 @@ def test_顶层标量字段不影响配置节点注入() -> None:
     """回归：`Settings` 顶层可能有非配置节点字段（子类扩展），索引要跳过它们。"""
     own = PlainFieldSettings(clock=ClockSettings(tz="Asia/Shanghai"))
     mgr = ServiceManager(own)
-    _ = mgr.register(NodeConsumerService)
+    mgr.register(NodeConsumerService)
 
     assert mgr.get(NodeConsumerService).config.tz == "Asia/Shanghai"
 
@@ -393,7 +420,7 @@ def test_配置节点判定只认单一模型或可选模型() -> None:
 async def test_未装配的容器停止时不构造服务() -> None:
     """回归：停止不是装配触发点——没有实例可停时不该为了「停止」去构造服务。"""
     mgr = ServiceManager()
-    _ = mgr.register(LazyProbeService)
+    mgr.register(LazyProbeService)
 
     await mgr.stop_all()
 
@@ -403,14 +430,14 @@ async def test_未装配的容器停止时不构造服务() -> None:
 def test_配置节点按类型注入() -> None:
     own = Settings(clock=ClockSettings(tz="Asia/Shanghai"))
     mgr = ServiceManager(own)
-    _ = mgr.register(NodeConsumerService)
+    mgr.register(NodeConsumerService)
 
     assert mgr.get(NodeConsumerService).config is own.clock
 
 
 def test_配置节点未注册到_settings_时报错() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(UnknownNodeService)
+    mgr.register(UnknownNodeService)
 
     with pytest.raises(ServiceContractError, match="顶层节点索引"):
         _ = mgr.services
@@ -418,7 +445,7 @@ def test_配置节点未注册到_settings_时报错() -> None:
 
 def test_配置节点类型重复时报错() -> None:
     mgr = ServiceManager(DuplicateNodeSettings(extra_clock=ClockSettings()))
-    _ = mgr.register(NodeConsumerService)
+    mgr.register(NodeConsumerService)
 
     with pytest.raises(ServiceContractError, match="出现多次"):
         _ = mgr.services
@@ -455,7 +482,7 @@ class NoneValuedNodeSettings(Settings):
 def test_可选配置节点有值时按类型注入() -> None:
     """注解写 `X | None` 但当前有值时，仍应能按类型注入。"""
     mgr = ServiceManager(OptionalNodeSettings())
-    _ = mgr.register(CacheConsumerService)
+    mgr.register(CacheConsumerService)
 
     assert mgr.get(CacheConsumerService).config.size == 42
 
@@ -463,7 +490,7 @@ def test_可选配置节点有值时按类型注入() -> None:
 def test_可选配置节点为_none_时报错并说明原因() -> None:
     """回归：原来一律报「不是顶层字段」，把「可选且为 None」误导成「没挂上去」。"""
     mgr = ServiceManager(NoneValuedNodeSettings())
-    _ = mgr.register(CacheConsumerService)
+    mgr.register(CacheConsumerService)
 
     with pytest.raises(ServiceContractError, match="为 None"):
         _ = mgr.services
@@ -502,7 +529,7 @@ async def test_时钟健康检查报出时区() -> None:
 async def test_非法时区在启动期失败() -> None:
     """时区解析放 start()：非法值在启动期 fail fast，不回落到 UTC 硬跑。"""
     mgr = ServiceManager(Settings(clock=ClockSettings(tz="Not/AZone")))
-    _ = mgr.register(ClockService)
+    mgr.register(ClockService)
 
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
@@ -514,6 +541,6 @@ async def test_非法时区在启动期失败() -> None:
 def test_容器把配置节点注入时钟服务() -> None:
     own = Settings(clock=ClockSettings(tz="Asia/Shanghai"))
     mgr = ServiceManager(own)
-    _ = mgr.register(ClockService)
+    mgr.register(ClockService)
 
     assert mgr.get(ClockService).now().utcoffset() == timedelta(hours=8)

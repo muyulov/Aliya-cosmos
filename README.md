@@ -341,7 +341,7 @@ class CacheService(Service):
 2. 在 `core/service/registry.py` 里注册**类型**（不是实例）：
 
 ```python
-_ = manager.register(CacheService)
+manager.register(CacheService)  # 支持一次传入多个类型：register(A, B, C)，顺序即同层内的启动先后
 ```
 
 约定：
@@ -368,7 +368,7 @@ _ = manager.register(CacheService)
 
 | 类型 | 触发条件 |
 | --- | --- |
-| `ServiceContractError` | 非 `Service` 子类、重复注册、装配后注册、构造器签名不可解释、声明与签名不一致 |
+| `ServiceContractError` | 非 `Service` 子类、重复注册（含同一次批量注册内重复）、装配后注册、构造器签名不可解释、声明与签名不一致 |
 | `ServiceNotRegisteredError` | `get()` 查的类型未注册 |
 | `MissingDependencyError` | `dependencies` 里的类型没注册 |
 | `CircularDependencyError` | 依赖成环 |

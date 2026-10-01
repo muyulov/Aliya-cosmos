@@ -139,18 +139,26 @@ class ServiceManager:
         self._order: list[type[Service]] = []
         #: 装配后按依赖分好的层，索引越小越靠前；启动时逐层推进
         self._levels: list[list[type[Service]]] = []
+        #: 装配后固化：服务类型 → 1-based 层号（日志字段，与层摘要口径一致）
+        self._level_of: dict[type[Service], int] = {}
         self._built: bool = False
 
     # ---------- 注册 ----------
 
-    def register(self, service_type: type[S]) -> type[S]:
-        """注册服务类型。非 Service 子类、重复注册、装配后注册都会抛错。"""
+    def register(self, *service_types: type[Service]) -> None:
+        """注册一个或多个服务类型，登记顺序即传入顺序（决定同层内的先后）。
+
+        非 Service 子类、重复注册（含同一次调用内重复传入）、装配后注册都会抛错。
+        整批是原子的：任一类型不合法就一个都不登记，不会留下部分注册。
+        """
         self._ensure_not_built()
-        _ensure_service_subclass(service_type)
-        if service_type in self._types:
-            raise ServiceContractError(f"服务类型重复注册：{service_type.__name__}")
-        self._types.append(service_type)
-        return service_type
+        seen: set[type[Service]] = set()
+        for service_type in service_types:
+            _ensure_service_subclass(service_type)
+            if service_type in seen or service_type in self._types:
+                raise ServiceContractError(f"服务类型重复注册：{service_type.__name__}")
+            seen.add(service_type)
+        self._types.extend(service_types)
 
     # ---------- 查找 ----------
 

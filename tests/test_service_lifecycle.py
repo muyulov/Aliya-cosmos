@@ -121,8 +121,8 @@ class FailingGateB(Service):
 async def test_同层服务并发启动() -> None:
     """两个无依赖服务互等对方进入 start：串行则必然超时失败。"""
     mgr = ServiceManager()
-    _ = mgr.register(GateA)
-    _ = mgr.register(GateB)
+    mgr.register(GateA)
+    mgr.register(GateB)
 
     await mgr.start_all()
 
@@ -133,8 +133,8 @@ async def test_同层服务并发启动() -> None:
 async def test_跨层严格串行() -> None:
     """依赖必须先跑完，因此不同层不会并发。"""
     mgr = ServiceManager()
-    _ = mgr.register(InnerService)
-    _ = mgr.register(OuterService)
+    mgr.register(InnerService)
+    mgr.register(OuterService)
 
     await mgr.start_all()
 
@@ -144,8 +144,8 @@ async def test_跨层严格串行() -> None:
 async def test_同层某个服务失败时回滚且报错取先注册者() -> None:
     """同层两个都失败：报错取注册顺序最靠前的那个，保证多次运行结果一致。"""
     mgr = ServiceManager()
-    _ = mgr.register(FailingGateA)
-    _ = mgr.register(FailingGateB)
+    mgr.register(FailingGateA)
+    mgr.register(FailingGateB)
 
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
@@ -292,7 +292,7 @@ class HalfStartedOuter(Service):
 
 async def test_启动超时判定为失败() -> None:
     mgr = ServiceManager(_settings(start_timeout=0.05))
-    _ = mgr.register(SlowStartService)
+    mgr.register(SlowStartService)
 
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
@@ -305,8 +305,8 @@ async def test_启动超时判定为失败() -> None:
 
 async def test_启动超时回滚已启动的依赖() -> None:
     mgr = ServiceManager(_settings(start_timeout=0.05))
-    _ = mgr.register(InnerService)
-    _ = mgr.register(SlowDependentService)
+    mgr.register(InnerService)
+    mgr.register(SlowDependentService)
 
     with pytest.raises(ServiceStartError):
         await mgr.start_all()
@@ -318,7 +318,7 @@ async def test_启动超时回滚已启动的依赖() -> None:
 async def test_服务级_none_覆盖全局超时() -> None:
     """全局只给 0.05 秒，该服务声明 None → 不限制，睡 0.1 秒也能成功。"""
     mgr = ServiceManager(_settings(start_timeout=0.05))
-    _ = mgr.register(NoLimitService)
+    mgr.register(NoLimitService)
 
     await mgr.start_all()
 
@@ -330,7 +330,7 @@ async def test_未覆盖时跟随全局超时() -> None:
     assert SlowStartService.start_timeout is UNSET
 
     mgr = ServiceManager(_settings(start_timeout=0.05))
-    _ = mgr.register(SlowStartService)
+    mgr.register(SlowStartService)
 
     with pytest.raises(ServiceStartError):
         await mgr.start_all()
@@ -338,8 +338,8 @@ async def test_未覆盖时跟随全局超时() -> None:
 
 async def test_关闭超时不阻断其他服务() -> None:
     mgr = ServiceManager(_settings(stop_timeout=0.05))
-    _ = mgr.register(QuickService)
-    _ = mgr.register(HangingStopService)
+    mgr.register(QuickService)
+    mgr.register(HangingStopService)
 
     await mgr.start_all()
     await mgr.stop_all()  # 不能抛错
@@ -354,7 +354,7 @@ async def test_关闭超时会写进日志字段(tmp_path: Path) -> None:
     files = setup_logging(cfg)
 
     mgr = ServiceManager(_settings(stop_timeout=0.05))
-    _ = mgr.register(HangingStopService)
+    mgr.register(HangingStopService)
 
     await mgr.start_all()
     await mgr.stop_all()
@@ -373,8 +373,8 @@ async def test_启动被取消时回滚已启动的服务() -> None:
     取消任务：此时 `started` 只能靠 `_start_one` 在协程内部登记才拿得到。
     """
     mgr = ServiceManager()
-    _ = mgr.register(CancelProbeQuick)
-    _ = mgr.register(CancelProbeHanging)
+    mgr.register(CancelProbeQuick)
+    mgr.register(CancelProbeHanging)
 
     task = asyncio.create_task(mgr.start_all())
     # 第 1 层的 start 被调用，说明第 0 层 gather 已返回、登记已完成（层间串行）
@@ -392,7 +392,7 @@ async def test_启动被取消时回滚已启动的服务() -> None:
 async def test_启动失败的服务自身也会被回滚清理() -> None:
     """回归：失败者不在「已启动」名单里，但它同样需要 stop() 回收半途资源。"""
     mgr = ServiceManager()
-    _ = mgr.register(HalfStartedService)
+    mgr.register(HalfStartedService)
 
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
@@ -406,8 +406,8 @@ async def test_启动失败的服务自身也会被回滚清理() -> None:
 async def test_回滚同时覆盖成功者与失败者() -> None:
     """回滚名单含失败者，且按「动过」的顺序逆序清理。"""
     mgr = ServiceManager()
-    _ = mgr.register(HalfStartedInner)
-    _ = mgr.register(HalfStartedOuter)
+    mgr.register(HalfStartedInner)
+    mgr.register(HalfStartedOuter)
 
     with pytest.raises(ServiceStartError):
         await mgr.start_all()
@@ -471,7 +471,7 @@ class RerunOuter(Service):
 async def test_业务_timeout_不被当成启动超时() -> None:
     """回归：业务抛的 TimeoutError 与框架超时同型，不能被伪装成「启动超时」。"""
     mgr = ServiceManager()
-    _ = mgr.register(BusinessTimeoutOnStart)
+    mgr.register(BusinessTimeoutOnStart)
 
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
@@ -486,7 +486,7 @@ async def test_业务_timeout_不被当成关闭超时(tmp_path: Path) -> None:
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(BusinessTimeoutOnStop)
+    mgr.register(BusinessTimeoutOnStop)
 
     await mgr.start_all()
     await mgr.stop_all()
@@ -500,7 +500,7 @@ async def test_业务_timeout_不被当成关闭超时(tmp_path: Path) -> None:
 async def test_框架超时用独立的异常类型标记() -> None:
     """框架侧超时抛 HookTimeoutError，与业务 TimeoutError 从类型上分开。"""
     mgr = ServiceManager(_settings(start_timeout=0.05))
-    _ = mgr.register(SlowStartService)
+    mgr.register(SlowStartService)
 
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
@@ -516,8 +516,8 @@ async def test_已运行的依赖在启动失败时也会被回滚() -> None:
     RUNNING——而 lifespan.__aenter__ 抛错时 __aexit__ 不执行、stop_all 不会被调用。
     """
     mgr = ServiceManager()
-    _ = mgr.register(RerunInner)
-    _ = mgr.register(RerunOuter)
+    mgr.register(RerunInner)
+    mgr.register(RerunOuter)
     await mgr.start_all()
 
     # 白盒让外层需要重新启动（依赖保持 RUNNING）
@@ -551,7 +551,7 @@ async def test_启停日志走服务门面带前缀与耗时(tmp_path: Path) -> 
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(QuickService)
+    mgr.register(QuickService)
     await mgr.start_all()
     await mgr.stop_all()
     logger.remove()
@@ -571,8 +571,8 @@ async def test_同层日志列出服务名与一基层号(tmp_path: Path) -> Non
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(GateA)
-    _ = mgr.register(GateB)
+    mgr.register(GateA)
+    mgr.register(GateB)
     await mgr.start_all()
     logger.remove()
 
@@ -589,7 +589,7 @@ async def test_单服务层不重复打层摘要(tmp_path: Path) -> None:
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(QuickService)
+    mgr.register(QuickService)
     await mgr.start_all()
     logger.remove()
 
@@ -604,8 +604,8 @@ async def test_启动汇总带总耗时(tmp_path: Path) -> None:
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(InnerService)
-    _ = mgr.register(OuterService)
+    mgr.register(InnerService)
+    mgr.register(OuterService)
     await mgr.start_all()
     logger.remove()
 
@@ -615,13 +615,49 @@ async def test_启动汇总带总耗时(tmp_path: Path) -> None:
     assert "耗时毫秒: " in text.split("全部服务启动完成", 1)[1]
 
 
-async def test_启动失败日志也带耗时(tmp_path: Path) -> None:
-    """失败与成功同形：既有 `错误=` 也有数值耗时，能看出是立刻失败还是卡了很久。"""
+async def test_停止汇总带总耗时(tmp_path: Path) -> None:
+    """与启动汇总对齐：关闭慢时同样要有能回答「为什么慢」的墙钟时间。"""
     cfg = _log_cfg(tmp_path)
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(BusinessTimeoutOnStart)
+    mgr.register(InnerService)
+    mgr.register(OuterService)
+    await mgr.start_all()
+    await mgr.stop_all()
+    logger.remove()
+
+    text = files.app.read_text(encoding="utf-8")
+    assert "全部服务已停止" in text
+    assert "耗时毫秒: " in text.split("全部服务已停止", 1)[1]
+
+
+async def test_生命周期日志带依赖层号(tmp_path: Path) -> None:
+    """层号让并发启动的交错日志可按依赖层归因（1-based，与层摘要口径一致）。"""
+    cfg = _log_cfg(tmp_path)
+    files = setup_logging(cfg)
+
+    mgr = ServiceManager()
+    mgr.register(InnerService)
+    mgr.register(OuterService)
+    await mgr.start_all()
+    await mgr.stop_all()
+    logger.remove()
+
+    text = files.app.read_text(encoding="utf-8")
+    # 两个服务各占一层：没有「同层服务启动完成」摘要来混入 层= 的来源
+    assert "层: 1" in text.split("[inner] 服务已启动", 1)[1]
+    assert "层: 2" in text.split("[outer] 服务已启动", 1)[1]
+    assert "层: 2" in text.split("[outer] 服务已停止", 1)[1]
+
+
+async def test_启动失败日志也带耗时(tmp_path: Path) -> None:
+    """失败与成功同形：既有 `错误类型 / 错误消息` 也有数值耗时，能看出是立刻失败还是卡了很久。"""
+    cfg = _log_cfg(tmp_path)
+    files = setup_logging(cfg)
+
+    mgr = ServiceManager()
+    mgr.register(BusinessTimeoutOnStart)
 
     with pytest.raises(ServiceStartError):
         await mgr.start_all()
@@ -640,8 +676,8 @@ async def test_回滚会留痕(tmp_path: Path) -> None:
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(HalfStartedInner)
-    _ = mgr.register(HalfStartedOuter)
+    mgr.register(HalfStartedInner)
+    mgr.register(HalfStartedOuter)
 
     with pytest.raises(ServiceStartError):
         await mgr.start_all()
@@ -662,7 +698,7 @@ async def test_超时日志不重复打错误类型(tmp_path: Path) -> None:
     files = setup_logging(cfg)
 
     mgr = ServiceManager(_settings(start_timeout=0.05))
-    _ = mgr.register(SlowStartService)
+    mgr.register(SlowStartService)
 
     with pytest.raises(ServiceStartError):
         await mgr.start_all()
@@ -726,8 +762,8 @@ async def test_回滚时关闭超时只记日志不阻断(tmp_path: Path) -> Non
     files = setup_logging(cfg)
 
     mgr = ServiceManager(_settings(stop_timeout=0.05))
-    _ = mgr.register(RollbackHangingStop)
-    _ = mgr.register(RollbackFailStart)
+    mgr.register(RollbackHangingStop)
+    mgr.register(RollbackFailStart)
 
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
@@ -746,8 +782,8 @@ async def test_回滚时关闭异常只记日志不阻断(tmp_path: Path) -> Non
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(RollbackRaisingStop)
-    _ = mgr.register(RollbackFailStart)
+    mgr.register(RollbackRaisingStop)
+    mgr.register(RollbackFailStart)
 
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
@@ -764,8 +800,8 @@ async def test_回滚时关闭异常只记日志不阻断(tmp_path: Path) -> Non
 async def test_健康检查抛错时兜底成不健康() -> None:
     """回归：单个服务 health() 抛错只影响它自己，其余服务照常出结果。"""
     mgr = ServiceManager()
-    _ = mgr.register(BoomHealthService)
-    _ = mgr.register(QuickService)
+    mgr.register(BoomHealthService)
+    mgr.register(QuickService)
 
     await mgr.start_all()
     statuses = await mgr.health()
@@ -781,7 +817,7 @@ async def test_健康检查抛错时兜底成不健康() -> None:
 async def test_lifespan_进入启动退出关闭() -> None:
     """回归：lifespan 是入口唯一的装配面——进则全启，出则全停。"""
     mgr = ServiceManager()
-    _ = mgr.register(InnerService)
+    mgr.register(InnerService)
 
     async with mgr.lifespan() as entered:
         assert entered is mgr
@@ -793,7 +829,7 @@ async def test_lifespan_进入启动退出关闭() -> None:
 async def test_lifespan_体内抛错也会关闭服务() -> None:
     """回归：体里抛错时 `finally` 仍要停下服务，不能把进程留在 RUNNING。"""
     mgr = ServiceManager()
-    _ = mgr.register(InnerService)
+    mgr.register(InnerService)
 
     with pytest.raises(RuntimeError, match="体内炸了"):
         async with mgr.lifespan():

@@ -136,7 +136,7 @@ def _log_cfg(tmp_path: Path) -> LogSettings:
 
 async def test_未配key时start不建内核() -> None:
     mgr = ServiceManager(Settings(embedding=_settings(api_key="")))
-    _ = mgr.register(EmbeddingService)
+    mgr.register(EmbeddingService)
     await mgr.start_all()
 
     service = mgr.get(EmbeddingService)
@@ -196,7 +196,7 @@ async def test_stop幂等() -> None:
 async def test_停止后health报未运行而不是未配密钥() -> None:
     """stop() 之后内核被清空，但密钥是配了的——不能再说「未配置 api_key」。"""
     mgr = ServiceManager(Settings(embedding=_settings()))
-    _ = mgr.register(EmbeddingService)
+    mgr.register(EmbeddingService)
     await mgr.start_all()
     await mgr.stop_all()
 

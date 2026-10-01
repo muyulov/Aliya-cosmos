@@ -143,9 +143,9 @@ def _clear_events() -> None:
 
 async def test_按依赖顺序启动() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(CacheService)
-    _ = mgr.register(ApiService)
+    mgr.register(DbService)
+    mgr.register(CacheService)
+    mgr.register(ApiService)
 
     await mgr.start_all()
 
@@ -155,9 +155,9 @@ async def test_按依赖顺序启动() -> None:
 async def test_依赖被注入为同一个实例() -> None:
     """容器注入的是注册的那个实例，而不是新建的副本。"""
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(CacheService)
-    _ = mgr.register(ApiService)
+    mgr.register(DbService)
+    mgr.register(CacheService)
+    mgr.register(ApiService)
 
     db = mgr.get(DbService)
     cache = mgr.get(CacheService)
@@ -170,9 +170,9 @@ async def test_依赖被注入为同一个实例() -> None:
 
 async def test_逆序关闭() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(CacheService)
-    _ = mgr.register(ApiService)
+    mgr.register(DbService)
+    mgr.register(CacheService)
+    mgr.register(ApiService)
 
     await mgr.start_all()
     await mgr.stop_all()
@@ -184,9 +184,9 @@ async def test_逆序关闭() -> None:
 async def test_重复启动后关闭仍严格逆序() -> None:
     """回归：旧实现只记「本次新启动」的服务，二次 start_all 后关闭会退化。"""
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(CacheService)
-    _ = mgr.register(ApiService)
+    mgr.register(DbService)
+    mgr.register(CacheService)
+    mgr.register(ApiService)
 
     await mgr.start_all()
     await mgr.start_all()
@@ -198,8 +198,8 @@ async def test_重复启动后关闭仍严格逆序() -> None:
 
 async def test_启动失败时回滚已启动服务() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(FailingDbService)
-    _ = mgr.register(FailingApiService)
+    mgr.register(FailingDbService)
+    mgr.register(FailingApiService)
 
     with pytest.raises(ServiceStartError) as excinfo:
         await mgr.start_all()
@@ -212,7 +212,7 @@ async def test_启动失败时回滚已启动服务() -> None:
 
 async def test_启停幂等() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
+    mgr.register(DbService)
     svc = mgr.get(DbService)
 
     await mgr.start_all()
@@ -226,8 +226,8 @@ async def test_启停幂等() -> None:
 
 async def test_检测循环依赖() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(CycleA)
-    _ = mgr.register(CycleB)
+    mgr.register(CycleA)
+    mgr.register(CycleB)
 
     with pytest.raises(CircularDependencyError):
         await mgr.start_all()
@@ -235,7 +235,7 @@ async def test_检测循环依赖() -> None:
 
 async def test_检测缺失依赖() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(OrphanService)
+    mgr.register(OrphanService)
 
     with pytest.raises(MissingDependencyError):
         await mgr.start_all()
@@ -243,8 +243,8 @@ async def test_检测缺失依赖() -> None:
 
 async def test_关闭异常不影响其他服务() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(BadStopService)
+    mgr.register(DbService)
+    mgr.register(BadStopService)
 
     await mgr.start_all()
     await mgr.stop_all()
@@ -255,9 +255,9 @@ async def test_关闭异常不影响其他服务() -> None:
 
 async def test_健康检查聚合() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(CacheService)
-    _ = mgr.register(ApiService)
+    mgr.register(DbService)
+    mgr.register(CacheService)
+    mgr.register(ApiService)
 
     before = await mgr.health()
     assert all(not item.healthy for item in before)
@@ -270,9 +270,9 @@ async def test_健康检查聚合() -> None:
 
 def test_按依赖分层且同层按注册顺序() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(MetricsService)  # 无依赖 → 第 0 层
-    _ = mgr.register(DbService)  # 无依赖 → 第 0 层
-    _ = mgr.register(CacheService)  # 依赖 DbService → 第 1 层
+    mgr.register(MetricsService)  # 无依赖 → 第 0 层
+    mgr.register(DbService)  # 无依赖 → 第 0 层
+    mgr.register(CacheService)  # 依赖 DbService → 第 1 层
     _ = mgr.services  # 触发装配
 
     # 白盒：分层结构没有公开出口，而它是并发启动的唯一依据，必须直接断言；
@@ -285,10 +285,10 @@ def test_按依赖分层且同层按注册顺序() -> None:
 def test_扁平顺序按层分组() -> None:
     """同层服务连续排列，让 services / names 的顺序与"启动即分批"对应。"""
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(MetricsService)
-    _ = mgr.register(CacheService)
-    _ = mgr.register(ApiService)
+    mgr.register(DbService)
+    mgr.register(MetricsService)
+    mgr.register(CacheService)
+    mgr.register(ApiService)
 
     # names 是 Sequence，运行期是 tuple，必须转成 list 再比
     assert list(mgr.names) == ["db", "metrics", "cache", "api"]
@@ -296,10 +296,10 @@ def test_扁平顺序按层分组() -> None:
 
 async def test_分层后关闭顺序仍严格逆序() -> None:
     mgr = ServiceManager()
-    _ = mgr.register(DbService)
-    _ = mgr.register(MetricsService)
-    _ = mgr.register(CacheService)
-    _ = mgr.register(ApiService)
+    mgr.register(DbService)
+    mgr.register(MetricsService)
+    mgr.register(CacheService)
+    mgr.register(ApiService)
 
     await mgr.start_all()
     await mgr.stop_all()

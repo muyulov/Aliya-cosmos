@@ -116,8 +116,8 @@ async def test_健康检查日志只在异常时带状态与详情(tmp_path: Pat
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(HealthyProbe)
-    _ = mgr.register(UnhealthyProbe)
+    mgr.register(HealthyProbe)
+    mgr.register(UnhealthyProbe)
     # 白盒：直接调入口里的健康检查日志函数（本用例就是为它写的）
     await main_module._report_health(mgr)  # pyright: ignore[reportPrivateUsage]
     logger.remove()
@@ -155,7 +155,7 @@ async def test_健康检查日志带出服务自报的额外字段(tmp_path: Pat
     files = setup_logging(cfg)
 
     mgr = ServiceManager()
-    _ = mgr.register(ExtraProbe)
+    mgr.register(ExtraProbe)
     await main_module._report_health(mgr)  # pyright: ignore[reportPrivateUsage]
     logger.remove()
 
@@ -186,7 +186,7 @@ def test_启动失败时记录收口日志并以非零码退出(
     monkeypatch.setattr(main_module, "get_settings", lambda: Settings(log=cfg))
 
     mgr = ServiceManager()
-    _ = mgr.register(BoomProbe)
+    mgr.register(BoomProbe)
 
     def _fake_build(_settings: Settings | None = None) -> ServiceManager:
         return mgr
