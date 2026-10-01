@@ -202,5 +202,7 @@ def test_启动失败时记录收口日志并以非零码退出(
     assert excinfo.value.code == 1
     text = max((tmp_path / "logs").glob("app-*.log")).read_text(encoding="utf-8")
     assert "应用启动失败，进程退出" in text
-    assert "RuntimeError: 启动就炸" in text
+    assert "错误类型: RuntimeError" in text
+    assert "错误消息: 启动就炸" in text
+    assert "RuntimeError: 启动就炸" in text  # 堆栈里仍能直接看到原始异常
     assert "应用已关闭" not in text

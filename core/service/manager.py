@@ -223,7 +223,7 @@ class ServiceManager:
 
                 begin = time.perf_counter()
                 outcomes = await asyncio.gather(
-                    *(self._start_one(service, attempted) for service in pending),
+                    *(self._start_one(service, index + 1, attempted) for service in pending),
                     return_exceptions=True,
                 )
 
@@ -257,8 +257,10 @@ class ServiceManager:
             耗时毫秒=_elapsed_ms(started_at),
         )
 
-    async def _start_one(self, service: Service, attempted: list[Service]) -> None:
+    async def _start_one(self, service: Service, level: int, attempted: list[Service]) -> None:
         """启动单个服务；超时与失败都收敛成 ServiceStartError。
+
+        level 是 1-based 依赖层号：同层并发时日志交错，带层号才能把每条归因到层。
 
         登记发生在所有失败可能发生之前：`start()` 抛错或超时（协程被取消）时，
         服务可能已经申请了连接、句柄这类资源，只有记进 `attempted` 才能在回滚时
@@ -276,14 +278,14 @@ class ServiceManager:
             # HookTimeoutError 自身只有「超过 Ns」，这里换成带阶段说明的 cause：
             # ServiceStartError 的消息会拼上 cause 的 str()。
             cause = HookTimeoutError(f"启动超时，超过 {timeout}s")
-            # 不带 错误= 字段：超时的「错误」就是超时本身，类型与秒数在消息和
-            # 超时秒数 里已经说清，再拼一遍 HookTimeoutError 只是噪声。
-            service.log_error("服务启动超时", 超时秒数=timeout)
+            # 不带 错误类型 / 错误消息 字段：超时的「错误」就是超时本身，类型与秒数
+            # 在消息和 超时秒数 里已经说清，再拼一遍 HookTimeoutError 只是噪声。
+            service.log_error("服务启动超时", 层=level, 超时秒数=timeout)
             raise ServiceStartError(service.label, cause) from exc
         except Exception as exc:
             service.state = ServiceState.FAILED
             # 失败也带耗时：与「服务已启动」同形，并回答「是立刻失败还是卡了很久才失败」
-            service.log_error("服务启动失败", exc, 耗时毫秒=_elapsed_ms(begin))
+            service.log_error("服务启动失败", exc, 层=level, 耗时毫秒=_elapsed_ms(begin))
             raise ServiceStartError(service.label, exc) from exc
         except BaseException:
             # 取消等非 Exception：必须继续冒泡，但状态不能留在 STARTING
@@ -293,7 +295,7 @@ class ServiceManager:
         service.state = ServiceState.RUNNING
         # 用服务自己的门面：与失败日志同形（同一条 [label] 消息前缀），
         # 单服务耗时也让「同层里是谁慢」有据可查
-        service.log.info("服务已启动", face=faces.START, 耗时毫秒=_elapsed_ms(begin))
+        service.log.info("服务已启动", face=faces.START, 层=level, 耗时毫秒=_elapsed_ms(begin))
 
     async def stop_all(self) -> None:
         """按启动的逆序关闭所有服务。
@@ -304,11 +306,14 @@ class ServiceManager:
         """
         if not self._built:
             return
+        # 总耗时与「全部服务启动完成」对齐：关闭慢时同样要有能回答「为什么慢」的数字
+        started_at = time.perf_counter()
         for service_type in reversed(self._order):
             service = self._instances[service_type]
             if service.state in (ServiceState.STOPPED, ServiceState.CREATED):
                 continue
 
+            level = self._level_of[service_type]
             service.state = ServiceState.STOPPING
             timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
             begin = time.perf_counter()
@@ -316,18 +321,23 @@ class ServiceManager:
                 await _call_with_timeout(service.stop, timeout)
             except HookTimeoutError:
                 service.state = ServiceState.FAILED
-                service.log_error("服务关闭超时", 超时秒数=timeout)
+                service.log_error("服务关闭超时", 层=level, 超时秒数=timeout)
                 continue
             except Exception as exc:
-                # 关闭阶段不阻断其他服务，仅记录
+                # 关闭阶段不阻断其他服务，仅记录；耗时与「服务启动失败」同形
                 service.state = ServiceState.FAILED
-                service.log_error("服务关闭异常", exc)
+                service.log_error("服务关闭异常", exc, 层=level, 耗时毫秒=_elapsed_ms(begin))
                 continue
 
             service.state = ServiceState.STOPPED
-            service.log.info("服务已停止", face=faces.BYE, 耗时毫秒=_elapsed_ms(begin))
+            service.log.info("服务已停止", face=faces.BYE, 层=level, 耗时毫秒=_elapsed_ms(begin))
 
-        log.info("全部服务已停止", face=faces.BYE, 服务数=len(self._order))
+        log.info(
+            "全部服务已停止",
+            face=faces.BYE,
+            服务数=len(self._order),
+            耗时毫秒=_elapsed_ms(started_at),
+        )
 
     async def _rollback(self, attempted: Sequence[Service]) -> None:
         """逆序清理本次动过的服务；同样套 stop 超时，但不阻断其余回滚。
@@ -337,31 +347,40 @@ class ServiceManager:
         安全地作用在「从未成功启动过」的服务上。
         失败者的状态保持 FAILED——那是它的终态标记，清理成功不该把它抹掉。
         """
+        started_at = time.perf_counter()
         for service in reversed(attempted):
+            # 层号从注册类型反查：attempted 里存的是实例，运行时类型即注册类型
+            level = self._level_of[type(service)]
             # 启动失败者的 FAILED 是终态标记：清理成功不该把它抹成 STOPPED
             was_failed = service.state is ServiceState.FAILED
             service.state = ServiceState.STOPPING
             timeout = _resolve_timeout(service.stop_timeout, self._service_settings.stop_timeout)
+            begin = time.perf_counter()
             try:
                 await _call_with_timeout(service.stop, timeout)
             except HookTimeoutError:
                 service.state = ServiceState.FAILED
-                service.log_error("回滚时服务关闭超时", 超时秒数=timeout)
+                service.log_error("回滚时服务关闭超时", 层=level, 超时秒数=timeout)
             except Exception as exc:
                 service.state = ServiceState.FAILED
-                service.log_error("回滚时服务关闭异常", exc)
+                service.log_error("回滚时服务关闭异常", exc, 层=level, 耗时毫秒=_elapsed_ms(begin))
             else:
                 service.state = ServiceState.FAILED if was_failed else ServiceState.STOPPED
                 # 从未 RUNNING 的服务谈不上「已关闭」：它只是把 start() 半途申请的
                 # 资源回收掉了，措辞与真正关停在跑的服务分开，免得日志里
                 # 「服务启动失败」后面紧跟一句「已关闭」自相矛盾。
                 message = "回滚时已清理启动失败的服务" if was_failed else "回滚时服务已关闭"
-                service.log.info(message, face=faces.BYE)
+                service.log.info(message, face=faces.BYE, 层=level, 耗时毫秒=_elapsed_ms(begin))
 
-        # 回滚没有「全部服务已停止」那样的收尾，这里补一句，
+        # 回滚没有「全部服务已停止」那样的收尾，这里补一句（含总耗时），
         # 免得日志断在半路、看不出清理是否已经做完；颜文字不用默认的 CHEER，
         # 这是异常路径的收尾，不是喜讯
-        log.info("回滚完成", face=faces.THINK, 服务数=len(attempted))
+        log.info(
+            "回滚完成",
+            face=faces.THINK,
+            服务数=len(attempted),
+            耗时毫秒=_elapsed_ms(started_at),
+        )
 
     # ---------- 健康检查 ----------
 
@@ -439,6 +458,9 @@ class ServiceManager:
         self._service_settings = settings.service
         self._instances = instances
         self._levels = levels
+        self._level_of = {
+            service_type: index + 1 for index, level in enumerate(levels) for service_type in level
+        }
         # 扁平序按层展开：仍是合法拓扑序，reversed 仍是合法逆拓扑序，
         # 因此 services / names 的展示顺序与 stop_all 的关闭顺序都不用改
         self._order = [service_type for level in levels for service_type in level]

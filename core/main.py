@@ -105,7 +105,11 @@ def main() -> None:
     except Exception as exc:
         # 装配 / 启动失败是 fail fast：日志要收口（含堆栈）再以非零码退出。
         # 不捕获的话只剩一段裸 traceback，日志文件里也没有「这次是整体失败」的结论。
-        log.exception("应用启动失败，进程退出", 错误=f"{type(exc).__name__}: {exc}")
+        log.exception(
+            "应用启动失败，进程退出",
+            错误类型=type(exc).__name__,
+            错误消息=str(exc),
+        )
         raise SystemExit(1) from exc
     log.info("应用已关闭", face=faces.BYE, 应用=settings.app.app_name)
 

@@ -665,7 +665,8 @@ async def test_启动失败日志也带耗时(tmp_path: Path) -> None:
 
     text = files.app.read_text(encoding="utf-8")
     assert "[business-timeout] 服务启动失败" in text
-    assert "错误: TimeoutError: 业务侧 socket 超时" in text
+    assert "错误类型: TimeoutError" in text
+    assert "错误消息: 业务侧 socket 超时" in text
     # 该场景没有成功日志、也没有层摘要，带 耗时毫秒 的只有这条失败日志
     assert "耗时毫秒: " in text
 
@@ -792,7 +793,9 @@ async def test_回滚时关闭异常只记日志不阻断(tmp_path: Path) -> Non
     assert excinfo.value.label == "rollback-fail"
     text = files.app.read_text(encoding="utf-8")
     assert "[rollback-raise] 回滚时服务关闭异常" in text
-    assert "错误: RuntimeError: 清理失败" in text
+    assert "错误类型: RuntimeError" in text
+    assert "错误消息: 清理失败" in text
+    assert "耗时毫秒: " in text  # 关闭异常与「服务启动失败」同形，也带耗时
     assert "回滚完成" in text  # 单个服务清理失败不阻断整轮回滚
     assert mgr.get(RollbackRaisingStop).state is ServiceState.FAILED
 
