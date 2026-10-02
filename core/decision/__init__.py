@@ -9,7 +9,7 @@
     }
 
 三原语是 Jev 与 Laya 共用的线协议，可以混在同一趟请求里问完；
-laya 与 jev 只是两个端点，等 DecisionService 落地后用 backend= 选。
+laya 与 jev 只是两个端点，交给 DecisionService 的 backend= 选（默认 laya）。
 """
 
 from core.decision.client import SYSTEMONE_PATH, build_client
