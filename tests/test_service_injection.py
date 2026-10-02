@@ -297,12 +297,21 @@ async def test_默认注册表装配后可启动并健康() -> None:
 
     assert mgr.get(ClockService).running is True
     statuses = await mgr.health()
-    assert [status.name for status in statuses] == ["clock", "embedding", "llm"]
-    # 三个内置服务都自报身份：健康日志里能直接看出接的模型 / 端点 / 时区
+    assert [status.name for status in statuses] == ["clock", "embedding", "llm", "decision"]
+    # 内置服务都自报身份：健康日志里能直接看出接的模型 / 端点 / 时区
     by_name = {status.name: status for status in statuses}
     assert "时区" in by_name["clock"].extra
     assert "模型" in by_name["embedding"].extra
     assert "对话模型" in by_name["llm"].extra
+    assert "jev端点" in by_name["decision"].extra
+
+
+def test_注册表包含判断服务() -> None:
+    """回归：判断服务必须装进默认注册表，否则业务代码取不到它。"""
+    manager = build_manager()
+
+    types = [service_type.name for service_type in manager._types]  # pyright: ignore[reportPrivateUsage]
+    assert "decision" in types
 
 
 async def test_健康检查用展示名() -> None:

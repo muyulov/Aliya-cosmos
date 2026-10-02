@@ -39,11 +39,12 @@ core/
   config/        配置层：YAML 骨架加载与占位符插值
   embedding/     向量层：单条 / 批量文本向量化
   llm/           LLM 层：对话 / 流式 / 结构化 / 工具调用 / 多模态
+  decision/      判断层：批量提问与 choice / score / noul 三原语
 data/           配置与运行数据：config/cosmos.yaml 为配置骨架，可安全提交
 tests/           测试
 ```
 
-依赖方向单向：`service → (config, logger)`、`embedding → (config, logger, service)`、`llm → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
+依赖方向单向：`service → (config, logger)`、`embedding / llm / decision → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm` / `decision`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
 
 ## 配置
 
@@ -122,6 +123,17 @@ log:
 | `structured_mode` | `json_schema` | 结构化输出模式，兼容端点不支持时改 `json_object` |
 | `temperature` | `null` | 温度，`null` 表示不传该参数（用服务端默认） |
 | `max_tokens` | `null` | 最大输出 token，`null` 表示不传该参数 |
+
+`decision.jev`（云端）与 `decision.laya`（本地 laya-serve）是两个端点，字段完全相同，同一套 `/systemone` 协议；`base_url` 只写到 `/v1` 为止，路径 `/systemone` 由代码补上：
+
+| 端点字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `false` | 是否启用该端点；两个端点默认都关着，进程照常启动，调用时才报未启用 |
+| `base_url` | jev `https://api.typesafe.ai/v1` / laya `http://127.0.0.1:8000/v1` | 端点地址，只写到 `/v1`，路径 `/systemone` 由代码补 |
+| `api_key` | 空 | 密钥，YAML 里写 `${TYPESAFE_API_KEY:}` / `${LAYA_API_KEY:}` 由 `.env` 提供；留空则不发 `Authorization` 头（laya-serve 默认不要求认证） |
+| `model` | jev `jev-latest` / laya 空 | 该端点的模型；Jev 必填（空会 422），Laya 留空表示不带 `model` 字段、交给 Router 按语种自动选 checkpoint |
+| `timeout` | `60` | 单次请求超时秒数，必须为正数 |
+| `retries` | `2` | 429 / 529 的退避重试次数，`0` 关闭 |
 
 ### 失败行为
 
@@ -314,6 +326,58 @@ async def main(svc: EmbeddingService, texts: list[str]) -> None:
 | `EmbeddingTimeoutError` | 请求超时 |
 | `EmbeddingConnectionError` | 连不上端点（超时除外） |
 | `EmbeddingResponseError` | 返回体与请求对不上：条数不符 / `index` 越界或重复 / 空向量 / 声明维度不符 |
+
+## 判断层
+
+`DecisionService` 把「让模型做一次判断」收成一个服务，业务代码不直接接触 HTTP。两个端点（jev 云端 / laya 本地）走**同一套 `/systemone` 协议、字段完全相同**——换 `base_url` 即可切换供应商。`backend` 显式选端点（默认 `laya`，本地优先：免费、数据不出域），**层内不做兜底**。
+
+```python
+from core.decision import DecisionService, choice, noul, score
+
+
+async def main(svc: DecisionService, message: str) -> None:
+    # 批量：一次前向把三题问完（协议的延迟优势就在这里）
+    result = await svc.predict(
+        message,
+        {
+            "部门": choice("归哪个部门？", {"billing": "账单", "technical": "技术故障"}),
+            "愤怒": score("愤怒程度？", ["平静", "不满", "愤怒"]),
+            "退款": noul("是否明确要求退款？", true="明确要求", false="没提"),
+        },
+    )
+    department = result.answers["部门"]
+
+    # 便捷方法：一次只问一题
+    picked = await svc.choose(message, "归哪个部门？", {"billing": "账单", "technical": "技术"})
+    anger = await svc.rate(message, "愤怒程度？", ["平静", "不满", "愤怒"])
+    wants_refund = await svc.ask(message, "是否明确要求退款？")
+
+    # 换后端：默认 laya（本地），要云端就传 backend
+    on_cloud = await svc.ask(message, "是否明确要求退款？", backend="jev")
+```
+
+约定：
+
+| 约定 | 说明 |
+| --- | --- |
+| 不记正文 | 日志只记模型 / 端点 / 问题数 / 耗时 / token；`state` 与 `questions` 的正文由调用方决定要不要自己记 |
+| `confidence` 不能跨后端比较 | Jev 的 `confidence` 是 `(n·p_max−1)/(n−1)`，Laya 是 `1−归一化熵`，两个数不是同一个量；阈值要按当前 `backend` 单独校准 |
+| 零样本质量很差 | 官方 model card 自述「Laya 是便于特化的基座，不是零样本决策引擎」（零样本准确率接近随机），判断结果必须配阈值或人工兜底 |
+| 两端点同协议 | jev 与 laya 走同一套 `/systemone` 协议、字段完全相同，换 `base_url` 即可切换供应商 |
+| `backend` 显式选 | 默认 `laya`（本地优先），要云端显式传 `backend="jev"` |
+| 层内不兜底 | 一个端点未启用时直接抛 `DecisionConfigError`，不会静默换另一头；`confidence` 跨端点语义不同，兜底必然出错 |
+| 缺端点不 fail fast | 两个端点都没启用时只让健康检查 unhealthy，进程照常启动，调用时才报未启用 |
+| 重试按状态码 | 429 / 529 按指数退避重试（次数由端点 `retries` 控制），其余 4xx / 5xx 不重试 |
+
+错误全部继承 `DecisionError`，原始 `httpx2` 异常挂在 `__cause__`：
+
+| 类型 | 触发条件 |
+| --- | --- |
+| `DecisionConfigError` | 调用的端点未启用 |
+| `DecisionRequestError` | 端点返回 4xx / 5xx（带 `status_code` / `endpoint` / `model` / `request_id`） |
+| `DecisionTimeoutError` | 请求超时 |
+| `DecisionConnectionError` | 连不上端点（超时除外） |
+| `DecisionResponseError` | 返回体不合法（非 JSON / 顶层不是对象 / 缺 answers / 答案字段不完整） |
 
 ## 如何新增一个服务
 
