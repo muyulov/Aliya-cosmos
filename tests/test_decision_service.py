@@ -171,21 +171,21 @@ async def test_连不上映射成连接错误() -> None:
 async def test_非法JSON报返回体错误() -> None:
     service = _service(lambda request: httpx2.Response(200, content=b"not json"))
 
-    with pytest.raises(DecisionResponseError):
+    with pytest.raises(DecisionResponseError, match="不是合法 JSON"):
         _ = await service.predict("state", {})
 
 
 async def test_顶层不是对象报返回体错误() -> None:
     service = _service(lambda request: httpx2.Response(200, json=[1, 2]))
 
-    with pytest.raises(DecisionResponseError):
+    with pytest.raises(DecisionResponseError, match="顶层不是对象"):
         _ = await service.predict("state", {})
 
 
 async def test_缺answers报返回体错误() -> None:
     service = _service(lambda request: httpx2.Response(200, json={"model": "m"}))
 
-    with pytest.raises(DecisionResponseError):
+    with pytest.raises(DecisionResponseError, match="缺少 answers"):
         _ = await service.predict("state", {})
 
 
@@ -284,4 +284,5 @@ async def test_重试会记日志(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
     _ = await _service(handler).predict("state", {})
 
+    assert len(calls) == 2
     assert "判断调用重试" in files.app.read_text(encoding="utf-8")
