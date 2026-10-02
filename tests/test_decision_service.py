@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from typing import cast
 
 import httpx2
 import pytest
 
 from core.config import DecisionSettings
-from core.decision import DecisionConfigError, DecisionResult, DecisionService, noul
+from core.decision import (
+    DecisionConfigError,
+    DecisionResponseError,
+    DecisionResult,
+    DecisionService,
+    noul,
+)
+from core.decision.service import _QID  # pyright: ignore[reportPrivateUsage]
 
 
 def _service(
@@ -58,6 +66,9 @@ async def test_predict_请求体与返回体() -> None:
     assert result.routing == {"model": "multilingual"}
     assert seen[0].url.path == "/v1/systemone"
     assert seen[0].method == "POST"
+    body = cast("dict[str, object]", json.loads(seen[0].content))
+    assert body["state"] == "我要退款"
+    assert body["questions"] == {"退款": {"type": "noul", "instructions": "是否要求退款？"}}
 
 
 async def test_laya默认端点且model为空时不带该字段() -> None:
@@ -106,3 +117,15 @@ async def test_未启用端点调用报配置错误() -> None:
         _ = await service.predict("state", {})
 
     assert excinfo.value.__cause__ is None
+
+
+async def test_答案不是对象时报返回体错误() -> None:
+    """回归：answers 只校验到「是不是 dict」，value 形态漏到下游会成 AttributeError。"""
+    service = _service(
+        lambda request: httpx2.Response(200, json={"model": "m", "answers": {_QID: 5}})
+    )
+
+    with pytest.raises(DecisionResponseError) as excinfo:
+        _ = await service.ask("state", "是否？")
+
+    assert "answer" in str(excinfo.value)

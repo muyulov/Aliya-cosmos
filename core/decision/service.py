@@ -339,11 +339,17 @@ class DecisionService(Service):
 
     @staticmethod
     def _answer(result: DecisionResult) -> dict[str, object]:
-        """取便捷方法那一题的答案。"""
+        """取便捷方法那一题的答案。
+
+        `_parse` 只保证 answers 本身是 dict，没管每个 value 的形态。这里补上：
+        value 不是对象（含键压根不在、`get` 返回 None 的情形）一律换
+        DecisionResponseError——否则下游 `answer.get(...)` 会对非 dict 调 `.get`，
+        把类型错误漏成 AttributeError。
+        """
         answer = result.answers.get(_QID)
-        if answer is None:
+        if not isinstance(answer, dict):
             raise DecisionResponseError(
-                f"返回体里没有 {_QID} 的答案（实到 {sorted(result.answers)}）"
+                f"返回体里 {_QID} 的答案不是对象（实到 {sorted(result.answers)}）"
             )
         return answer
 
