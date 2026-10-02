@@ -12,6 +12,15 @@
 laya 与 jev 只是两个端点，等 DecisionService 落地后用 backend= 选。
 """
 
+from core.decision.client import SYSTEMONE_PATH, build_client
+from core.decision.errors import (
+    DecisionConfigError,
+    DecisionConnectionError,
+    DecisionError,
+    DecisionRequestError,
+    DecisionResponseError,
+    DecisionTimeoutError,
+)
 from core.decision.questions import (
     ChoiceQuestion,
     NoulCriteria,
@@ -24,11 +33,19 @@ from core.decision.questions import (
 )
 
 __all__ = [
+    "SYSTEMONE_PATH",
     "ChoiceQuestion",
+    "DecisionConfigError",
+    "DecisionConnectionError",
+    "DecisionError",
+    "DecisionRequestError",
+    "DecisionResponseError",
+    "DecisionTimeoutError",
     "NoulCriteria",
     "NoulQuestion",
     "Question",
     "ScoreQuestion",
+    "build_client",
     "choice",
     "noul",
     "score",
