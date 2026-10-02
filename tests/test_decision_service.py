@@ -129,6 +129,21 @@ async def test_未启用端点调用报配置错误() -> None:
     assert excinfo.value.__cause__ is None
 
 
+async def test_显式选jev但未启用报配置错误() -> None:
+    """默认走 laya 那条不算数：层内不兜底，显式点名未启用的端点也要当场报错。
+
+    这里 laya 是启用的，如果实现里做了兜底（静默换另一头）就会悄悄成功——正是
+    设计上要避免的：两端 confidence 语义不同，换后端必然出错。
+    """
+    service = DecisionService(_enabled())
+    await service.start()
+
+    with pytest.raises(DecisionConfigError, match="jev"):
+        _ = await service.predict("state", {}, backend="jev")
+
+    await service.stop()
+
+
 async def test_答案不是对象时报返回体错误() -> None:
     """回归：answers 只校验到「是不是 dict」，value 形态漏到下游会成 AttributeError。"""
     service = _service(
@@ -177,6 +192,99 @@ async def test_非法JSON报返回体错误() -> None:
 
     with pytest.raises(DecisionResponseError, match="不是合法 JSON"):
         _ = await service.predict("state", {})
+
+
+async def test_响应体不是合法UTF8报返回体错误() -> None:
+    """回归：非 UTF-8 响应体抛的是 UnicodeDecodeError，不是 json.JSONDecodeError。
+
+    它抛在 `_body` 里、又在 `_wrap_errors` 之外，只收 JSONDecodeError 会裸抛出去。
+    b"\\xff\\xfe" 是 UTF-16LE 的 BOM，因此报错消息里带 utf-16-le，可据此确认
+    确实走的是 UnicodeDecodeError 那条 except 而不是别的路径。
+    """
+    service = _service(lambda request: httpx2.Response(200, content=b"\xff\xfe\xfa"))
+
+    with pytest.raises(DecisionResponseError, match="不是合法 JSON") as excinfo:
+        _ = await service.predict("state", {})
+
+    assert isinstance(excinfo.value.__cause__, UnicodeDecodeError)
+
+
+async def test_其余请求错误映射成连接错误() -> None:
+    """回归：RequestError 的宽底座。
+
+    TooManyRedirects 是 RequestError 却既不是 TransportError 也不是 DecodingError，
+    专门捕子类的写法兜不住它；宽底座兜住，避免裸抛穿透 DecisionError 树。
+    """
+    settings = DecisionSettings()
+    service = DecisionService(settings)
+    service._clients = {  # pyright: ignore[reportPrivateUsage]
+        "laya": httpx2.AsyncClient(
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(302, headers={"location": "/loop"})
+            ),
+            base_url=settings.laya.base_url,
+            follow_redirects=True,
+            max_redirects=3,
+        )
+    }
+
+    with pytest.raises(DecisionConnectionError, match="请求") as excinfo:
+        _ = await service.predict("state", {})
+
+    assert isinstance(excinfo.value.__cause__, httpx2.TooManyRedirects)
+
+
+async def test_响应体解不开压缩时报返回体错误() -> None:
+    """回归：声明了 Content-Encoding: gzip 但内容不是 gzip 体。
+
+    httpx2 在 client.post 内部解码响应体时抛 DecodingError——它是 RequestError
+    的子类，却**不是** TransportError，`_wrap_errors` 少了宽底座就会裸抛。
+    """
+    service = _service(
+        lambda request: httpx2.Response(
+            200, content=b"not gzip", headers={"content-encoding": "gzip"}
+        )
+    )
+
+    with pytest.raises(DecisionResponseError, match="返回体解码失败") as excinfo:
+        _ = await service.predict("state", {})
+
+    assert isinstance(excinfo.value.__cause__, httpx2.DecodingError)
+
+
+async def test_端点返回答案里的额外字段原样透传() -> None:
+    """设计决策 7：answers 原样透传、不建模，Laya 专有字段不能被静默吃掉。
+
+    全量 pydantic 建模（配合 extra="ignore"）会把这些字段吞掉，而这正是选薄层
+    的理由，所以断言值本身而不只是键存在。
+    """
+    service = _service(
+        lambda request: httpx2.Response(
+            200,
+            json={
+                "model": "m",
+                "answers": {
+                    _QID: {
+                        "type": "choice",
+                        "choice": "billing",
+                        "probabilities": {"billing": 0.9, "other": 0.1},
+                        "confidence": 0.8,
+                        "answer_confidence": 0.55,
+                        "abstention": False,
+                        "low_confidence": True,
+                    }
+                },
+                "usage": {},
+            },
+        )
+    )
+
+    result = await service.predict("state", {_QID: choice("选一个", {"billing": None})})
+
+    answer = result.answers[_QID]
+    assert answer["answer_confidence"] == 0.55
+    assert answer["abstention"] is False
+    assert answer["low_confidence"] is True
 
 
 async def test_顶层不是对象报返回体错误() -> None:
@@ -425,6 +533,48 @@ async def test_重试会记日志(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
     assert len(calls) == 2
     assert "判断调用重试" in files.app.read_text(encoding="utf-8")
+
+
+async def test_重试日志的端点是URL而非裸名(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """回归：重试日志的 端点 字段要与成功日志同源（都是 settings.base_url）。
+
+    一头写裸名 "laya"、另一头写 URL，同一字段两种取值，采集端按端点聚合会分叉。
+    哪一头由 后端 字段表达，所以这里也断言它记的是裸名。
+    """
+    monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
+    files = setup_logging(LogSettings(dir=str(tmp_path), level="TRACE"))
+    base_url = DecisionSettings().laya.base_url
+    calls: list[int] = []
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(429, json={})
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+
+    _ = await _service(handler).predict("state", {})
+
+    lines = files.app.read_text(encoding="utf-8").splitlines()
+    retry_line = next(line for line in lines if "判断调用重试" in line)
+    assert f"端点={base_url}" in retry_line
+    assert "后端=laya" in retry_line
+
+
+async def test_成功日志不记正文(tmp_path: Path) -> None:
+    """约定「不记正文」的负例：本次 predict 只记了元数据，state 正文一个字都没进日志。
+
+    用可辨认串而非通用词，避免「碰巧不含」的真空通过：先锚定「判断调用完成」
+    确实落在文件里（日志管道在工作），再断言正文串不在全文里。
+    """
+    files = setup_logging(LogSettings(dir=str(tmp_path), level="TRACE"))
+    secret = "绝密内容XYZ"
+    service = _service(lambda request: httpx2.Response(200, json=_NOUL_BODY))
+
+    _ = await service.predict(secret, {_QID: noul("是否要求退款？")})
+
+    text = files.app.read_text(encoding="utf-8")
+    assert "判断调用完成" in text
+    assert secret not in text
 
 
 # ---- 生命周期与健康检查 ----

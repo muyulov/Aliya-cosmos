@@ -97,9 +97,14 @@ def _int_or_none(value: object) -> int | None:
 async def _wrap_errors(endpoint: str, model: str) -> AsyncGenerator[None, None]:
     """把 httpx2 异常换成判断层错误。
 
-    except 顺序是硬要求：httpx2 的 TimeoutException 是 TransportError 的子类，
-    先捕子类才不会把超时一律误判成连接错误。
+    except 顺序是硬要求：httpx2 的层级是 TimeoutException → TransportError →
+    DecodingError → RequestError，一律子类在前，否则会被更宽的那个先接走。
     model 进错误消息：出错时一并给出打在哪个模型上，省得回头翻配置。
+
+    RequestError 这条宽底座是兜底而非装饰：DecodingError 虽是 RequestError 的
+    子类却**不是** TransportError（端点或中间代理声明了 Content-Encoding 但响应体
+    不是该编码时抛它），没有它就会裸抛出去。宽底座一并保证将来 httpx2 新增的
+    RequestError 子类也不会穿透——这一层的对外承诺是「异常都归 DecisionError」。
     """
     try:
         yield
@@ -107,6 +112,10 @@ async def _wrap_errors(endpoint: str, model: str) -> AsyncGenerator[None, None]:
         raise DecisionTimeoutError(f"请求 {endpoint} 超时（模型 {model}）：{exc}") from exc
     except httpx2.TransportError as exc:
         raise DecisionConnectionError(f"连接 {endpoint} 失败（模型 {model}）：{exc}") from exc
+    except httpx2.DecodingError as exc:
+        raise DecisionResponseError(f"返回体解码失败（模型 {model}）：{exc}") from exc
+    except httpx2.RequestError as exc:
+        raise DecisionConnectionError(f"请求 {endpoint} 失败（模型 {model}）：{exc}") from exc
 
 
 class DecisionService(Service):
@@ -288,9 +297,13 @@ class DecisionService(Service):
             if response.status_code not in RETRY_STATUS or attempt >= settings.retries:
                 return self._body(response, settings)
             delay: float = _BACKOFF_BASE * 2.0**attempt
+            # 端点取 settings.base_url，与成功日志同一个取值：同一个字段在两条日志里
+            # 值不同（一头是裸名 "laya"、另一头是 URL）会让采集端按端点聚合时分叉。
+            # 是哪一头由后端的 后端=name 表达。
             self.log.warning(
                 "判断调用重试",
-                端点=name,
+                端点=settings.base_url,
+                后端=name,
                 状态码=response.status_code,
                 第几次=attempt + 1,
                 等待毫秒=round(delay * 1000, 1),
@@ -303,6 +316,12 @@ class DecisionService(Service):
         """状态码与 JSON 解析的收口。
 
         错误码换 DecisionRequestError，坏返回体换 DecisionResponseError。
+        这里在 `_wrap_errors` 之外，异常必须自己收干净，不能指望外层兜。
+
+        UnicodeDecodeError 与 json.JSONDecodeError 并列而非多此一举：`response.json()`
+        先按 charset 解字节再解析，响应体不是合法 UTF-8 时抛的是前者（它是
+        ValueError 的子类，但**不是** json.JSONDecodeError），只收后者会裸抛出去。
+        两者都归 DecisionResponseError：问题都在返回体本身，端点这一趟是通的。
         """
         if response.status_code >= 400:
             raise DecisionRequestError(
@@ -314,7 +333,7 @@ class DecisionService(Service):
             )
         try:
             body = cast("object", response.json())
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise DecisionResponseError(f"返回体不是合法 JSON：{exc}") from exc
         if not isinstance(body, dict):
             raise DecisionResponseError("返回体顶层不是对象")
