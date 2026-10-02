@@ -10,20 +10,26 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import cast
 
 import httpx2
 import pytest
 
-from core.config import DecisionSettings
+import core.decision.service as decision_service
+from core.config import DecisionEndpointSettings, DecisionSettings, LogSettings
 from core.decision import (
     DecisionConfigError,
+    DecisionConnectionError,
+    DecisionRequestError,
     DecisionResponseError,
     DecisionResult,
     DecisionService,
+    DecisionTimeoutError,
     noul,
 )
 from core.decision.service import _QID  # pyright: ignore[reportPrivateUsage]
+from core.logger import setup_logging
 
 
 def _service(
@@ -129,3 +135,153 @@ async def test_答案不是对象时报返回体错误() -> None:
         _ = await service.ask("state", "是否？")
 
     assert "answer" in str(excinfo.value)
+
+
+async def test_状态码错误带上对账坐标() -> None:
+    service = _service(
+        lambda request: httpx2.Response(
+            422, json={"error": "bad"}, headers={"x-request-id": "req-7"}
+        )
+    )
+
+    with pytest.raises(DecisionRequestError) as excinfo:
+        _ = await service.predict("state", {})
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.request_id == "req-7"
+    assert excinfo.value.endpoint == DecisionSettings().laya.base_url
+
+
+async def test_超时映射成超时错误() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ReadTimeout("too slow", request=request)
+
+    with pytest.raises(DecisionTimeoutError):
+        _ = await _service(handler).predict("state", {})
+
+
+async def test_连不上映射成连接错误() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("no route", request=request)
+
+    with pytest.raises(DecisionConnectionError):
+        _ = await _service(handler).predict("state", {})
+
+
+async def test_非法JSON报返回体错误() -> None:
+    service = _service(lambda request: httpx2.Response(200, content=b"not json"))
+
+    with pytest.raises(DecisionResponseError):
+        _ = await service.predict("state", {})
+
+
+async def test_顶层不是对象报返回体错误() -> None:
+    service = _service(lambda request: httpx2.Response(200, json=[1, 2]))
+
+    with pytest.raises(DecisionResponseError):
+        _ = await service.predict("state", {})
+
+
+async def test_缺answers报返回体错误() -> None:
+    service = _service(lambda request: httpx2.Response(200, json={"model": "m"}))
+
+    with pytest.raises(DecisionResponseError):
+        _ = await service.predict("state", {})
+
+
+async def test_429退避后成功(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
+    calls: list[int] = []
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(429, json={})
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+
+    _ = await _service(handler).predict("state", {})
+
+    assert len(calls) == 2
+
+
+async def test_529退避后成功(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
+    calls: list[int] = []
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(529, json={})
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+
+    _ = await _service(handler).predict("state", {})
+
+    assert len(calls) == 2
+
+
+async def test_重试耗尽后报错(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
+    calls: list[int] = []
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        return httpx2.Response(429, json={})
+
+    with pytest.raises(DecisionRequestError):
+        _ = await _service(handler).predict("state", {})
+
+    assert len(calls) == 3  # retries=2 → 总请求数 3
+
+
+async def test_retries为零时不重试(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
+    calls: list[int] = []
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        return httpx2.Response(429, json={})
+
+    service = DecisionService(
+        DecisionSettings(
+            laya=DecisionEndpointSettings(enabled=True, base_url="http://laya.test/v1", retries=0)
+        )
+    )
+    service._clients = {  # pyright: ignore[reportPrivateUsage]
+        "laya": httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler), base_url="http://laya.test/v1"
+        )
+    }
+
+    with pytest.raises(DecisionRequestError):
+        _ = await service.predict("state", {})
+
+    assert len(calls) == 1
+
+
+async def test_其他4xx不重试() -> None:
+    calls: list[int] = []
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        return httpx2.Response(400, json={})
+
+    with pytest.raises(DecisionRequestError):
+        _ = await _service(handler).predict("state", {})
+
+    assert len(calls) == 1
+
+
+async def test_重试会记日志(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
+    files = setup_logging(LogSettings(dir=str(tmp_path), level="TRACE"))
+    calls: list[int] = []
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(429, json={})
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+
+    _ = await _service(handler).predict("state", {})
+
+    assert "判断调用重试" in files.app.read_text(encoding="utf-8")
