@@ -128,6 +128,39 @@ class LLMSettings(BaseModel):
     vision: LLMEndpointSettings = LLMEndpointSettings()
 
 
+#: 判断层的两个端点名。laya 是本地 laya-serve，jev 是 TypeSafe 云端。
+type Backend = Literal["jev", "laya"]
+
+
+class DecisionEndpointSettings(BaseModel):
+    """一个判断端点的配置。
+
+    `model` 为空表示「请求体里不带 model 字段」：Laya 靠这个走 Router 自动路由，
+    Jev 则会 422（它的 model 是必填）。传空串或 null 都不等于「不传」。
+
+    `base_url` / `model` 的默认值由 `DecisionSettings` 按端点给（jev 与 laya 不同），
+    别拿裸的 `DecisionEndpointSettings()` 去建客户端。
+    """
+
+    enabled: bool = False
+    base_url: str = ""
+    api_key: str = ""  # 留空则不发 Authorization 头（laya-serve 默认不要求认证）
+    model: str = ""
+    timeout: float = Field(default=60.0, gt=0)  # 单次请求超时（秒）
+    retries: int = Field(default=2, ge=0)  # 429/529 退避重试次数，0 关闭
+
+
+class DecisionSettings(BaseModel):
+    """判断层配置：jev 云端与 laya 本地是两个端点，字段相同、协议相同。"""
+
+    jev: DecisionEndpointSettings = DecisionEndpointSettings(
+        base_url="https://api.typesafe.ai/v1", model="jev-latest"
+    )
+    laya: DecisionEndpointSettings = DecisionEndpointSettings(
+        base_url="http://127.0.0.1:8000/v1", model=""
+    )
+
+
 class Settings(BaseModel):
     """顶层配置，按子模块分组，避免一个扁平大类。"""
 
@@ -139,6 +172,7 @@ class Settings(BaseModel):
     clock: ClockSettings = ClockSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
     llm: LLMSettings = LLMSettings()
+    decision: DecisionSettings = DecisionSettings()
 
     #: 本次配置的来源；由 load_settings() 写入，直接构造实例时保持 None
     _source: str | None = PrivateAttr(default=None)

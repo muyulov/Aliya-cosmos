@@ -341,3 +341,36 @@ def test_时钟时区可走占位符(tmp_path: Path, monkeypatch: pytest.MonkeyP
     settings = _load(tmp_path, "clock:\n  tz: ${CLOCK_TZ:UTC}\n")
 
     assert settings.clock.tz == "Asia/Tokyo"
+
+
+# ---- 判断层配置节点 ----
+
+
+def test_判断层配置节点缺省值() -> None:
+    settings = Settings()
+
+    assert settings.decision.jev.enabled is False
+    assert settings.decision.jev.base_url == "https://api.typesafe.ai/v1"
+    assert settings.decision.jev.model == "jev-latest"
+    assert settings.decision.laya.model == ""
+    assert settings.decision.laya.base_url == "http://127.0.0.1:8000/v1"
+    assert settings.decision.jev.retries == 2
+
+
+def test_判断层配置可被yaml覆盖(tmp_path: Path) -> None:
+    settings = _load(
+        tmp_path,
+        "decision:\n  laya:\n    enabled: true\n    model: multilingual\n    timeout: 12.5\n",
+    )
+
+    assert settings.decision.laya.enabled is True
+    assert settings.decision.laya.model == "multilingual"
+    assert settings.decision.laya.timeout == 12.5
+
+
+def test_判断层超时必须为正数(tmp_path: Path) -> None:
+    config = tmp_path / "cosmos.yaml"
+    _ = config.write_text("decision:\n  jev:\n    timeout: 0\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        _ = load_settings(config_file=config, env_file=tmp_path / ".env")

@@ -67,3 +67,22 @@ llm:
     structured_mode: json_schema
     temperature: null
     max_tokens: null
+
+# 判断层：jev（云端）与 laya（本地 laya-serve）是两个端点，同一套 /systemone 协议。
+# base_url 只写到 /v1 为止，路径 /systemone 由代码补上，多写一段会 404。
+# 两个端点默认都关着：进程照常启动（不 fail fast），调用时才报未启用。
+decision:
+  jev:
+    enabled: false
+    base_url: https://api.typesafe.ai/v1 # 官方云端端点
+    api_key: ${TYPESAFE_API_KEY:} # 冒号后为空：.env 里没配时不发 Authorization 头
+    model: jev-latest # 该端点必填，Jev 不接受空 model
+    timeout: 60 # 单次请求超时（秒），必须为正数
+    retries: 2 # 429/529 的退避重试次数，0 关闭
+  laya:
+    enabled: false
+    base_url: http://127.0.0.1:8000/v1 # 本地 laya-serve，默认监听 0.0.0.0:8000
+    api_key: ${LAYA_API_KEY:} # laya-serve 未设 LAYA_API_KEY 时留空即可
+    model: "" # 空 = 不带 model 字段，交给 Laya 的 Router 按语种自动选 checkpoint
+    timeout: 60
+    retries: 2
