@@ -4,9 +4,23 @@
 
 **目标：** 新增 `core/decision/` 层，把「让模型做一次判断」收成一个服务：`predict` 走 `/systemone` 协议批量提问，另加 `choose` / `rate` / `ask` 三个便捷方法。
 
-**架构：** 两个端点（`jev` 云端、`laya` 本地 `laya-serve`）共用同一套线协议，因此复用 `llm` 层的「双端点 + 惰性建客户端 + 缺配置不 fail fast」形态。传输用 `httpx.AsyncClient`，路径常量 `/systemone`。
+**架构：** 两个端点（`jev` 云端、`laya` 本地 `laya-serve`）共用同一套线协议，因此复用 `llm` 层的「双端点 + 惰性建客户端 + 缺配置不 fail fast」形态。传输用 `httpx2.AsyncClient`，路径常量 `/systemone`。
 
-**技术栈：** Python 3.12 / uv / pydantic / httpx（随 `openai` 已在环境里）/ pytest + pytest-asyncio / basedpyright / ruff。
+**技术栈：** Python 3.12 / uv / pydantic / httpx2（随 `openai` 已在环境里）/ pytest + pytest-asyncio / basedpyright / ruff。
+
+**worktree 准备（动工前做一次）：**
+
+```bash
+cd /home/cosmos/项目/Aliya-cosmos
+git worktree add .worktrees/decision -b feature/decision
+cd .worktrees/decision
+uv sync --no-install-project   # 必须带这个开关，见下
+.venv/bin/python -m pytest | tail -3   # 基线应全绿
+```
+
+`uv sync` 不带 `--no-install-project` 会撞 uv 构建缓存里 hatchling/pluggy 的
+`AttributeError: module 'pluggy' has no attribute 'HookimplMarker'`。跑测试只需要依赖 +
+工作区里的 `core/`（`python -m pytest` 会把 cwd 加进 `sys.path`），跳过 editable 构建即可。
 
 **每个任务结束都要跑这三条判据，全绿才提交：**
 
@@ -119,8 +133,10 @@ class DecisionSettings(BaseModel):
 `pyproject.toml` 的 `dependencies` 加：
 
 ```toml
-    "httpx>=0.28",
+    "httpx2>=2.12",
 ```
+
+（**不是 `httpx`**：`openai` 3.x 的依赖就是 `httpx2>=2.12.0,<3`，环境里的 2.13.1 已经在了；`httpx` 1.x 反而要新装。详见设计文档的实施补记。）
 
 `data/config/cosmos.yaml` 末尾追加：
 
@@ -379,7 +395,7 @@ git commit -m "feat(decision): 新增三原语问题构造器"
 
 from __future__ import annotations
 
-import httpx
+import httpx2
 import pytest
 
 from core.config import DecisionEndpointSettings
@@ -416,7 +432,7 @@ def test_超时按配置传给客户端() -> None:
 
     client = build_client(endpoint)
 
-    assert isinstance(client.timeout, httpx.Timeout)
+    assert isinstance(client.timeout, httpx2.Timeout)
 
 
 def test_错误都继承自基类() -> None:
@@ -454,7 +470,7 @@ Expected: FAIL —— `ImportError: cannot import name 'build_client'`
 
 约定：
 - 全部继承 DecisionError，调用方可以一次捕获整个判断层。
-- 原始 httpx 异常挂在 __cause__ 上，需要排查端点返回体时顺着 cause 找。
+- 原始 httpx2 异常挂在 __cause__ 上，需要排查端点返回体时顺着 cause 找。
 - 不在 ServiceError 树下：调用失败是业务运行期错误，不该让进程 fail fast。
 """
 
@@ -511,13 +527,13 @@ class DecisionResponseError(DecisionError):
 ```python
 """判断层客户端工厂。
 
-约定：这是全仓库唯一 new 出 httpx 客户端的地方，也是测试注入替身的接缝。
+约定：这是全仓库唯一 new 出 httpx2 客户端的地方，也是测试注入替身的接缝。
 base_url 只写到 /v1 为止（两家的完整地址都是 …/v1/systemone），路径由 SYSTEMONE_PATH 补。
 """
 
 from __future__ import annotations
 
-import httpx
+import httpx2
 
 from core.config import DecisionEndpointSettings
 
@@ -525,13 +541,13 @@ from core.config import DecisionEndpointSettings
 SYSTEMONE_PATH = "/systemone"
 
 
-def build_client(endpoint: DecisionEndpointSettings) -> httpx.AsyncClient:
+def build_client(endpoint: DecisionEndpointSettings) -> httpx2.AsyncClient:
     """按端点配置构造异步客户端。
 
     api_key 为空时不发 Authorization 头：laya-serve 不设 LAYA_API_KEY 时本来就不要求认证。
     """
     headers = {"Authorization": f"Bearer {endpoint.api_key}"} if endpoint.api_key else {}
-    return httpx.AsyncClient(
+    return httpx2.AsyncClient(
         base_url=endpoint.base_url,
         headers=headers,
         timeout=endpoint.timeout,
@@ -568,15 +584,15 @@ git commit -m "feat(decision): 新增错误树与客户端工厂"
 
 约定：
 - 客户端在 start() 里建，容器又不认它，所以除「未启用」那条外一律白盒塞 service._clients。
-- 用 httpx.MockTransport 注入 handler：不起 mock server、不打桩 socket，
-  handler 直接拿到 httpx.Request，可断言请求体与请求头（本层最值得断言的东西）。
+- 用 httpx2.MockTransport 注入 handler：不起 mock server、不打桩 socket，
+  handler 直接拿到 httpx2.Request，可断言请求体与请求头（本层最值得断言的东西）。
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-import httpx
+import httpx2
 import pytest
 
 from core.config import DecisionSettings
@@ -584,34 +600,34 @@ from core.decision import DecisionService, DecisionResult, noul
 from core.decision.service import _QID
 
 
-def _handler(body: dict[str, object] | None = None, status: int = 200) -> Callable[[httpx.Request], httpx.Response]:
+def _handler(body: dict[str, object] | None = None, status: int = 200) -> Callable[[httpx2.Request], httpx2.Response]:
     """造一个固定返回的 handler。"""
     payload = body if body is not None else {
         "model": "laya-multilingual",
         "answers": {_QID: {"type": "noul", "noul": 0.93}},
         "usage": {"input_tokens": 11, "output_tokens": 0},
     }
-    return lambda request: httpx.Response(status, json=payload)
+    return lambda request: httpx2.Response(status, json=payload)
 
 
-def _service(handler: Callable[[httpx.Request], httpx.Response], **overrides: object) -> DecisionService:
+def _service(handler: Callable[[httpx2.Request], httpx2.Response], **overrides: object) -> DecisionService:
     """构造一个已「启动」的服务：客户端直接白盒塞进去。"""
     settings = DecisionSettings()
     service = DecisionService(settings)
     service._clients = {  # pyright: ignore[reportPrivateUsage]
-        "laya": httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), base_url=settings.laya.base_url
+        "laya": httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler), base_url=settings.laya.base_url
         )
     }
     return service
 
 
 async def test_predict_请求体与返回体() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "model": "laya-multilingual",
@@ -635,11 +651,11 @@ async def test_predict_请求体与返回体() -> None:
 
 
 async def test_laya默认端点且model为空时不带该字段() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
 
     service = _service(handler)
 
@@ -649,15 +665,15 @@ async def test_laya默认端点且model为空时不带该字段() -> None:
 
 
 async def test_jev端点带上配置的model() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {}, "usage": {}})
+        return httpx2.Response(200, json={"model": "jev-1.13.0", "answers": {}, "usage": {}})
 
     service = _service(handler)
-    service._clients["jev"] = httpx.AsyncClient(  # pyright: ignore[reportPrivateUsage]
-        transport=httpx.MockTransport(handler), base_url="https://api.typesafe.ai/v1"
+    service._clients["jev"] = httpx2.AsyncClient(  # pyright: ignore[reportPrivateUsage]
+        transport=httpx2.MockTransport(handler), base_url="https://api.typesafe.ai/v1"
     )
 
     _ = await service.predict("state", {}, backend="jev")
@@ -666,7 +682,7 @@ async def test_jev端点带上配置的model() -> None:
 
 
 async def test_usage缺失时不报错() -> None:
-    service = _service(lambda request: httpx.Response(200, json={"model": "m", "answers": {}}))
+    service = _service(lambda request: httpx2.Response(200, json={"model": "m", "answers": {}}))
 
     result = await service.predict("state", {})
 
@@ -715,7 +731,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import ClassVar, cast, override
 
-import httpx
+import httpx2
 
 from core.config import Backend, DecisionEndpointSettings, DecisionSettings
 from core.decision.client import SYSTEMONE_PATH, build_client
@@ -791,16 +807,16 @@ def _int_or_none(value: object) -> int | None:
 
 @asynccontextmanager
 async def _wrap_errors(endpoint: str, model: str) -> AsyncGenerator[None, None]:
-    """把 httpx 异常换成判断层错误。
+    """把 httpx2 异常换成判断层错误。
 
-    except 顺序是硬要求：httpx 的 TimeoutException 是 TransportError 的子类，
+    except 顺序是硬要求：httpx2 的 TimeoutException 是 TransportError 的子类，
     先捕子类才不会把超时一律误判成连接错误。
     """
     try:
         yield
-    except httpx.TimeoutException as exc:
+    except httpx2.TimeoutException as exc:
         raise DecisionTimeoutError(f"请求 {endpoint} 超时：{exc}") from exc
-    except httpx.TransportError as exc:
+    except httpx2.TransportError as exc:
         raise DecisionConnectionError(f"连接 {endpoint} 失败：{exc}") from exc
 
 
@@ -812,7 +828,7 @@ class DecisionService(Service):
     def __init__(self, config: DecisionSettings) -> None:
         super().__init__()
         self._config: DecisionSettings = config
-        self._clients: dict[Backend, httpx.AsyncClient] = {}
+        self._clients: dict[Backend, httpx2.AsyncClient] = {}
 
     # ---------- 生命周期 ----------
 
@@ -962,7 +978,7 @@ class DecisionService(Service):
 
     def _endpoint(
         self, backend: Backend | None
-    ) -> tuple[Backend, DecisionEndpointSettings, httpx.AsyncClient]:
+    ) -> tuple[Backend, DecisionEndpointSettings, httpx2.AsyncClient]:
         """挑端点：默认 laya（本地优先：免费、数据不出域）。"""
         name: Backend = "laya" if backend is None else backend
         client = self._clients.get(name)
@@ -973,7 +989,7 @@ class DecisionService(Service):
     async def _request(
         self,
         name: Backend,
-        client: httpx.AsyncClient,
+        client: httpx2.AsyncClient,
         settings: DecisionEndpointSettings,
         payload: dict[str, object],
     ) -> dict[str, object]:
@@ -997,7 +1013,7 @@ class DecisionService(Service):
 
     @staticmethod
     def _body(
-        response: httpx.Response, settings: DecisionEndpointSettings
+        response: httpx2.Response, settings: DecisionEndpointSettings
     ) -> dict[str, object]:
         """状态码与 JSON 解析的收口：错误码换成 DecisionRequestError，坏返回体换 DecisionResponseError。"""
         if response.status_code >= 400:
@@ -1091,7 +1107,7 @@ git commit -m "feat(decision): 新增判断服务与 predict 主路径"
 ```python
 async def test_状态码错误带上对账坐标() -> None:
     service = _service(
-        lambda request: httpx.Response(
+        lambda request: httpx2.Response(
             422, json={"error": "bad"}, headers={"x-request-id": "req-7"}
         )
     )
@@ -1105,37 +1121,37 @@ async def test_状态码错误带上对账坐标() -> None:
 
 
 async def test_超时映射成超时错误() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("too slow", request=request)
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ReadTimeout("too slow", request=request)
 
     with pytest.raises(DecisionTimeoutError):
         _ = await _service(handler).predict("state", {})
 
 
 async def test_连不上映射成连接错误() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("no route", request=request)
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("no route", request=request)
 
     with pytest.raises(DecisionConnectionError):
         _ = await _service(handler).predict("state", {})
 
 
 async def test_非法JSON报返回体错误() -> None:
-    service = _service(lambda request: httpx.Response(200, content=b"not json"))
+    service = _service(lambda request: httpx2.Response(200, content=b"not json"))
 
     with pytest.raises(DecisionResponseError):
         _ = await service.predict("state", {})
 
 
 async def test_顶层不是对象报返回体错误() -> None:
-    service = _service(lambda request: httpx.Response(200, json=[1, 2]))
+    service = _service(lambda request: httpx2.Response(200, json=[1, 2]))
 
     with pytest.raises(DecisionResponseError):
         _ = await service.predict("state", {})
 
 
 async def test_缺answers报返回体错误() -> None:
-    service = _service(lambda request: httpx.Response(200, json={"model": "m"}))
+    service = _service(lambda request: httpx2.Response(200, json={"model": "m"}))
 
     with pytest.raises(DecisionResponseError):
         _ = await service.predict("state", {})
@@ -1144,11 +1160,11 @@ async def test_缺answers报返回体错误() -> None:
 async def test_429退避后成功() -> None:
     calls: list[int] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(1)
         if len(calls) == 1:
-            return httpx.Response(429, json={})
-        return httpx.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+            return httpx2.Response(429, json={})
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
 
     service = _service(handler)
 
@@ -1161,11 +1177,11 @@ async def test_529退避后成功(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
     calls: list[int] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(1)
         if len(calls) == 1:
-            return httpx.Response(529, json={})
-        return httpx.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+            return httpx2.Response(529, json={})
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
 
     _ = await _service(handler).predict("state", {})
 
@@ -1176,9 +1192,9 @@ async def test_重试耗尽后报错(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
     calls: list[int] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(1)
-        return httpx.Response(429, json={})
+        return httpx2.Response(429, json={})
 
     with pytest.raises(DecisionRequestError):
         _ = await _service(handler).predict("state", {})
@@ -1190,15 +1206,15 @@ async def test_retries为零时不重试(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
     calls: list[int] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(1)
-        return httpx.Response(429, json={})
+        return httpx2.Response(429, json={})
 
     service = DecisionService(DecisionSettings(laya=DecisionEndpointSettings(
         enabled=True, base_url="http://laya.test/v1", retries=0
     )))
-    service._clients = {"laya": httpx.AsyncClient(  # pyright: ignore[reportPrivateUsage]
-        transport=httpx.MockTransport(handler), base_url="http://laya.test/v1"
+    service._clients = {"laya": httpx2.AsyncClient(  # pyright: ignore[reportPrivateUsage]
+        transport=httpx2.MockTransport(handler), base_url="http://laya.test/v1"
     )}
 
     with pytest.raises(DecisionRequestError):
@@ -1210,9 +1226,9 @@ async def test_retries为零时不重试(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_其他4xx不重试() -> None:
     calls: list[int] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(1)
-        return httpx.Response(400, json={})
+        return httpx2.Response(400, json={})
 
     with pytest.raises(DecisionRequestError):
         _ = await _service(handler).predict("state", {})
@@ -1227,11 +1243,11 @@ async def test_重试会记日志(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
     calls: list[int] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         calls.append(1)
         if len(calls) == 1:
-            return httpx.Response(429, json={})
-        return httpx.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+            return httpx2.Response(429, json={})
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
 
     _ = await _service(handler).predict("state", {})
 
@@ -1295,7 +1311,7 @@ _NOUL_BODY = {
 
 
 async def test_choose返回选中选项与分布() -> None:
-    service = _service(lambda request: httpx.Response(200, json=_CHOICE_BODY))
+    service = _service(lambda request: httpx2.Response(200, json=_CHOICE_BODY))
 
     answer = await service.choose("要退款", "归哪个部门？", {"billing": "账单", "other": None})
 
@@ -1305,7 +1321,7 @@ async def test_choose返回选中选项与分布() -> None:
 
 
 async def test_rate返回得分与档位说明() -> None:
-    service = _service(lambda request: httpx.Response(200, json=_SCORE_BODY))
+    service = _service(lambda request: httpx2.Response(200, json=_SCORE_BODY))
 
     answer = await service.rate("钱扣了两次", "愤怒程度？", ["平静", "不满", "愤怒"])
 
@@ -1314,13 +1330,13 @@ async def test_rate返回得分与档位说明() -> None:
 
 
 async def test_ask返回是概率() -> None:
-    service = _service(lambda request: httpx.Response(200, json=_NOUL_BODY))
+    service = _service(lambda request: httpx2.Response(200, json=_NOUL_BODY))
 
     assert await service.ask("我要退款", "是否要求退款？") == 0.93
 
 
 async def test_便捷方法缺答案键时报错() -> None:
-    service = _service(lambda request: httpx.Response(200, json={"model": "m", "answers": {}}))
+    service = _service(lambda request: httpx2.Response(200, json={"model": "m", "answers": {}}))
 
     with pytest.raises(DecisionResponseError) as excinfo:
         _ = await service.ask("state", "是否？")
@@ -1330,7 +1346,7 @@ async def test_便捷方法缺答案键时报错() -> None:
 
 async def test_便捷方法字段不完整时报错() -> None:
     service = _service(
-        lambda request: httpx.Response(
+        lambda request: httpx2.Response(
             200,
             json={
                 "model": "m",
@@ -1346,7 +1362,7 @@ async def test_便捷方法字段不完整时报错() -> None:
 
 async def test_noul字段类型不对时报错() -> None:
     service = _service(
-        lambda request: httpx.Response(
+        lambda request: httpx2.Response(
             200,
             json={"model": "m", "answers": {_QID: {"type": "noul", "noul": "yes"}}, "usage": {}},
         )
@@ -1357,11 +1373,11 @@ async def test_noul字段类型不对时报错() -> None:
 
 
 async def test_便捷方法把三原语混进同一趟() -> None:
-    seen: list[httpx.Request] = []
+    seen: list[httpx2.Request] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         seen.append(request)
-        return httpx.Response(200, json=_NOUL_BODY)
+        return httpx2.Response(200, json=_NOUL_BODY)
 
     service = _service(handler)
 

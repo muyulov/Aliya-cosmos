@@ -4,6 +4,11 @@
 状态：设计已确认，待实施
 基线：`main`（config / logger / service / llm / embedding 各层就绪）
 
+**实施补记（2026-10-02，动工前勘察所得，与本文的偏差）**：
+
+1. **HTTP 客户端用 `httpx2` 而不是 `httpx`**。本文写作时假设「`httpx` 随 `openai` 装在环境里」，实测不成立：`openai` 3.x 的依赖是 `httpx2>=2.12.0,<3`（环境里是 2.13.1），**`httpx` 1.x 根本没装**，才是需要新增安装的那个。两者的客户端 API 与异常层级一致（实测 `TimeoutException` → `TransportError` → `RequestError` → `HTTPError`，`AsyncClient` / `MockTransport` / `Timeout` 齐备），所以只是包名与声明版本的变化，`>=2.12` 与 SDK 的约束相容。本文其余部分已同步改成 `httpx2`。
+2. **用 `uv sync --no-install-project`**：worktree 里 `uv sync` 会撞 uv 构建缓存里 hatchling/pluggy 的 `AttributeError: module 'pluggy' has no attribute 'HookimplMarker'`。跑测试只需要依赖 + 工作区里的 `core/`（`python -m pytest` 会把 cwd 加进 `sys.path`），跳过项目自身的 editable 构建即可。
+
 ## 〇、背景：Laya 与 Jev 是什么
 
 **Jev**（TypeSafe AI）：闭源、仅云端 API 的「System 1」决策模型。把一段上下文对照一组**带类型的问题**做一次前向，直接给出带概率的答案，不生成文本。
@@ -76,14 +81,14 @@ Content-Type: application/json
 | # | 议题 | 结论 | 被否决的方案与原因 |
 | --- | --- | --- | --- |
 | 1 | 模块命名 | `core/decision/`，`laya` / `jev` 退为**端点名** | 叫 `core/laya` 或 `core/jev`（层与后端混为一谈，加第三个后端就要动目录结构） |
-| 2 | 客户端形态 | `httpx.AsyncClient` 直调 | 官方 `openai` SDK（两家的协议都不是 OpenAI 形状，SDK 的 TypedDict 与结构化输出全用不上，只剩传输层）；自研适配层（没有第二个协议要适配） |
+| 2 | 客户端形态 | `httpx2.AsyncClient` 直调 | 官方 `openai` SDK（两家的协议都不是 OpenAI 形状，SDK 的 TypedDict 与结构化输出全用不上，只剩传输层）；自研适配层（没有第二个协议要适配） |
 | 3 | Laya 接入形态 | 进程外 `laya-serve` 的 HTTP 端点 | `pip install laya` 进程内（GB 级依赖、破坏秒级 `uv sync`、100% 覆盖率要为它把整个 `laya` 假掉）；预留「可替换内核」插槽（只有一个实现，抽象即预留，与 `RemoteEncoder` 的既有取舍一致） |
 | 4 | 两个端点的关系 | **可切换，不做兜底**：显式 `backend=` 指定，`None` 走默认 `laya` | 主备兜底（两后端 `confidence` 语义不同、不可比，层内决策必错）；只配一个端点（放弃「本地优先 + 云端按需」的同时可用） |
 | 5 | 端点启用判据 | 显式 `enabled: bool`（默认 `false`） | 「`api_key` 为空即未启用」（`laya-serve` 不设 `LAYA_API_KEY` 时本来就不需要密钥，沿用旧规则会逼用户填假密钥） |
 | 6 | 能力面 | 薄层 `predict(state, questions)` + 三个便捷方法 `choose` / `rate` / `ask` | 只暴露便捷方法（每次只能问一类，丢掉「一次前向混问多题」这个协议核心能力）；只暴露 `predict`（已有明确消费者，便捷方法不是预留） |
 | 7 | 返回值 | 顶层结构化成 dataclass，**`answers` 原样透传** | 全量 pydantic 建模（两家 answer 并不同构，Laya 多 `answer_confidence` / `abstention` / `low_confidence`，配合 `extra="ignore"` 会**静默吃掉**这些字段） |
 | 8 | 端点路由 | 调用方显式传 `backend` | 照抄 llm 的「传的 model 命中另一端点就切过去」（两家的模型名可能撞车，规则隐晦且难排查） |
-| 9 | 重试 | 自写退避：只对 `429` / `529` 重试，指数退避，上限 `retries` 次 | 不重试（官方明确建议退避）；解析 `Retry-After`（多一个分支只为一句话文档里的建议，不值）；交给 httpx（`AsyncHTTPTransport(retries=)` 只重试连接错误，不覆盖 429/529） |
+| 9 | 重试 | 自写退避：只对 `429` / `529` 重试，指数退避，上限 `retries` 次 | 不重试（官方明确建议退避）；解析 `Retry-After`（多一个分支只为一句话文档里的建议，不值）；交给 httpx2（`AsyncHTTPTransport(retries=)` 只重试连接错误，不覆盖 429/529） |
 | 10 | 参数上限的本地校验 | **不做**，交给端点返回 422 / 413 | 本地校验（Jev 255 项 / Laya 100 项、score 2–10 级、Laya 要求每级有描述——按任一后端的规则拦都会误伤另一个，与 llm 层「调用级覆盖不做本地校验」一致） |
 | 11 | 边界 URL | `base_url` 写到 `/v1` 为止，路径固定常量 `/systemone` | 让 `base_url` 写全（用户容易多写一段而 404）；把路径做成配置项（两家的完整地址本来就是 `…/v1/systemone`，一个常量对两边都成立） |
 | 12 | 未启用端点是否警告 | **不警告**，静默跳过 | 沿用 llm 的 `warning`（llm 无法区分「故意留空」与「忘了填密钥」，而 `enabled` 是用户的显式选择，警告是噪音） |
@@ -155,7 +160,7 @@ decision:
 ```
 core/decision/
   __init__.py    # 对外出口：DecisionService、三个答案 dataclass、三原语构造器、错误树、Backend
-  client.py      # build_client(endpoint) -> httpx.AsyncClient：唯一 new 出 HTTP 客户端的地方
+  client.py      # build_client(endpoint) -> httpx2.AsyncClient：唯一 new 出 HTTP 客户端的地方
   errors.py      # DecisionError 树
   questions.py   # choice / score / noul 构造器 + Question TypedDict
   service.py     # DecisionService：进 DI 容器，持有两个端点的客户端
@@ -323,16 +328,16 @@ async def health(self) -> HealthStatus:
 SYSTEMONE_PATH = "/systemone"  # base_url 只写到 /v1，路径由代码补
 
 
-def build_client(endpoint: DecisionEndpointSettings) -> httpx.AsyncClient:
+def build_client(endpoint: DecisionEndpointSettings) -> httpx2.AsyncClient:
     headers = {"Authorization": f"Bearer {endpoint.api_key}"} if endpoint.api_key else {}
-    return httpx.AsyncClient(
+    return httpx2.AsyncClient(
         base_url=endpoint.base_url, headers=headers, timeout=endpoint.timeout
     )
 ```
 
-- 全仓库唯一 `new` 出 httpx 客户端的地方，也是测试注入替身的接缝。
+- 全仓库唯一 `new` 出 httpx2 客户端的地方，也是测试注入替身的接缝。
 - `Authorization` 头只在 `api_key` 非空时加。
-- 超时交给 httpx（`timeout=` 是总超时，含连接与读取）。
+- 超时交给 httpx2（`timeout=` 是总超时，含连接与读取）。
 
 ### 重试
 
@@ -358,9 +363,9 @@ _BACKOFF_BASE = 0.5  # 秒；测试 patch 成 0 即可免去伪造 asyncio.sleep
 
 映射收在模块级 `_wrap_errors` 上下文管理器里，四个公开方法统一走它。
 
-**`except` 顺序是硬要求**：httpx 的 `TimeoutException` 是 `TransportError` 的**子类**，必须先捕 `TimeoutException` 再捕 `TransportError`，否则超时会被全部误判成连接错误。这与 openai SDK 的 `APITimeoutError` / `APIConnectionError` 是同一个坑，两层的 `_wrap_errors` 会长得很像。
+**`except` 顺序是硬要求**：httpx2 的 `TimeoutException` 是 `TransportError` 的**子类**，必须先捕 `TimeoutException` 再捕 `TransportError`，否则超时会被全部误判成连接错误。这与 openai SDK 的 `APITimeoutError` / `APIConnectionError` 是同一个坑，两层的 `_wrap_errors` 会长得很像。
 
-`request_id` 从响应头取（httpx 不像 openai SDK 那样替我们解析）：
+`request_id` 从响应头取（httpx2 不像 openai SDK 那样替我们解析）：
 
 ```python
 request_id = response.headers.get("x-request-id")
@@ -376,7 +381,7 @@ request_id = response.headers.get("x-request-id")
 
 | 文件 | 动作 |
 | --- | --- |
-| `pyproject.toml` | `dependencies` 加 `httpx>=0.28`（本来就随 `openai` 装在环境里，此处只是不再算隐式可用） |
+| `pyproject.toml` | `dependencies` 加 `httpx2>=2.12`（**已随 `openai` 装在环境里**，此处只是不再算隐式可用；`httpx` 1.x 反倒要新装，见文末实施补记） |
 | `core/config/settings.py` | 新增 `Backend`、`DecisionEndpointSettings`、`DecisionSettings`；`Settings` 加 `decision` 字段 |
 | `core/config/__init__.py` | 导出上述三个名字 |
 | `core/decision/__init__.py` | 新增，对外出口 |
@@ -393,13 +398,13 @@ request_id = response.headers.get("x-request-id")
 
 ## 十、测试策略
 
-**替身接缝用 `httpx.MockTransport`**（httpx 官方的测试通道）：`build_client` 里不接受 transport 参数，因此测试把 handler 造好、构造一个带 MockTransport 的客户端，白盒塞进 `service._clients`：
+**替身接缝用 `httpx2.MockTransport`**（httpx2 官方的测试通道）：`build_client` 里不接受 transport 参数，因此测试把 handler 造好、构造一个带 MockTransport 的客户端，白盒塞进 `service._clients`：
 
 ```python
 service._clients = {"laya": _mock_client(handler)}  # pyright: ignore[reportPrivateUsage]
 ```
 
-不起真实 HTTP 服务、不打桩 socket。handler 直接拿到 `httpx.Request`，可断言**请求体与请求头**（这是本层最值得断言的东西：协议形状）。
+不起真实 HTTP 服务、不打桩 socket。handler 直接拿到 `httpx2.Request`，可断言**请求体与请求头**（这是本层最值得断言的东西：协议形状）。
 
 | 用例 | 断言 |
 | --- | --- |
@@ -422,8 +427,8 @@ service._clients = {"laya": _mock_client(handler)}  # pyright: ignore[reportPriv
 | 答案字段类型不对 | `DecisionResponseError` |
 | 未启用端点调用 | `DecisionConfigError`，无 cause |
 | 4xx / 5xx | `DecisionRequestError`，`status_code` / `endpoint` / `model` / `request_id` 正确 |
-| 超时 | `DecisionTimeoutError`（handler 抛 `httpx.ReadTimeout`） |
-| 连接错 | `DecisionConnectionError`（handler 抛 `httpx.ConnectError`） |
+| 超时 | `DecisionTimeoutError`（handler 抛 `httpx2.ReadTimeout`） |
+| 连接错 | `DecisionConnectionError`（handler 抛 `httpx2.ConnectError`） |
 | 非法 JSON | `DecisionResponseError` |
 | 缺 `answers` | `DecisionResponseError` |
 | 429 退避后成功 | handler 依序返回 429 → 200，断言被调用 2 次、日志有「判断调用重试」 |
@@ -450,7 +455,7 @@ service._clients = {"laya": _mock_client(handler)}  # pyright: ignore[reportPriv
 - **Laya 的 `model` 只能是 checkpoint 名**（`english` / `multilingual` / `typed-decisions`）：写别的值由服务端报错；留空即自动路由。
 - **零样本判断质量很差**：官方 model card 自述「Laya 是便于特化的基座，不是零样本决策引擎」（零样本准确率接近随机）。README 要写清楚：判断结果必须配阈值或人工兜底，且阈值要按**当前后端**单独校准。
 - **新层不在 coverage omit 里**：当前只 omit `core/main.py`，`core/decision/*` 需要真实测试覆盖，否则覆盖率会明显下滑。
-- **httpx 版本**：`openai` 3.x 自带的 httpx 已满足 `>=0.28`；显式声明后若与 SDK 的约束冲突，以 `uv sync` 的实际解析结果为准。
+- **httpx2 版本**：`openai` 3.x 声明的是 `httpx2>=2.12.0,<3`，实测环境里是 2.13.1；显式声明 `>=2.12` 与它相容。若将来 SDK 改回 `httpx`，以 `uv sync` 的实际解析结果为准。
 
 ## 十二、验收标准
 
