@@ -17,7 +17,7 @@ import httpx2
 import pytest
 
 import core.decision.service as decision_service
-from core.config import DecisionEndpointSettings, DecisionSettings, LogSettings
+from core.config import DecisionEndpointSettings, DecisionSettings, LogSettings, Settings
 from core.decision import (
     DecisionConfigError,
     DecisionConnectionError,
@@ -33,6 +33,7 @@ from core.decision import (
 from core.decision.service import _QID  # pyright: ignore[reportPrivateUsage]
 from core.logger import setup_logging
 from core.service.base import ServiceState
+from core.service.manager import ServiceManager
 
 
 def _service(
@@ -436,13 +437,12 @@ async def test_重试会记日志(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 # 而不是指望 start()/stop() 自己去改。
 
 
-def _enabled(*, jev: DecisionEndpointSettings | None = None) -> DecisionSettings:
-    """造一份只启用 laya 端点的配置。"""
+def _enabled() -> DecisionSettings:
+    """造一份只启用 laya 端点的配置（jev 走 DecisionSettings 的默认值，不启用）。"""
     return DecisionSettings(
-        jev=DecisionSettings().jev if jev is None else jev,
         laya=DecisionEndpointSettings(
             enabled=True, base_url="http://laya.test/v1", model="multilingual"
-        ),
+        )
     )
 
 
@@ -456,11 +456,21 @@ async def test_start只为启用的端点建客户端() -> None:
 
 
 async def test_未启用端点不产生警告(tmp_path: Path) -> None:
+    """两个端点都关着时 start() 只建空客户端，不报警告。
+
+    纯否定断言有真空通过的风险（日志根本没写盘时也成立），所以先打一条正向锚：
+    经本服务的门面写一行 INFO，证明这条日志管道确实会落盘，再断言全文无 warning。
+    `start()` 自身不打日志是设计（未启用是用户的显式选择），这条锚因此由测试自己产生。
+    """
     files = setup_logging(LogSettings(dir=str(tmp_path), level="TRACE"))
+    service = DecisionService(DecisionSettings())
 
-    await DecisionService(DecisionSettings()).start()
+    await service.start()
+    service.log.info("正向锚：这条门面的日志落盘即证明日志已生效")
 
-    assert "warning" not in files.app.read_text(encoding="utf-8").lower()
+    text = files.app.read_text(encoding="utf-8")
+    assert "正向锚" in text  # 日志管道确实在工作
+    assert "warning" not in text.lower()
 
 
 async def test_stop幂等() -> None:
@@ -479,24 +489,37 @@ async def test_未启动时stop不报错() -> None:
 
 
 async def test_健康检查三态() -> None:
-    service = DecisionService(_enabled())
-    assert (await service.health()).healthy is False
+    """三态由真容器驱动：未启动不健康、start_all 后健康、stop_all 后「服务未运行」。"""
+    settings = Settings(decision=_enabled())
+    manager = ServiceManager(settings)
+    manager.register(DecisionService)
+    service = manager.get(DecisionService)
 
-    await service.start()
-    service.state = ServiceState.RUNNING  # 状态由 manager 摆，见本段开头
+    assert (await service.health()).healthy is False  # 未启动
+
+    await manager.start_all()
     healthy = await service.health()
     assert healthy.healthy is True
     assert healthy.detail == ""
-    assert healthy.extra["laya模型"] == "multilingual"
+    assert healthy.extra == {
+        "jev模型": "jev-latest",
+        "jev端点": "https://api.typesafe.ai/v1",
+        "laya模型": "multilingual",
+        "laya端点": "http://laya.test/v1",
+    }
 
-    await service.stop()
-    service.state = ServiceState.STOPPED
+    await manager.stop_all()
     stopped = await service.health()
     assert stopped.healthy is False
     assert "服务未运行" in stopped.detail
 
 
 async def test_一个端点都没启用时的详情() -> None:
+    """手写 RUNNING 覆盖 health() 的「跑着但一个客户端都没有」分支：
+
+    该分支看的是配置问题而非状态问题，manager 驱动路径下打不到（start_all 后
+    只要有一端启用就 healthy），因此这里直接摆状态。
+    """
     service = DecisionService(DecisionSettings())
     service.state = ServiceState.RUNNING  # 状态就位，但一个客户端都没有
 
@@ -504,7 +527,12 @@ async def test_一个端点都没启用时的详情() -> None:
 
     assert status.healthy is False
     assert "未启用任何判断端点" in status.detail
-    assert status.extra["jev端点"] == "https://api.typesafe.ai/v1"
+    assert status.extra == {
+        "jev模型": "jev-latest",
+        "jev端点": "https://api.typesafe.ai/v1",
+        "laya模型": "",
+        "laya端点": "http://127.0.0.1:8000/v1",
+    }
 
 
 async def test_已在跑时start不重建客户端() -> None:
@@ -522,10 +550,11 @@ async def test_已在跑时start不重建客户端() -> None:
 
 
 async def test_stop后再start会重建客户端() -> None:
-    """现状记录：stop 后状态留在 STOPPED，此时再 start 不会早退，又建了一套客户端。
+    """stop 后状态留在 STOPPED，此时再 start 不会早退，又建一套客户端。
 
-    老的那套在 stop 里已经关了，也没人认领——启动器不会二次 start，所以现实里
-    打不到。真要支持二次 start，得先定清楚 stop 后状态该回到哪、旧客户端怎么回收。
+    这条路径现实中打得到：`ServiceManager.start_all` 把非 RUNNING（含 STOPPED）的
+    服务纳入 pending 再次 start()，因此 `start_all → stop_all → start_all` 会走到这里，
+    且行为正确——老客户端已在 stop 里关掉（`first.is_closed`），新客户端重建后可用。
     """
     service = DecisionService(_enabled())
     await service.start()
