@@ -20,7 +20,9 @@ log:
   # 文件名支持 loguru 时间模板，装配时求值 → 每次启动写一组独立文件。
   # 保留 {…} 占位符不只是命名方便：loguru 的 retention 靠它识别同族文件，
   # 写成固定名（app.log）时旧文件永远清不掉。
-  file_name: "cosmos-{time:%Y%m%d-%H%M%S}.log"
+  # 两个名字的前缀不能互为包含关系：主日志的反查 glob 会把以它为前缀的
+  # 错误日志一起匹配进来（详见 core/logger/sinks.py::_session_path）。
+  file_name: "cosmos-main-{time:%Y%m%d-%H%M%S}.log"
   error_file_name: "cosmos-error-{time:%Y%m%d-%H%M%S}.log"
   rotation: "00:00" # 轮转阈值（默认按天）；不加引号会被 YAML 当成整数 0
   retention: 7 days # 保留时长，超期文件自动清理

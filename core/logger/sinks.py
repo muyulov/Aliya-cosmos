@@ -175,9 +175,9 @@ def _session_path(log_dir: Path, name: str, *, sibling: str | None = None) -> Pa
 
     `sibling` 是另一个文件 sink 的模板，用来排掉被本模板的 glob 误伤的文件：
     `cosmos-{time}.log` 的模式是 `cosmos-*.log`，而 `cosmos-error-{time}.log`
-    也满足它，骨架里这两个前缀恰好是包含关系，光比 mtime 谁新会把主日志解析成
-    错误日志文件。排除后一个不剩时（两个模板互相包含，比如写成同一个名字），
-    退回不排除，保持原来的行为。
+    也满足它（两个前缀成包含关系），光比 mtime 谁新会把主日志解析成错误日志
+    文件。排除后一个不剩时（两个模板互相包含，比如写成同一个名字），退回不
+    排除，保持原来的行为。
     """
     pattern = _TEMPLATE_FIELD.sub("*", name)
     if pattern == name:
