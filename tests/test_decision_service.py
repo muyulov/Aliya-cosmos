@@ -26,7 +26,9 @@ from core.decision import (
     DecisionResult,
     DecisionService,
     DecisionTimeoutError,
+    choice,
     noul,
+    score,
 )
 from core.decision.service import _QID  # pyright: ignore[reportPrivateUsage]
 from core.logger import setup_logging
@@ -269,6 +271,139 @@ async def test_其他4xx不重试() -> None:
         _ = await _service(handler).predict("state", {})
 
     assert len(calls) == 1
+
+
+_CHOICE_BODY = {
+    "model": "m",
+    "answers": {
+        _QID: {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {"billing": 0.88, "other": 0.12},
+            "confidence": 0.81,
+        }
+    },
+    "usage": {"input_tokens": 5, "output_tokens": 0},
+}
+_SCORE_BODY = {
+    "model": "m",
+    "answers": {
+        _QID: {
+            "type": "score",
+            "score": 1.05,
+            "legend": {"0": "平静", "1": "不满", "2": "愤怒"},
+            "probabilities": {"0": 0.0, "1": 0.95, "2": 0.05},
+            "confidence": 0.92,
+        }
+    },
+    "usage": {"input_tokens": 5, "output_tokens": 0},
+}
+_NOUL_BODY = {
+    "model": "m",
+    "answers": {_QID: {"type": "noul", "noul": 0.93}},
+    "usage": {"input_tokens": 5, "output_tokens": 0},
+}
+
+
+async def test_choose返回选中选项与分布() -> None:
+    service = _service(lambda request: httpx2.Response(200, json=_CHOICE_BODY))
+
+    answer = await service.choose("要退款", "归哪个部门？", {"billing": "账单", "other": None})
+
+    assert answer.choice == "billing"
+    assert answer.probabilities["billing"] == 0.88
+    assert answer.confidence == 0.81
+
+
+async def test_rate返回得分与档位说明() -> None:
+    service = _service(lambda request: httpx2.Response(200, json=_SCORE_BODY))
+
+    answer = await service.rate("钱扣了两次", "愤怒程度？", ["平静", "不满", "愤怒"])
+
+    assert answer.score == 1.05
+    assert answer.legend["1"] == "不满"
+
+
+async def test_ask返回是概率() -> None:
+    service = _service(lambda request: httpx2.Response(200, json=_NOUL_BODY))
+
+    assert await service.ask("我要退款", "是否要求退款？") == 0.93
+
+
+async def test_便捷方法缺答案键时报错() -> None:
+    service = _service(lambda request: httpx2.Response(200, json={"model": "m", "answers": {}}))
+
+    with pytest.raises(DecisionResponseError) as excinfo:
+        _ = await service.ask("state", "是否？")
+
+    assert "answer" in str(excinfo.value)
+
+
+async def test_便捷方法字段不完整时报错() -> None:
+    service = _service(
+        lambda request: httpx2.Response(
+            200,
+            json={
+                "model": "m",
+                "answers": {_QID: {"type": "choice", "choice": "billing"}},
+                "usage": {},
+            },
+        )
+    )
+
+    with pytest.raises(DecisionResponseError):
+        _ = await service.choose("state", "选一个", {"billing": None})
+
+
+async def test_score字段不完整时报错() -> None:
+    service = _service(
+        lambda request: httpx2.Response(
+            200,
+            json={
+                "model": "m",
+                "answers": {_QID: {"type": "score", "score": 1.0}},
+                "usage": {},
+            },
+        )
+    )
+
+    with pytest.raises(DecisionResponseError):
+        _ = await service.rate("state", "打分", ["低", "高"])
+
+
+async def test_noul字段类型不对时报错() -> None:
+    service = _service(
+        lambda request: httpx2.Response(
+            200,
+            json={"model": "m", "answers": {_QID: {"type": "noul", "noul": "yes"}}, "usage": {}},
+        )
+    )
+
+    with pytest.raises(DecisionResponseError):
+        _ = await service.ask("state", "是否？")
+
+
+async def test_便捷方法把三原语混进同一趟() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200, json=_NOUL_BODY)
+
+    service = _service(handler)
+
+    _ = await service.predict(
+        "state",
+        {
+            "a": noul("是否？"),
+            "b": choice("选一个", {"x": None}),
+            "c": score("打分", ["低", "高"]),
+        },
+    )
+
+    body = cast("dict[str, object]", json.loads(seen[0].content))
+    assert sorted(cast("dict[str, object]", body["questions"])) == ["a", "b", "c"]
+    assert len(seen) == 1  # 三题只发一次请求
 
 
 async def test_重试会记日志(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
