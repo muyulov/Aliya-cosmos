@@ -22,11 +22,8 @@ def test_有密钥时带鉴权头() -> None:
     client = build_client(endpoint)
 
     assert client.headers["authorization"] == "Bearer sk-x"
-    # 实测：AsyncClient 会把 base_url 规范成带尾斜杠的地址（/v1 变 /v1/），
-    # str(base_url) 与 URL 相等比较都对不上字面量，故逐段核对真实取值。
-    assert client.base_url.scheme == "https"
-    assert client.base_url.host == "api.typesafe.ai"
-    assert client.base_url.path == "/v1/"
+    # httpx2.AsyncClient 会把 base_url 规范成带尾斜杠，所以断言里也要带
+    assert str(client.base_url) == "https://api.typesafe.ai/v1/"
 
 
 def test_没密钥时不带鉴权头() -> None:

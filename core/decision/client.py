@@ -18,6 +18,7 @@ def build_client(endpoint: DecisionEndpointSettings) -> httpx2.AsyncClient:
     """按端点配置构造异步客户端。
 
     api_key 为空时不发 Authorization 头：laya-serve 不设 LAYA_API_KEY 时本来就不要求认证。
+    `retries` 不在这里传：httpx2 的重试只管连接层，429 / 529 的退避重试由服务层实现。
     """
     headers = {"Authorization": f"Bearer {endpoint.api_key}"} if endpoint.api_key else {}
     return httpx2.AsyncClient(
