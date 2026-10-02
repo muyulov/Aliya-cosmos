@@ -322,6 +322,8 @@ async def test_rate返回得分与档位说明() -> None:
 
     assert answer.score == 1.05
     assert answer.legend["1"] == "不满"
+    assert answer.probabilities["1"] == 0.95
+    assert answer.confidence == 0.92
 
 
 async def test_ask返回是概率() -> None:
@@ -383,7 +385,7 @@ async def test_noul字段类型不对时报错() -> None:
         _ = await service.ask("state", "是否？")
 
 
-async def test_便捷方法把三原语混进同一趟() -> None:
+async def test_predict把三原语混进同一趟() -> None:
     seen: list[httpx2.Request] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
