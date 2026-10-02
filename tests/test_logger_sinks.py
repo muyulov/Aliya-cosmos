@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -421,6 +422,67 @@ def test_session_path_找不到候选时回退字面路径(tmp_path: Path) -> No
     )
 
     assert resolved == log_dir / "app-{time:%Y%m%d}.log"
+
+
+def test_主日志不会被错误日志的模板抢走(tmp_path: Path) -> None:
+    """回归：骨架的 `cosmos-*.log` glob 会命中 `cosmos-error-*.log`。
+
+    两个文件 sink 前缀是包含关系时，主日志曾按 mtime 最新解析成错误日志文件，
+    结果两条 sink 写进同一个文件。
+    """
+    files = setup_logging(
+        _cfg(
+            tmp_path,
+            file_name="cosmos-{time:%Y%m%d-%H%M%S}.log",
+            error_file_name="cosmos-error-{time:%Y%m%d-%H%M%S}.log",
+        )
+    )
+
+    assert files.app != files.error
+    assert "error" not in files.app.name
+    assert files.app.is_file()
+    assert files.error.is_file()
+
+
+def test_session_path_排除兄弟模板命中的文件(tmp_path: Path) -> None:
+    """回归：兄弟模板命中者必须先排除，不能只比 mtime 谁新（错误日志总是后建的）。"""
+    import core.logger.sinks as sinks_module
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    app = log_dir / "cosmos-20261002-120000.log"
+    error = log_dir / "cosmos-error-20261002-120000.log"
+    _ = app.write_text("", encoding="utf-8")
+    _ = error.write_text("", encoding="utf-8")
+    # 错误日志更「新」，正是踩坑时的时序
+    os.utime(app, (1_000_000, 1_000_000))
+    os.utime(error, (2_000_000, 2_000_000))
+
+    resolved = sinks_module._session_path(  # pyright: ignore[reportPrivateUsage]
+        log_dir,
+        "cosmos-{time:%Y%m%d-%H%M%S}.log",
+        sibling="cosmos-error-{time:%Y%m%d-%H%M%S}.log",
+    )
+
+    assert resolved == app
+
+
+def test_session_path_兄弟模板互相包含时退回不排除(tmp_path: Path) -> None:
+    """两个模板写成同一个名字时，排除兄弟会一个不剩，此时退回按 mtime 取最新。"""
+    import core.logger.sinks as sinks_module
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    only = log_dir / "same-20261002-120000.log"
+    _ = only.write_text("", encoding="utf-8")
+
+    resolved = sinks_module._session_path(  # pyright: ignore[reportPrivateUsage]
+        log_dir,
+        "same-{time:%Y%m%d-%H%M%S}.log",
+        sibling="same-{time:%Y%m%d-%H%M%S}.log",
+    )
+
+    assert resolved == only
 
 
 def test_桥接未注册的级别名时退回数字级别(tmp_path: Path) -> None:

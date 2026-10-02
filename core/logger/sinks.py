@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import NamedTuple
 
@@ -161,21 +162,32 @@ def add_file_sinks(cfg: LogSettings) -> LogFiles:
     _add_file_sink(log_dir / cfg.file_name, cfg.level.upper(), cfg)
     _add_file_sink(log_dir / cfg.error_file_name, ERROR_LEVEL, cfg)
     return LogFiles(
-        app=_session_path(log_dir, cfg.file_name),
-        error=_session_path(log_dir, cfg.error_file_name),
+        app=_session_path(log_dir, cfg.file_name, sibling=cfg.error_file_name),
+        error=_session_path(log_dir, cfg.error_file_name, sibling=cfg.file_name),
     )
 
 
-def _session_path(log_dir: Path, name: str) -> Path:
+def _session_path(log_dir: Path, name: str, *, sibling: str | None = None) -> Path:
     """解析文件名模板对应的实际文件（装配时 loguru 已把它建出来）。
 
     带占位符时拼不出文件名，只能按模板反查目录并取最新写入的一个；没有占位符
     就是字面路径，直接拼。同一秒内多次装配会撞同名文件——它们本来就是同一个。
+
+    `sibling` 是另一个文件 sink 的模板，用来排掉被本模板的 glob 误伤的文件：
+    `cosmos-{time}.log` 的模式是 `cosmos-*.log`，而 `cosmos-error-{time}.log`
+    也满足它，骨架里这两个前缀恰好是包含关系，光比 mtime 谁新会把主日志解析成
+    错误日志文件。排除后一个不剩时（两个模板互相包含，比如写成同一个名字），
+    退回不排除，保持原来的行为。
     """
     pattern = _TEMPLATE_FIELD.sub("*", name)
     if pattern == name:
         return log_dir / name
     candidates = [path for path in log_dir.glob(pattern) if path.is_file()]
+    if sibling is not None:
+        sibling_pattern = _TEMPLATE_FIELD.sub("*", sibling)
+        kept = [path for path in candidates if not fnmatch(path.name, sibling_pattern)]
+        if kept:
+            candidates = kept
     if not candidates:
         return log_dir / name
     return max(candidates, key=lambda path: path.stat().st_mtime)
