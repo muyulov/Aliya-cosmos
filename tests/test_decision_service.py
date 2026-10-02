@@ -32,6 +32,7 @@ from core.decision import (
 )
 from core.decision.service import _QID  # pyright: ignore[reportPrivateUsage]
 from core.logger import setup_logging
+from core.service.base import ServiceState
 
 
 def _service(
@@ -423,3 +424,117 @@ async def test_重试会记日志(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
     assert len(calls) == 2
     assert "判断调用重试" in files.app.read_text(encoding="utf-8")
+
+
+# ---- 生命周期与健康检查 ----
+#
+# 这一组真的走 start() / stop()：客户端的键是端点名字符串，断言键集才等价于
+# 「只为启用的端点建了客户端」。除「一个端点是空的」那条以外，都不需要请求。
+#
+# 状态由 manager 摆：它调 start 前后都写 state（STARTING → RUNNING），服务自己
+# 从不写。所以下面要造「已在跑」「已停」这类状态时，状态直接写在 service.state 上，
+# 而不是指望 start()/stop() 自己去改。
+
+
+def _enabled(*, jev: DecisionEndpointSettings | None = None) -> DecisionSettings:
+    """造一份只启用 laya 端点的配置。"""
+    return DecisionSettings(
+        jev=DecisionSettings().jev if jev is None else jev,
+        laya=DecisionEndpointSettings(
+            enabled=True, base_url="http://laya.test/v1", model="multilingual"
+        ),
+    )
+
+
+async def test_start只为启用的端点建客户端() -> None:
+    service = DecisionService(_enabled())
+
+    await service.start()
+
+    assert set(service._clients) == {"laya"}  # pyright: ignore[reportPrivateUsage]
+    await service.stop()
+
+
+async def test_未启用端点不产生警告(tmp_path: Path) -> None:
+    files = setup_logging(LogSettings(dir=str(tmp_path), level="TRACE"))
+
+    await DecisionService(DecisionSettings()).start()
+
+    assert "warning" not in files.app.read_text(encoding="utf-8").lower()
+
+
+async def test_stop幂等() -> None:
+    service = DecisionService(_enabled())
+    await service.start()
+    client = service._clients["laya"]  # pyright: ignore[reportPrivateUsage]
+
+    await service.stop()
+    await service.stop()
+
+    assert client.is_closed
+
+
+async def test_未启动时stop不报错() -> None:
+    await DecisionService(DecisionSettings()).stop()
+
+
+async def test_健康检查三态() -> None:
+    service = DecisionService(_enabled())
+    assert (await service.health()).healthy is False
+
+    await service.start()
+    service.state = ServiceState.RUNNING  # 状态由 manager 摆，见本段开头
+    healthy = await service.health()
+    assert healthy.healthy is True
+    assert healthy.detail == ""
+    assert healthy.extra["laya模型"] == "multilingual"
+
+    await service.stop()
+    service.state = ServiceState.STOPPED
+    stopped = await service.health()
+    assert stopped.healthy is False
+    assert "服务未运行" in stopped.detail
+
+
+async def test_一个端点都没启用时的详情() -> None:
+    service = DecisionService(DecisionSettings())
+    service.state = ServiceState.RUNNING  # 状态就位，但一个客户端都没有
+
+    status = await service.health()
+
+    assert status.healthy is False
+    assert "未启用任何判断端点" in status.detail
+    assert status.extra["jev端点"] == "https://api.typesafe.ai/v1"
+
+
+async def test_已在跑时start不重建客户端() -> None:
+    """状态已是 RUNNING 再调 start：直接早退，不重建、不泄漏旧客户端。"""
+    service = DecisionService(_enabled())
+    await service.start()
+    first = service._clients["laya"]  # pyright: ignore[reportPrivateUsage]
+
+    service.state = ServiceState.RUNNING  # 状态由 manager 摆，早退只看 running
+    await service.start()
+
+    assert service._clients["laya"] is first  # pyright: ignore[reportPrivateUsage]
+    assert not first.is_closed
+    await service.stop()
+
+
+async def test_stop后再start会重建客户端() -> None:
+    """现状记录：stop 后状态留在 STOPPED，此时再 start 不会早退，又建了一套客户端。
+
+    老的那套在 stop 里已经关了，也没人认领——启动器不会二次 start，所以现实里
+    打不到。真要支持二次 start，得先定清楚 stop 后状态该回到哪、旧客户端怎么回收。
+    """
+    service = DecisionService(_enabled())
+    await service.start()
+    first = service._clients["laya"]  # pyright: ignore[reportPrivateUsage]
+    await service.stop()
+
+    await service.start()
+
+    rebuilt = service._clients["laya"]  # pyright: ignore[reportPrivateUsage]
+    assert rebuilt is not first
+    assert first.is_closed
+    await service.stop()
