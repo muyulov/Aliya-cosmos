@@ -38,7 +38,12 @@ class NoulCriteria(TypedDict):
 
 
 class NoulQuestion(TypedDict, total=False):
-    """是非题：返回 P(true)。`criteria` 可选，给了就必须两个槽都填。"""
+    """是非题：返回 P(true)。
+
+    协议允许整段省略 `criteria`，因此用 `total=False` 让它成为唯一可有可无的键，
+    同时用 `Required` 把 `type` / `instructions` 钉成必填。
+    `criteria` 给了就必须两个槽都填（见 `noul`）。
+    """
 
     type: Required[Literal["noul"]]
     instructions: Required[str]
