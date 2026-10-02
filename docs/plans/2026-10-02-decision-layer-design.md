@@ -135,7 +135,7 @@ class DecisionSettings(BaseModel):
 ```yaml
 # 判断层：jev（云端）与 laya（本地 laya-serve）是两个端点，同一套 /systemone 协议。
 # base_url 只写到 /v1 为止，路径 /systemone 由代码补上。
-# 两个端点默认都关着：只警告、不 fail fast，调用时才报未启用。
+# 两个端点默认都关着：不警告、不 fail fast，调用时才报未启用（见决策 12）。
 decision:
   jev:
     enabled: false
@@ -351,15 +351,16 @@ _BACKOFF_BASE = 0.5  # 秒；测试 patch 成 0 即可免去伪造 asyncio.sleep
 
 ## 八、错误处理与日志
 
-`errors.py` 的错误树（全部继承 `DecisionError`，原始异常挂在 `__cause__`，**不在 `ServiceError` 树下**——调用失败是运行期错误，不该让进程 fail fast）：
+`errors.py` 的错误树（全部继承 `DecisionError`；原始异常只在超时 / 连接 / 返回体解码失败上挂 `__cause__`，状态码错的坐标收在 `DecisionRequestError` 的四个属性里；**不在 `ServiceError` 树下**——调用失败是运行期错误，不该让进程 fail fast）：
 
 | 场景 | 异常 |
 | --- | --- |
 | 端点未启用时发起调用 | `DecisionConfigError`（无 cause：根本没发请求） |
-| 4xx / 5xx | `DecisionRequestError`（带 `status_code` / `endpoint` / `model` / `request_id`） |
-| 请求超时 | `DecisionTimeoutError` |
-| 连不上端点 | `DecisionConnectionError` |
-| 返回体不是合法 JSON、缺 `answers`、便捷方法要的答案键/字段不在 | `DecisionResponseError` |
+| 4xx / 5xx | `DecisionRequestError`（带 `status_code` / `endpoint` / `model` / `request_id`，无 cause） |
+| 请求超时 | `DecisionTimeoutError`（cause 是 `httpx2.TimeoutException`） |
+| 连不上端点，或其余请求错误 | `DecisionConnectionError`（cause 是 `httpx2.TransportError` / `RequestError`） |
+| 返回体不是合法 JSON（含非 UTF-8）、压缩体解不开 | `DecisionResponseError`（cause 是 JSON 解析异常或 `httpx2.DecodingError`） |
+| 缺 `answers`、便捷方法要的答案键/字段不在 | `DecisionResponseError`（无 cause） |
 
 映射收在模块级 `_wrap_errors` 上下文管理器里，四个公开方法统一走它。
 

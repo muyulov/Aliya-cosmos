@@ -3,7 +3,10 @@
 from core.config.loader import CONFIG_FILE, ENV_FILE, ConfigError
 from core.config.settings import (
     AppSettings,
+    Backend,
     ClockSettings,
+    DecisionEndpointSettings,
+    DecisionSettings,
     EmbeddingSettings,
     LLMEndpointSettings,
     LLMSettings,
@@ -18,8 +21,11 @@ __all__ = [
     "CONFIG_FILE",
     "ENV_FILE",
     "AppSettings",
+    "Backend",
     "ClockSettings",
     "ConfigError",
+    "DecisionEndpointSettings",
+    "DecisionSettings",
     "EmbeddingSettings",
     "LLMEndpointSettings",
     "LLMSettings",

@@ -2,7 +2,7 @@
 
 Python + uv 通用脚手架。三层结构：`service` / `logger` / `config`，开箱可跑，后续往里填业务。
 
-技术栈：Python 3.12+、uv、pydantic、PyYAML、loguru、openai、ruff、pytest。
+技术栈：Python 3.12+、uv、pydantic、PyYAML、loguru、openai、httpx2、ruff、pytest。
 
 ## 快速开始
 
@@ -39,11 +39,12 @@ core/
   config/        配置层：YAML 骨架加载与占位符插值
   embedding/     向量层：单条 / 批量文本向量化
   llm/           LLM 层：对话 / 流式 / 结构化 / 工具调用 / 多模态
+  decision/      判断层：批量提问与 choice / score / noul 三原语
 data/           配置与运行数据：config/cosmos.yaml 为配置骨架，可安全提交
 tests/           测试
 ```
 
-依赖方向单向：`service → (config, logger)`、`embedding → (config, logger, service)`、`llm → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
+依赖方向单向：`service → (config, logger)`、`embedding / llm / decision → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm` / `decision`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
 
 ## 配置
 
@@ -122,6 +123,17 @@ log:
 | `structured_mode` | `json_schema` | 结构化输出模式，兼容端点不支持时改 `json_object` |
 | `temperature` | `null` | 温度，`null` 表示不传该参数（用服务端默认） |
 | `max_tokens` | `null` | 最大输出 token，`null` 表示不传该参数 |
+
+`decision.jev`（云端）与 `decision.laya`（本地 laya-serve）是两个端点，字段完全相同，同一套 `/systemone` 协议；`base_url` 只写到 `/v1` 为止，路径 `/systemone` 由代码补上：
+
+| 端点字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `false` | 是否启用该端点；两个端点默认都关着，进程照常启动，调用时才报未启用 |
+| `base_url` | jev `https://api.typesafe.ai/v1` / laya `http://127.0.0.1:8000/v1` | 端点地址，只写到 `/v1`，路径 `/systemone` 由代码补 |
+| `api_key` | 空 | 密钥，YAML 里写 `${TYPESAFE_API_KEY:}` / `${LAYA_API_KEY:}` 由 `.env` 提供；留空则不发 `Authorization` 头（laya-serve 默认不要求认证） |
+| `model` | jev `jev-latest` / laya 空 | 该端点的模型；Jev 必填（空会 422），Laya 留空表示不带 `model` 字段、交给 Router 按语种自动选 checkpoint |
+| `timeout` | `60` | 单次请求超时秒数，必须为正数 |
+| `retries` | `2` | 429 / 529 的退避重试次数，`0` 关闭 |
 
 ### 失败行为
 
@@ -315,6 +327,58 @@ async def main(svc: EmbeddingService, texts: list[str]) -> None:
 | `EmbeddingConnectionError` | 连不上端点（超时除外） |
 | `EmbeddingResponseError` | 返回体与请求对不上：条数不符 / `index` 越界或重复 / 空向量 / 声明维度不符 |
 
+## 判断层
+
+`DecisionService` 把「让模型做一次判断」收成一个服务，业务代码不直接接触 HTTP。两个端点（jev 云端 / laya 本地）走**同一套 `/systemone` 协议、字段完全相同**——换 `base_url` 即可切换供应商。`backend` 显式选端点（默认 `laya`，本地优先：免费、数据不出域），**层内不做兜底**。
+
+```python
+from core.decision import DecisionService, choice, noul, score
+
+
+async def main(svc: DecisionService, message: str) -> None:
+    # 批量：一次前向把三题问完（协议的延迟优势就在这里）
+    result = await svc.predict(
+        message,
+        {
+            "部门": choice("归哪个部门？", {"billing": "账单", "technical": "技术故障"}),
+            "愤怒": score("愤怒程度？", ["平静", "不满", "愤怒"]),
+            "退款": noul("是否明确要求退款？", true="明确要求", false="没提"),
+        },
+    )
+    department = result.answers["部门"]
+
+    # 便捷方法：一次只问一题
+    picked = await svc.choose(message, "归哪个部门？", {"billing": "账单", "technical": "技术"})
+    anger = await svc.rate(message, "愤怒程度？", ["平静", "不满", "愤怒"])
+    wants_refund = await svc.ask(message, "是否明确要求退款？")
+
+    # 换后端：默认 laya（本地），要云端就传 backend
+    on_cloud = await svc.ask(message, "是否明确要求退款？", backend="jev")
+```
+
+约定：
+
+| 约定 | 说明 |
+| --- | --- |
+| 不记正文 | 日志只记模型 / 端点 / 问题数 / 耗时 / token；`state` 与 `questions` 的正文由调用方决定要不要自己记 |
+| `confidence` 不能跨后端比较 | Jev 的 `confidence` 是 `(n·p_max−1)/(n−1)`，Laya 是 `1−归一化熵`，两个数不是同一个量；阈值要按当前 `backend` 单独校准 |
+| 零样本质量很差 | 官方 model card 自述「Laya 是便于特化的基座，不是零样本决策引擎」（零样本准确率接近随机），判断结果必须配阈值或人工兜底 |
+| 两端点同协议 | jev 与 laya 走同一套 `/systemone` 协议、字段完全相同，换 `base_url` 即可切换供应商 |
+| `backend` 显式选 | 默认 `laya`（本地优先），要云端显式传 `backend="jev"` |
+| 层内不兜底 | 一个端点未启用时直接抛 `DecisionConfigError`，不会静默换另一头；`confidence` 跨端点语义不同，兜底必然出错 |
+| 缺端点不 fail fast | 两个端点都没启用时只让健康检查 unhealthy，进程照常启动，调用时才报未启用 |
+| 重试按状态码 | 429 / 529 按指数退避重试（次数由端点 `retries` 控制），其余 4xx / 5xx 不重试 |
+
+错误全部继承 `DecisionError`（调用方一次 `except` 就能兜住整个判断层）。原始 `httpx2` 异常**只在超时 / 连接失败两类上**挂 `__cause__`，其余类型无 cause——对账信息已收成属性（`DecisionRequestError` 的 `status_code` / `endpoint` / `model` / `request_id`），按文档直接读属性即可：
+
+| 类型 | 触发条件 | `__cause__` |
+| --- | --- | --- |
+| `DecisionConfigError` | 调用的端点未启用 | 无（没发起过调用） |
+| `DecisionRequestError` | 端点返回 4xx / 5xx（带 `status_code` / `endpoint` / `model` / `request_id`） | 无（对账信息在四个属性上） |
+| `DecisionTimeoutError` | 请求超时 | `httpx2.TimeoutException` |
+| `DecisionConnectionError` | 连不上端点（超时除外），或其余请求错误 | `httpx2.TransportError` / `httpx2.RequestError` |
+| `DecisionResponseError` | 返回体不合法：非 JSON（含非 UTF-8）/ 压缩体解不开 / 顶层不是对象 / 缺 answers / 答案字段不完整 | JSON 解析异常或 `httpx2.DecodingError`；其余无 |
+
 ## 如何新增一个服务
 
 服务是继承 `Service` 的类，`ServiceManager` 负责装配、启停与健康检查。
@@ -362,7 +426,7 @@ manager.register(CacheService)  # 支持一次传入多个类型：register(A, B
 | 整份配置注入 | 需要全局视野时在构造器声明 `settings: Settings`，容器注入应用持有的那份实例 |
 | 超时覆盖 | 默认走 `service.start_timeout` / `service.stop_timeout`；单独调整时写 `start_timeout: ClassVar[float \| Unset \| None] = 300.0`（需 `from core.service.base import Unset`），`None` 表示该服务不限制，不写即跟随全局 |
 | 判「在跑」用 `running` | `Service.running` 是 `state is ServiceState.RUNNING` 的统一出口，调用点不要再散写状态比较，改判定规则时才不必全仓搜 |
-| 健康检查可附带信息 | `health()` 返回的 `HealthStatus.extra` 会作为字段带进启动时的「服务健康」日志（内置服务用它报身份：clock 报 `时区`，embedding 报 `模型` / `端点`，llm 报 `对话模型` / `对话端点` / `多模态模型` / `多模态端点`）。与保留名同名的一律让位：`name` / `healthy` / `state` / `detail`，以及日志侧的 `服务` / `健康` / `状态` / `详情` |
+| 健康检查可附带信息 | `health()` 返回的 `HealthStatus.extra` 会作为字段带进启动时的「服务健康」日志（内置服务用它报身份：clock 报 `时区`，embedding 报 `模型` / `端点`，llm 报 `对话模型` / `对话端点` / `多模态模型` / `多模态端点`，decision 报 `jev模型` / `jev端点` / `laya模型` / `laya端点`）。与保留名同名的一律让位：`name` / `healthy` / `state` / `detail`，以及日志侧的 `服务` / `健康` / `状态` / `详情` |
 
 启停语义：`start` / `stop` 需幂等（重复调用不应报错），并且 **`stop()` 必须能安全作用在「从未成功启动过」的服务上**——启动失败者同样会被回滚调用。启动按依赖**分层**：同层并发、层间串行；单个服务超时或抛错都判该服务失败，并逆序回滚本次动过的服务（**含失败者**：`start()` 可能已经申请了部分资源，`stop()` 是它唯一的回收入口；失败者的状态保持 `FAILED`，清理成功不等于它启动成功过；**已 RUNNING、被本次跳过启动的服务也在回滚名单里**——整体启动失败意味着进程即将退出，而那时 `stop_all` 不会被调用），随后抛出 `ServiceStartError`；**被取消时（外层 `asyncio.timeout`、`task.cancel()`）走同一条回滚路径**——`lifespan()` 的 `__aenter__` 抛错时 `__aexit__` 不会执行、`stop_all` 不会被调用，所以回滚必须在 `start_all` 内部完成，已启动的服务不会留在 `RUNNING`。关闭按启动的逆序**串行**执行，单个服务超时或出错只记日志（状态置 `FAILED`），不影响其余服务停下。
 

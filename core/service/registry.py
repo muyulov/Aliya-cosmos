@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from core.config import Settings
+from core.decision.service import DecisionService
 from core.embedding.service import EmbeddingService
 from core.llm.service import LLMService
 from core.service.clock_service import ClockService
@@ -19,5 +20,5 @@ from core.service.manager import ServiceManager
 def build_manager(settings: Settings | None = None) -> ServiceManager:
     """构造并装配全部服务的 manager。"""
     manager = ServiceManager(settings)
-    manager.register(ClockService, EmbeddingService, LLMService)
+    manager.register(ClockService, EmbeddingService, LLMService, DecisionService)
     return manager
