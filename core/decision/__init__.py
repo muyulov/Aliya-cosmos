@@ -31,20 +31,32 @@ from core.decision.questions import (
     noul,
     score,
 )
+from core.decision.service import (
+    ChoiceAnswer,
+    DecisionResult,
+    DecisionService,
+    ScoreAnswer,
+    State,
+)
 
 __all__ = [
     "SYSTEMONE_PATH",
+    "ChoiceAnswer",
     "ChoiceQuestion",
     "DecisionConfigError",
     "DecisionConnectionError",
     "DecisionError",
     "DecisionRequestError",
     "DecisionResponseError",
+    "DecisionResult",
+    "DecisionService",
     "DecisionTimeoutError",
     "NoulCriteria",
     "NoulQuestion",
     "Question",
+    "ScoreAnswer",
     "ScoreQuestion",
+    "State",
     "build_client",
     "choice",
     "noul",
