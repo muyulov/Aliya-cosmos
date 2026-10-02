@@ -30,7 +30,7 @@ from core.logger.types import FilterFunction, Record
 #: 错误日志文件的级别门槛
 ERROR_LEVEL = "ERROR"
 
-#: 文件名里的 loguru 时间模板占位符，如 app-{time:%Y%m%d}.log
+#: 文件名里的 loguru 时间模板占位符，如 cosmos-main-{time:%Y%m%d}.log
 _TEMPLATE_FIELD = re.compile(r"\{[^{}]*\}")
 
 

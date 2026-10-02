@@ -182,7 +182,15 @@ def test_启动失败时记录收口日志并以非零码退出(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """回归：装配 / 启动失败要有收口日志，而不是只留一段裸 traceback、不打结论。"""
-    cfg = LogSettings(level="DEBUG", dir=str(tmp_path / "logs"), retention="1 day", layout="tree")
+    cfg = LogSettings(
+        level="DEBUG",
+        dir=str(tmp_path / "logs"),
+        retention="1 day",
+        layout="tree",
+        # 显式给文件名，不依赖默认值：本用例只需要拿到 main() 写出的那份主日志
+        file_name="probe-main-{time:%Y%m%d-%H%M%S}.log",
+        error_file_name="probe-error-{time:%Y%m%d-%H%M%S}.log",
+    )
     monkeypatch.setattr(main_module, "get_settings", lambda: Settings(log=cfg))
 
     mgr = ServiceManager()
@@ -200,7 +208,7 @@ def test_启动失败时记录收口日志并以非零码退出(
         logger.remove()
 
     assert excinfo.value.code == 1
-    text = max((tmp_path / "logs").glob("app-*.log")).read_text(encoding="utf-8")
+    text = max((tmp_path / "logs").glob("probe-main-*.log")).read_text(encoding="utf-8")
     assert "应用启动失败，进程退出" in text
     assert "错误类型: RuntimeError" in text
     assert "错误消息: 启动就炸" in text

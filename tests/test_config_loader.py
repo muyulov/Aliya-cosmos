@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from core.config import ConfigError, Settings, get_settings, load_settings
+from core.config import ConfigError, LogSettings, Settings, get_settings, load_settings
 from core.config.loader import interpolate, read_env, read_yaml
 
 
@@ -376,23 +376,24 @@ def test_判断层超时必须为正数(tmp_path: Path) -> None:
         _ = load_settings(config_file=config, env_file=tmp_path / ".env")
 
 
-# ---- 仓库骨架守护 ----
+# ---- 出厂配置守护 ----
 
 #: 出厂骨架：需要真实读一份，按相对本文件的路径取以免依赖工作目录
 _SKELETON = Path(__file__).resolve().parent.parent / "data" / "config" / "cosmos.yaml"
 
 
-def test_骨架的日志文件名前缀不互为包含关系() -> None:
+def test_日志文件名前缀不互为包含关系() -> None:
     """回归：主日志的反查 glob 会把「以它为前缀」的错误日志一起匹配进来。
 
-    `cosmos-{time}.log` 的模板 glob 是 `cosmos-*.log`，而 `cosmos-error-{time}.log`
-    正好满足它，于是主日志会被解析成错误日志文件（见 core/logger/sinks.py）。
-    骨架是出厂默认，两个前缀必须互相不包含。
+    模板 `cosmos-{time}.log` 的 glob 是 `cosmos-*.log`，而 `cosmos-error-{time}.log`
+    正好满足它，主日志曾被解析成错误日志文件（见 core/logger/sinks.py）。
+    代码默认值与出厂骨架都不许踩这个坑。
     """
-    settings = load_settings(config_file=_SKELETON, env_file=_SKELETON.parent / ".env")
+    skeleton_log = load_settings(config_file=_SKELETON, env_file=_SKELETON.parent / ".env").log
 
-    app_prefix = settings.log.file_name.split("{", 1)[0]
-    error_prefix = settings.log.error_file_name.split("{", 1)[0]
+    for config in (LogSettings(), skeleton_log):
+        app_prefix = config.file_name.split("{", 1)[0]
+        error_prefix = config.error_file_name.split("{", 1)[0]
 
-    assert not app_prefix.startswith(error_prefix)
-    assert not error_prefix.startswith(app_prefix)
+        assert not app_prefix.startswith(error_prefix), config
+        assert not error_prefix.startswith(app_prefix), config

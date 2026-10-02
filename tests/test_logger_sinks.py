@@ -83,8 +83,8 @@ def test_默认按天轮转() -> None:
 
 def test_默认文件名带启动时间模板() -> None:
     """文件名带 {time} 模板：每次启动一组新文件，且 retention 能跨启动识别同族文件。"""
-    assert LogSettings().file_name == "app-{time:%Y%m%d-%H%M%S}.log"
-    assert LogSettings().error_file_name == "error-{time:%Y%m%d-%H%M%S}.log"
+    assert LogSettings().file_name == "cosmos-main-{time:%Y%m%d-%H%M%S}.log"
+    assert LogSettings().error_file_name == "cosmos-error-{time:%Y%m%d-%H%M%S}.log"
 
 
 def test_默认布局是单行() -> None:

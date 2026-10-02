@@ -50,6 +50,8 @@ class LogSettings(BaseModel):
     - `file_name` / `error_file_name`：支持 loguru 的时间模板，启动时间戳在装配时
       求值，因此每次启动都写到独立文件；模板里的 `{}` 同时让 loguru 的 retention
       能跨启动识别同族文件（写死文件名则只能清理本进程自己轮转出的小文件）。
+      两个名字的前缀**不能互为包含关系**：装配后要按模板反查目录定位文件，主日志的
+      glob 会把「以它为前缀」的错误日志一起匹配进来（`cosmos-*` 命中 `cosmos-error-*`）。
     """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(populate_by_name=True)
@@ -59,8 +61,8 @@ class LogSettings(BaseModel):
     layout: Literal["tree", "line"] = "line"
     color: Literal["auto", "always", "never"] = "auto"
     dir: str = "logs"
-    file_name: str = "app-{time:%Y%m%d-%H%M%S}.log"
-    error_file_name: str = "error-{time:%Y%m%d-%H%M%S}.log"
+    file_name: str = "cosmos-main-{time:%Y%m%d-%H%M%S}.log"
+    error_file_name: str = "cosmos-error-{time:%Y%m%d-%H%M%S}.log"
     rotation: str = "00:00"
     retention: str = "7 days"
     compression: str = "zip"

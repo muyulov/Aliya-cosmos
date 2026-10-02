@@ -90,8 +90,8 @@ log:
 | `log.layout` | `line` | 输出布局：`line`（字段内联成一行，便于 grep 与按行采集）/ `tree`（字段缩进成树） |
 | `log.color` | `auto` | 控制台着色：`auto`（仅终端）/ `always` / `never`；日志文件永远不带颜色 |
 | `log.dir` | `logs` | 日志目录 |
-| `log.file_name` | `app-{time:%Y%m%d-%H%M%S}.log` | 主日志文件名，支持 loguru 时间模板（装配时求值，故每次启动一个独立文件） |
-| `log.error_file_name` | `error-{time:%Y%m%d-%H%M%S}.log` | 错误日志文件名，同上 |
+| `log.file_name` | `cosmos-main-{time:%Y%m%d-%H%M%S}.log` | 主日志文件名，支持 loguru 时间模板（装配时求值，故每次启动一个独立文件） |
+| `log.error_file_name` | `cosmos-error-{time:%Y%m%d-%H%M%S}.log` | 错误日志文件名，同上。两个名字的前缀不能互为包含关系 |
 | `log.rotation` | `00:00` | 轮转阈值（默认按天），写进 YAML 时必须加引号 |
 | `log.retention` | `7 days` | 保留时长 |
 | `log.compression` | `zip` | 归档压缩方式 |
@@ -207,7 +207,7 @@ with log.context(会话="qq:123"):
        KeyError: 'item_id'
 ```
 
-日志文件有两个：`logs/app-<启动时间戳>.log`（跟随 `log.level`）与 `logs/error-<启动时间戳>.log`（固定 ERROR 级），均按天轮转。文件名默认带 `{time}` 模板，**每次启动写一组独立文件**，两次启动的内容不会混在一起；`setup_logging()` 返回的 `LogFiles(app=…, error=…)` 就是本次实际写入的路径。
+日志文件有两个：`logs/cosmos-main-<启动时间戳>.log`（跟随 `log.level`）与 `logs/cosmos-error-<启动时间戳>.log`（固定 ERROR 级），均按天轮转。文件名默认带 `{time}` 模板，**每次启动写一组独立文件**，两次启动的内容不会混在一起；`setup_logging()` 返回的 `LogFiles(app=…, error=…)` 就是本次实际写入的路径。
 
 保留 `{…}` 占位符不只是为了命名：loguru 的 `retention` 靠它识别同族文件，改成固定名（`app.log`）后旧文件将永远清不掉。
 
