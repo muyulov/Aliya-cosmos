@@ -25,7 +25,7 @@ import time
 
 import pytest
 
-from core.memory.ingest.queue import ObservationQueue
+from core.memory.ingest.queue import ObservationQueue, PendingObservation
 from core.memory.models import Observation
 
 # 「有界但很慢」护栏的阈值：**不是性能指标**，只用来拒绝「满时还去等」的实现。
@@ -38,19 +38,27 @@ def _观测(文本: str) -> Observation:
     return Observation(kind="dialogue", text=文本)
 
 
+def _待处理(文本: str) -> PendingObservation:
+    """造一条待处理观测：载荷配上入队即定的主键（队列元素类型）。
+
+    主键与文本一一对应，便于断言「取回的正是入队那一份」。
+    """
+    return PendingObservation(utterance_id=f"u-{文本}", observation=_观测(文本))
+
+
 async def test_入队即返回() -> None:
     """put 后 get 能取回同一条观测。"""
     queue = ObservationQueue(capacity=4)
-    _ = await queue.put(_观测("甲"))
-    assert await queue.get() == _观测("甲")
+    _ = await queue.put(_待处理("甲"))
+    assert await queue.get() == _待处理("甲")
 
 
 async def test_满队列丢弃并记数() -> None:
     """过载走丢弃 + 告警，与故障走死信是两回事（设计文档 6.5）。"""
     queue = ObservationQueue(capacity=2)
-    assert await queue.put(_观测("甲")) is True
-    assert await queue.put(_观测("乙")) is True
-    assert await queue.put(_观测("丙")) is False
+    assert await queue.put(_待处理("甲")) is True
+    assert await queue.put(_待处理("乙")) is True
+    assert await queue.put(_待处理("丙")) is False
     assert queue.dropped == 1
 
 
@@ -58,13 +66,13 @@ async def test_关闭后拒绝入队() -> None:
     """close 之后的观测一律拒收，免得 stop() 期间吊死调用方。"""
     queue = ObservationQueue(capacity=2)
     queue.close()
-    assert await queue.put(_观测("甲")) is False
+    assert await queue.put(_待处理("甲")) is False
 
 
 async def test_关闭幂等() -> None:
     """反复 close 不报错，也不重复清空或改变计数语义。"""
     queue = ObservationQueue(capacity=2)
-    _ = await queue.put(_观测("甲"))
+    _ = await queue.put(_待处理("甲"))
     queue.close()
     queue.close()
     assert queue.depth == 1
@@ -74,8 +82,8 @@ async def test_深度随入队出队变化() -> None:
     """depth 是只读属性：空时为 0，入队后累加，出队后回落。"""
     queue = ObservationQueue(capacity=3)
     assert queue.depth == 0
-    _ = await queue.put(_观测("甲"))
-    _ = await queue.put(_观测("乙"))
+    _ = await queue.put(_待处理("甲"))
+    _ = await queue.put(_待处理("乙"))
     assert queue.depth == 2
     _ = await queue.get()
     assert queue.depth == 1
@@ -94,9 +102,9 @@ async def test_满队列连续入队不阻塞() -> None:
     单独兜住——两条互补，不是二选一。
     """
     queue = ObservationQueue(capacity=1)
-    assert await queue.put(_观测("甲")) is True
+    assert await queue.put(_待处理("甲")) is True
     for i in range(50):
-        assert await queue.put(_观测(f"溢出{i}")) is False
+        assert await queue.put(_待处理(f"溢出{i}")) is False
     assert queue.dropped == 50
 
 
@@ -108,10 +116,10 @@ async def test_满队列连续入队耗时上界() -> None:
     阈值 `满拒绝耗时上界秒` 是纯护栏、不是性能指标，余量四个数量级。
     """
     queue = ObservationQueue(capacity=1)
-    assert await queue.put(_观测("甲")) is True
+    assert await queue.put(_待处理("甲")) is True
     起点 = time.monotonic()
     for i in range(50):
-        assert await queue.put(_观测(f"溢出{i}")) is False
+        assert await queue.put(_待处理(f"溢出{i}")) is False
     耗时 = time.monotonic() - 起点
     assert queue.dropped == 50
     assert 耗时 < 满拒绝耗时上界秒, f"满队列入队耗时 {耗时:.4f}s，超出上界 {满拒绝耗时上界秒}s"

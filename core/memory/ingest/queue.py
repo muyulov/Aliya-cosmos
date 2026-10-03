@@ -14,15 +14,38 @@
 **为什么不在这里记日志**：队列是纯数据结构，真假与计数就是它的全部回答；
 记日志（含上下文、健康指标）由调用方 `MemoryService` 编排时做，职责不重叠。
 
-**队列里装 `Observation` 原型对象，不装 dict**：入队前载荷已经过校验，
-直接持有 pydantic 模型更清晰；死信要 dict 时，由消费方在那一刻 `model_dump()`。
+**队列里装 `PendingObservation`（观测 + 主键），不装裸 `Observation`、更不装 dict**：
+入队前载荷已经过校验，直接持有 pydantic 模型更清晰；死信要 dict 时，由消费方在那一刻
+`model_dump()`。而把**主键**一起装进来是本模块对 Task 6 的**有意修改**——理由见
+`PendingObservation` 的 docstring：只有入队时就固定主键，`observe` 的返回值才能与
+最终落库的 `Utterance.id` 一致。
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 
 from core.memory.models import Observation
+
+
+@dataclass(frozen=True, slots=True)
+class PendingObservation:
+    """待处理观测：一条载荷 + 它的**入队即定**的主键。
+
+    这是对 Task 6 已审队列代码的**有意修改**（原来队列只装 `Observation`）：
+
+    主键必须**在入队那一刻固定**，并由 `MemoryService.observe` 生成、原样返回给调用方。
+    若让 worker 在消费时另生成一个 id 落库，调用方拿到的 id 就**永远不会出现在库里**——
+    无法按 id 溯源、无法日志关联，违背设计文档 §6.1「`observe` 返回 `utterance_id`」的契约：
+    那个 id 就应该是这条原文在库里的主键。故把 id 随载荷一起过队列。
+
+    不可变且带 `slots=True`：它是跨越「入队 → 队列 → 出队」的传递载体，
+    一次定下就不该在途中被改写（落库与写死信都读同一份 `utterance_id`）。
+    """
+
+    utterance_id: str
+    observation: Observation
 
 
 class ObservationQueue:
@@ -30,15 +53,16 @@ class ObservationQueue:
 
     内部就是一层 `asyncio.Queue(maxsize=capacity)`，把「满」的语义从**抛异常**
     改成**返回假并计数**——调用方拿到的永远是布尔值，不必处理 `QueueFull`。
+    元素是 `PendingObservation`（载荷 + 入队即定的主键）。
     """
 
     def __init__(self, capacity: int) -> None:
-        self._queue: asyncio.Queue[Observation] = asyncio.Queue(maxsize=capacity)
+        self._queue: asyncio.Queue[PendingObservation] = asyncio.Queue(maxsize=capacity)
         self._dropped: int = 0
         self._closed: bool = False
 
-    async def put(self, observation: Observation) -> bool:
-        """把观测交给队列：成功为真，被丢弃（满或已关闭）为假。
+    async def put(self, pending: PendingObservation) -> bool:
+        """把一条待处理观测交给队列：成功为真，被丢弃（满或已关闭）为假。
 
         用 `put_nowait` 而非 `await put`：容量满时**立刻**返回假，
         绝不等待消费者腾位——记忆层再忙也不能拖慢对话循环。
@@ -46,13 +70,13 @@ class ObservationQueue:
         if self._closed:
             return False
         try:
-            self._queue.put_nowait(observation)
+            self._queue.put_nowait(pending)
         except asyncio.QueueFull:
             self._dropped += 1
             return False
         return True
 
-    async def get(self) -> Observation:
+    async def get(self) -> PendingObservation:
         """取出一条观测；队列空时等待下一条到来。
 
         **不要在 `close()` 之后调用本方法**：关闭只栅住入队，不给 `get` 留出口，

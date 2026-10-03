@@ -4,7 +4,7 @@
 抽取、门控、落库在后续任务里补。
 """
 
-from core.memory.ingest.queue import ObservationQueue
+from core.memory.ingest.queue import ObservationQueue, PendingObservation
 from core.memory.ingest.retry import (
     STAGE_STRUCTURED,
     STAGE_UTTERANCE,
@@ -21,6 +21,7 @@ __all__ = [
     "DeadLetter",
     "DeadLetterBox",
     "ObservationQueue",
+    "PendingObservation",
     "RetryPolicy",
     "is_retryable",
     "run_with_retry",

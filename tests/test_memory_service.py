@@ -36,6 +36,7 @@ from core.embedding.errors import EmbeddingConnectionError, EmbeddingTimeoutErro
 from core.llm import LLMService
 from core.logger import setup_logging
 from core.memory import MemoryInputError, MemoryStoreError, Observation
+from core.memory.ingest.queue import PendingObservation
 from core.memory.ingest.retry import STAGE_STRUCTURED, STAGE_UTTERANCE, DeadLetter, DeadLetterBox
 from core.memory.service import MemoryService
 from core.memory.store import UTTERANCE_COUNT, escape_literal
@@ -155,6 +156,17 @@ async def _向量与文本(服务: MemoryService, 文本: str) -> tuple[str, lis
         return None
     首 = 行[0]
     return cast("str", 首[0]), cast("list[float]", 首[1])
+
+
+async def _按id取原文(服务: MemoryService, utterance_id: str) -> str | None:
+    """按主键查一条原文的文本；库里没有就返回 None（契约用例的落库探针）。"""
+    会话 = 服务._session  # pyright: ignore[reportPrivateUsage]
+    assert 会话 is not None
+    语句 = f"MATCH (u:Utterance) WHERE u.id = '{escape_literal(utterance_id)}' RETURN u.id"
+    行 = await 会话.run(语句)
+    if not 行:
+        return None
+    return cast("str", 行[0][0])
 
 
 async def _等入库(服务: MemoryService, *, 期望条数: int = 1) -> None:
@@ -350,6 +362,57 @@ async def test_观测落原文(tmp_path: Path) -> None:
         assert 文本 == "风起了"
         assert len(向量) == _维度
         assert 内核.texts[0] == ["风起了"]
+    finally:
+        await 服务.stop()
+
+
+async def test_observe返回值就是落库主键(tmp_path: Path) -> None:
+    """契约：`observe` 返回的 id **等于**库里那条 `Utterance` 的主键（设计文档 §6.1）。
+
+    这是本任务要钉死的契约。**证伪开关**：若把 `_ingest` 改回「自己生成一个 id 落库」，
+    `observe` 的返回值在库里就查不到——`_按id取原文` 返回 None，本条当场变红。
+    """
+    服务 = _服务(tmp_path)
+    await 服务.start()
+    try:
+        回合 = await 服务.observe(Observation(kind="dialogue", text="风起了", speaker="alice"))
+        await _等入库(服务)
+
+        # 用返回的 id 直接查库：必须命中，且取回的就是这个 id
+        命中 = await _按id取原文(服务, 回合)
+        assert 命中 == 回合
+        # 反向确认：全库只有这一条，且它正是 observe 返回的那条（不是 worker 另造的）
+        assert await _原文条数(服务) == 1
+    finally:
+        await 服务.stop()
+
+
+async def test_死信载荷的utterance_id与observe返回值一致(tmp_path: Path) -> None:
+    """契约：进死信的那条，其 `DeadLetter.utterance_id` **等于** `observe` 返回值。
+
+    **证伪开关**：若 `_ingest` 在消费时另生成 id 写死信，死信里的 id 就与调用方
+    拿到的对不上——本条当场变红。死信是失败兜底，主键对不齐就等于无法按 id 溯源。
+    """
+    配置 = _记忆配置(
+        tmp_path,
+        retry={
+            "max_attempts": 1,
+            "backoff": 0.01,
+            "deadletter_path": str(tmp_path / "死信.jsonl"),
+        },
+    )
+    内核 = _假内核(fail_times=99)  # 每次必抛 → 必进死信
+    服务 = _服务(tmp_path, 内核=内核, 配置=配置)
+    await 服务.start()
+    try:
+        回合 = await 服务.observe(Observation(kind="dialogue", text="这句不能丢"))
+        await _等死信(服务)
+        读回 = _死信条(服务)
+
+        assert len(读回) == 1
+        assert 读回[0].utterance_id == 回合
+        # 失败路径：库里没有这条（原文没落），死信是唯一副本，但主键与返回一致
+        assert await _按id取原文(服务, 回合) is None
     finally:
         await 服务.stop()
 
@@ -748,7 +811,7 @@ async def test_worker吞掉处理异常继续跑(tmp_path: Path) -> None:
     try:
         调用次数 = 0
 
-        async def _炸(_观测: Observation) -> bool:
+        async def _炸(_待处理: PendingObservation) -> bool:
             nonlocal 调用次数
             调用次数 += 1
             raise RuntimeError("处理时炸了")
@@ -756,7 +819,12 @@ async def test_worker吞掉处理异常继续跑(tmp_path: Path) -> None:
         服务._ingest = _炸  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
         队列 = 服务._queue  # pyright: ignore[reportPrivateUsage]
         assert 队列 is not None
-        _ = await 队列.put(Observation(kind="dialogue", text="会炸的一条"))
+        _ = await 队列.put(
+            PendingObservation(
+                utterance_id="u-会炸的一条",
+                observation=Observation(kind="dialogue", text="会炸的一条"),
+            )
+        )
         # 等 worker 跑过这一条：异常被吞、循环还在（否则下面 stop 会卡在未消费的 get 上）
         for _ in range(500):
             if 调用次数 >= 1:

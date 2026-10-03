@@ -39,7 +39,7 @@ from core.decision import DecisionService
 from core.embedding import EmbeddingService
 from core.llm import LLMService
 from core.memory.errors import MemoryInputError, MemoryStoreError
-from core.memory.ingest.queue import ObservationQueue
+from core.memory.ingest.queue import ObservationQueue, PendingObservation
 from core.memory.ingest.retry import (
     STAGE_UTTERANCE,
     DeadLetter,
@@ -172,8 +172,11 @@ class MemoryService(Service):
         """
         queue = self._require_queue()
         self._复核载荷(observation)
+        # 主键在这里定、随载荷过队列：它既是 `observe` 的返回值，也是 worker 落库的
+        # `Utterance.id`——同一个 id，调用方拿到的那个一定能在库里找到（设计文档 §6.1）。
         utterance_id = new_id()
-        if not await queue.put(observation):
+        pending = PendingObservation(utterance_id=utterance_id, observation=observation)
+        if not await queue.put(pending):
             self.log.error(
                 "观测队列已满，丢弃本回合",
                 队列上限=self._config.queue_size,
@@ -195,20 +198,24 @@ class MemoryService(Service):
             if queue is None:
                 return
             try:
-                observation = await queue.get()
+                pending = await queue.get()
                 # 成败由 _ingest 自己记进死信；worker 只负责循环不断，不看返回值
-                _ = await self._ingest(observation)
+                _ = await self._ingest(pending)
             except asyncio.CancelledError:
                 raise
             except Exception as 故障:
                 self.log_error("观测处理失败，已跳过", 故障)
 
-    async def _ingest(self, observation: Observation) -> bool:
-        """处理一条观测：嵌入 → 阶段 A（原文落库）。成功为真。
+    async def _ingest(self, pending: PendingObservation) -> bool:
+        """处理一条待处理观测：嵌入 → 阶段 A（原文落库）。成功为真。
 
         嵌入与落库**同属阶段 A**：原文还没进库时，这一整段失败都意味着「原文可能丢」，
         所以它整体受重试与死信保护。嵌入是网络调用、最可能瞬时故障，把它排在重试
         操作内正是为了让它退避重试（设计文档 §6.5）。
+
+        **主键不再在这里生成**：直接用 `pending.utterance_id`（入队时由 `observe` 定下），
+        落库与写死信都读它。若此处另生成 id，`observe` 的返回值就永远不在库里——
+        那正是本任务要修的契约缺陷。
 
         失败分流：
         - 瞬时故障 → `run_with_retry` 退避重试；
@@ -216,7 +223,8 @@ class MemoryService(Service):
 
         返回真假供重放判断成败；worker 不关心（它只负责不让循环断）。
         """
-        utterance_id = new_id()
+        utterance_id = pending.utterance_id
+        observation = pending.observation
         计数: list[int] = [0]  # 实测尝试次数：run_with_retry 失败路径不回传，得自己记
         try:
             维度实测, 尝试数 = await self._阶段甲(utterance_id, observation, 计数)
