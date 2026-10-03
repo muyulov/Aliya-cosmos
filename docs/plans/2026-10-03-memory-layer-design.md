@@ -29,6 +29,7 @@
 | 扩展 | `INSTALL VECTOR` / `INSTALL FTS` / `LOAD ...` **离线可用**（wheel 自带，实测本机无 `~/.kuzu` 目录），无需联网 |
 | 依赖 | 纯 Python 取值用 `has_next()` / `get_next()`，**不需要 numpy / pandas**（`get_as_df()` 才需要 numpy） |
 | 建表幂等 | 节点表与关系表都支持 `CREATE ... IF NOT EXISTS` |
+| `Database(path)` 语义 | 把 path 当**文件**（不是目录）：父目录不存在报 `IO exception: Cannot open file ... No such file or directory`；传一个已存在的目录报 `RuntimeError: Database path cannot be a directory`。因此 `db_path` 落成「目录」（由我们 `mkdir`），库文件固定为 `db_path / "memory.kuzu"`（**实施补记**：本节原文写的是 `kuzu.Database(str(db_path))`，那是错的） |
 | 版本 | 0.11.3；`uv` 之外只新增 `kuzu` 一个依赖 |
 
 ---

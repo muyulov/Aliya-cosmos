@@ -477,7 +477,9 @@ class MemorySession:
         return await asyncio.get_running_loop().run_in_executor(executor, fn)
 ```
 
-- `_open_sync()` 里的 `import kuzu` **放在模块顶层**（本仓禁止在函数里躲 import），`kuzu.Database(str(self._db_path))`；同时执行 `INSTALL VECTOR` / `LOAD VECTOR` / `INSTALL FTS` / `LOAD FTS`（实测离线可用）。
+- `_open_sync()` 里的 `import kuzu` **放在模块顶层**（本仓禁止在函数里躲 import），`kuzu.Database(str(self._db_path / "memory.kuzu"))`；同时执行 `INSTALL VECTOR` / `LOAD VECTOR` / `INSTALL FTS` / `LOAD FTS`（实测离线可用）。
+
+> **实施补记（2026-10-03）**：本节原文写的是 `kuzu.Database(str(self._db_path))`，**那是错的**。实测 `Database(path)` 把 path 当**文件**：父目录不存在报 `IO exception`，传一个已存在的目录报 `Database path cannot be a directory`。落地时改为「`db_path` 是目录（由 `open()` 先 `mkdir`），库文件固定为 `db_path / "memory.kuzu"`」——`db_path` 是目录这一点与设计文档 §3.1 的措辞一致。
 - 所有 Kùzu 抛出的 `RuntimeError` 在 `run()` 里包成 `MemoryStoreError` 并挂 `__cause__`。
 - `_wrap(...)` 内部用 `cast` 消掉 Kùzu 无类型标注带来的 `Any`（本仓 basedpyright 全 strict）。
 
