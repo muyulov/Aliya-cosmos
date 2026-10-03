@@ -138,17 +138,29 @@ def _service(
     *,
     chat: LLMEndpointSettings | None = None,
     vision: LLMEndpointSettings | None = None,
+    memory: LLMEndpointSettings | None = None,
 ) -> LLMService:
-    """默认两头都配好密钥，vision 的模型名与 chat 不同，便于分辨走了哪个端点。"""
+    """默认两头都配好密钥，vision 的模型名与 chat 不同，便于分辨走了哪个端点。
+
+    memory 不给则保持模型默认（未配密钥），这样既有用例的行为一字不变。
+    """
     return LLMService(
-        LLMSettings(chat=chat or _endpoint(), vision=vision or _endpoint(model="vision-m"))
+        LLMSettings(
+            chat=chat or _endpoint(),
+            vision=vision or _endpoint(model="vision-m"),
+            memory=memory or _endpoint(),
+        )
     )
 
 
-def _attach(service: LLMService, client: _FakeClient, *, vision: bool = False) -> None:
+def _attach(
+    service: LLMService, client: _FakeClient, *, vision: bool = False, memory: bool = False
+) -> None:
     """塞入替身：容器无法注入客户端，这是唯一接缝。"""
     fake = cast("AsyncOpenAI", cast("object", client))
-    if vision:
+    if memory:
+        service._memory = fake  # pyright: ignore[reportPrivateUsage]
+    elif vision:
         service._vision = fake  # pyright: ignore[reportPrivateUsage]
     else:
         service._chat = fake  # pyright: ignore[reportPrivateUsage]
@@ -299,6 +311,121 @@ async def test_vision端点没启用时不接管() -> None:
 
     _ = await service.chat([user("在吗")], model=service.vision_model)
     assert client.calls[0]["model"] == "vision-m"
+
+
+# ---- 记忆端点与显式路由 ----
+
+
+async def test_记忆端点配了密钥就建客户端并自报健康() -> None:
+    """llm.memory 与另两个端点同构：配了 api_key 就建客户端，health 里带出模型与地址。"""
+    service = _service(memory=_endpoint(api_key="k", model="memory-m"))
+
+    await service.start()
+
+    assert service._memory is not None  # pyright: ignore[reportPrivateUsage]
+    status = await service.health()
+    assert status.healthy is True
+    assert status.extra["记忆模型"] == "memory-m"
+    assert status.extra["记忆端点"] == "https://chat.test/v1"
+    assert service.memory_model == "memory-m"
+    await service.stop()
+
+
+async def test_只有记忆端点配密钥也算健康() -> None:
+    """三头任一非 None 即健康：只启用记忆端点也是能用的。"""
+    service = _service(
+        chat=_endpoint(api_key=""),
+        vision=_endpoint(api_key=""),
+        memory=_endpoint(api_key="k", model="memory-m"),
+    )
+
+    await service.start()
+
+    status = await service.health()
+    assert status.healthy is True
+    assert status.detail == ""
+    await service.stop()
+
+
+async def test_三头全没配密钥才不健康() -> None:
+    """三个端点都没客户端才 unhealthy，且详情沿用「未配置 api_key」的措辞。"""
+    service = _service(
+        chat=_endpoint(api_key=""), vision=_endpoint(api_key=""), memory=_endpoint(api_key="")
+    )
+    # 直接构造的服务不会被容器置为 RUNNING，这里钉住状态才能走到「未配置密钥」那条详情
+    service.state = ServiceState.RUNNING
+
+    await service.start()
+
+    status = await service.health()
+    assert status.healthy is False
+    assert "未配置" in status.detail
+    # 三头都没密钥时仍报出各自配置的模型，否则看不出缺的是哪一头的密钥
+    assert status.extra["记忆模型"] == "chat-m"
+    assert status.extra["记忆端点"] == "https://chat.test/v1"
+
+
+async def test_显式选记忆端点时用记忆客户端与配置() -> None:
+    """显式 endpoint="memory" 时，客户端与端点配置对象都取自 memory 槽位。"""
+    memory = _endpoint(api_key="k", model="memory-m", base_url="https://memory.test/v1")
+    service = _service(memory=memory)
+    chat_client = _FakeClient(completion=_completion())
+    memory_client = _FakeClient(completion=_completion())
+    _attach(service, chat_client)
+    _attach(service, memory_client, memory=True)
+
+    client, slot, resolved = service._resolve_endpoint(None, "memory")  # pyright: ignore[reportPrivateUsage]
+
+    assert client is cast("AsyncOpenAI", cast("object", memory_client))
+    assert slot is service._config.memory  # pyright: ignore[reportPrivateUsage]
+    assert resolved == "memory-m"
+    assert chat_client.calls == []
+
+
+async def test_显式选记忆端点未配密钥时报配置错误() -> None:
+    """显式选了没配密钥的端点，沿用 _require 的报错路径（缺 key 不 fail fast）。"""
+    service = _service(memory=_endpoint(api_key=""))
+
+    with pytest.raises(LLMConfigError, match="memory 端点"):
+        _ = await service.chat([user("提取")], endpoint="memory")
+
+
+async def test_不传端点时模型名撞记忆端点仍走对话() -> None:
+    """回归锁：memory 永不因模型名被接管——即便与 chat 的 model 同名也仍走 chat。"""
+    service = _service(
+        chat=_endpoint(model="same-name", api_key="k"),
+        memory=_endpoint(model="same-name", api_key="k"),
+    )
+    chat_client = _FakeClient(completion=_completion())
+    memory_client = _FakeClient(completion=_completion())
+    _attach(service, chat_client)
+    _attach(service, memory_client, memory=True)
+
+    _ = await service.chat([user("在吗")], model="same-name")
+
+    # _endpoint 只认 chat：模型名与 memory 相同也不该被抢走
+    client, slot, _ = service._endpoint("same-name")  # pyright: ignore[reportPrivateUsage]
+    assert slot is service._config.chat  # pyright: ignore[reportPrivateUsage]
+    assert client is cast("AsyncOpenAI", cast("object", chat_client))
+    assert memory_client.calls == []
+    assert chat_client.calls[0]["model"] == "same-name"
+
+
+async def test_不传端点时模型名撞已启用的vision仍走vision() -> None:
+    """回归锁：既有「按模型名匹配 vision」的约定不能因为新增 memory 端点而破。"""
+    service = _service(memory=_endpoint(model="memory-m", api_key="k"))
+    chat_client = _FakeClient(completion=_completion())
+    vision_client = _FakeClient(completion=_completion())
+    memory_client = _FakeClient(completion=_completion())
+    _attach(service, chat_client)
+    _attach(service, vision_client, vision=True)
+    _attach(service, memory_client, memory=True)
+
+    _ = await service.chat([user("看图")], model=service.vision_model)
+
+    assert vision_client.calls[0]["model"] == "vision-m"
+    assert chat_client.calls == []
+    assert memory_client.calls == []
 
 
 # ---- 对话与流式 ----
