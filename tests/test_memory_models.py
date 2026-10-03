@@ -16,6 +16,7 @@ from core.memory import (
     Observation,
     TraceStep,
 )
+from core.memory.models import new_id
 
 
 def test_错误树同源() -> None:
@@ -129,3 +130,19 @@ def test_记忆上下文默认值() -> None:
     assert context.block == ""
     assert context.items == []
     assert context.trace == []
+
+
+def test_主键生成长度为三十二() -> None:
+    """uuid4().hex 是 32 位十六进制串：零依赖、零发明，长度可预期。"""
+    主键 = new_id()
+
+    assert len(主键) == 32
+    assert 主键 == 主键.lower()
+    assert all(字符 in "0123456789abcdef" for 字符 in 主键)
+
+
+def test_主键互不相同() -> None:
+    """连造一批不重样，够当主键用。"""
+    一批 = {new_id() for _ in range(1000)}
+
+    assert len(一批) == 1000

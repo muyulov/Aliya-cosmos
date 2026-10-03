@@ -10,11 +10,25 @@
 from __future__ import annotations
 
 from typing import ClassVar, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 #: 观测类型：对话、旁白、场景。
 type ObservationKind = Literal["dialogue", "narration", "scene"]
+
+
+def new_id() -> str:
+    """给 Utterance / StateChange / Event 造主键。
+
+    集中在这里是因为三处都要造主键，避免各写一份：形制一旦需要统一调整
+    （换算法、加前缀、换长度），只有一个地方要改。
+
+    用 `uuid4().hex`：标准库自带，零依赖、零发明；128 位随机、32 位十六进制串，
+    随机性足够当主键，不必引 ULID / snowflake 这类额外依赖。
+    """
+    return uuid4().hex
+
 
 #: 召回依据的来源标记：向量距离、图路径、结构化命中。
 type TraceSource = Literal["vector", "graph", "structured"]

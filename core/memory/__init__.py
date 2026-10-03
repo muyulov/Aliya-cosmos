@@ -21,6 +21,7 @@ from core.memory.models import (
     Observation,
     TraceStep,
 )
+from core.memory.service import MemoryService
 
 __all__ = [
     "MemoryConfigError",
@@ -29,6 +30,7 @@ __all__ = [
     "MemoryExtractError",
     "MemoryInputError",
     "MemoryItem",
+    "MemoryService",
     "MemoryStoreError",
     "Observation",
     "TraceStep",
