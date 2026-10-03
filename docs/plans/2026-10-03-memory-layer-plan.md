@@ -132,7 +132,7 @@ git commit -m "feat(config): 新增记忆层配置并引入 kuzu 依赖"
 ## Task 2: `llm.memory` 第三端点与显式路由
 
 **Files:**
-- Modify: `core/config/settings.py`（`LLMSettings`）
+- Modify: `core/config/settings.py`（`LLMSettings`）——**已于 Task 1 返工中提前完成**（`memory: LLMEndpointSettings` 字段与 docstring 都已就位），本任务**不再改这个文件**
 - Modify: `core/llm/service.py`
 - Test: `tests/test_llm_service.py`
 
@@ -188,6 +188,8 @@ Expected: FAIL（`LLMSettings` 没有 `memory` 字段 / `_resolve_endpoint` 不�
 ```
 
 同时把类 docstring 从「chat 与 vision 各是一个端点」改为「chat / vision / memory 各是一个端点；memory 只接受显式 `endpoint=` 选择，不参与模型名匹配」。
+
+> **已于 Task 1 返工中完成**（`LLMSettings.memory` 与 docstring 都已在 `17251d8` 落地，并有一条守护用例盯住「骨架 `llm.memory` 段必须被模型认识」）。本任务跳过此步。
 
 2. `core/llm/service.py`：
 
