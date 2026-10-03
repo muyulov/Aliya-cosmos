@@ -98,6 +98,18 @@ def test_记忆条目保留全部字段() -> None:
     assert item.world_time == 12
 
 
+def test_记忆条目来源三类都能构造() -> None:
+    """来源只认设计文档 §7.1 规定的那三类：对话原文、事件、反思。"""
+    for kind in ("utterance", "event", "reflection"):
+        item = MemoryItem(kind=kind, text="风起了", source_id="s1", score=0.5)
+        assert item.kind == kind
+
+
+def test_记忆条目拒绝未知来源() -> None:
+    with pytest.raises(ValidationError):
+        _ = MemoryItem(kind="不存在的来源", text="风起了", source_id="s1", score=0.5)  # pyright: ignore[reportArgumentType]
+
+
 def test_召回步骤来源标记合法取值() -> None:
     """trace 的来源标记只认设计文档 §7.1 规定的那几种。"""
     for source in ("vector", "graph", "structured"):

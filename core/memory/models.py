@@ -19,6 +19,9 @@ type ObservationKind = Literal["dialogue", "narration", "scene"]
 #: 召回依据的来源标记：向量距离、图路径、结构化命中。
 type TraceSource = Literal["vector", "graph", "structured"]
 
+#: 记忆来源：对话原文、世界事件、反思产物。
+type MemorySource = Literal["utterance", "event", "reflection"]
+
 
 class Observation(BaseModel):
     """喂入记忆层的一个原始回合。
@@ -47,11 +50,16 @@ class Observation(BaseModel):
 class MemoryItem(BaseModel):
     """一条结构化召回条目。
 
+    kind 是记忆来源，取值域由设计文档 §7.1 定死为三类（对话原文 Utterance /
+    事件 Event / 反思 Reflection）；它是公开返回类型，调用方会按 kind 分支，
+    故收成闭合类型而非自由 str。期一只产出 utterance，event / reflection
+    在期二、期三落地。
+
     source_id 指回本源节点（Utterance / Event / Reflection 的主键），
     供调用方顺链溯源；score 是召回分数；world_time 缺省表示未知。
     """
 
-    kind: str
+    kind: MemorySource
     text: str
     source_id: str
     score: float
