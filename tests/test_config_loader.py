@@ -438,38 +438,67 @@ def test_记忆段的值从临时yaml读进模型(tmp_path: Path) -> None:
     assert settings.config_source == str(config_file)
 
 
-def test_骨架的段与字段都被模型认识() -> None:
-    """防 extra="ignore" 静默失效：对拍原始骨架的键与模型的字段树。
+def _字段名与别名的并集(model: type[BaseModel]) -> set[str]:
+    """一个模型「认识的键」：字段名与别名的并集。
 
-    顶层键与二级键（值是 dict 的那些段）都必须落在对应模型的字段里，只要骨架里写了
-    某个模型不认识的键，它就会被 extra="ignore" 悄悄丢掉，这里当场指出是哪个键。
+    YAML 里既可以写字段名也可以写别名（如 log.json 之于 json_output），两者都算被认识。
     """
-    raw = read_yaml(_SKELETON)
-    assert raw is not None, f"出厂骨架必须在：{_SKELETON}"
+    return {
+        name
+        for name, field in model.model_fields.items()
+        for name in (name, field.alias)
+        if name is not None
+    }
 
-    unknown_top = set(raw) - set(Settings.model_fields)
-    assert not unknown_top, f"骨架里有模型不认识的段（会静默失效）：{sorted(unknown_top)}"
+
+def _按_yaml键取子模型(model: type[BaseModel], key: object) -> type[BaseModel] | None:
+    """按 YAML 里的键（字段名或别名）取到对应字段，若其注解是模型类就返回该模型。
+
+    只认 BaseModel 子类：字段类型是 dict[str, str] 这类普通映射时返回 None，
+    调用方据此停下，不拿它去做字段对拍（否则会误报）。
+    """
+    for name, field in model.model_fields.items():
+        if key == name or key == field.alias:
+            annotation = field.annotation
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                return annotation
+            return None
+    return None
+
+
+def _核对键树(raw: dict[object, object], model: type[BaseModel], 键路径: str) -> None:
+    """递归对拍：raw 的每个键都要落在 model 认识的键里，dict 值继续下钻到叶子。
+
+    `键路径` 是当前层相对骨架根的路径（顶层为空串），报错时拼成完整路径——
+    例如 `memory.retry.deadletter_pth`，三级之后也能定位到具体是哪一段。
+    - 只在「值是 dict 且对应字段是 BaseModel 子类」时下钻，叶子与非模型字段都停下。
+    """
+    known = _字段名与别名的并集(model)
+    unknown = set(raw) - known
+    where = f"骨架 {键路径} 段" if 键路径 else "骨架顶层"
+    assert not unknown, f"{where}里有模型不认识的键（会静默失效）：{sorted(map(str, unknown))}"
 
     for key, value in raw.items():
         if not isinstance(value, dict):
             continue
-        # 从一个 object 收窄出来的 dict，键值类型是 Unknown；显式 cast 收敛，免得
-        # Unknown 渗进下面的 set 运算与排序（basedpyright 会报 reportUnknown*）。
-        sub_raw = cast("dict[object, object]", value)
-        sub_model = Settings.model_fields[key].annotation
-        # 收窄成「有 model_fields 的模型类」；顶层键已确认都在字段里，取到的是子模型。
-        assert isinstance(sub_model, type) and issubclass(sub_model, BaseModel), key
-        # 字段名与别名的并集：YAML 里写别名（如 log.json 之于 json_output）也算被认识。
-        known = {
-            name
-            for name, field in sub_model.model_fields.items()
-            for name in (name, field.alias)
-            if name is not None
-        }
-        unknown_sub = set(sub_raw) - known
-        assert not unknown_sub, (
-            f"骨架 {key} 段里有模型不认识的键（会静默失效）：{sorted(map(str, unknown_sub))}"
-        )
+        child = _按_yaml键取子模型(model, key)
+        if child is None:
+            continue
+        子路径 = f"{键路径}.{key}" if 键路径 else str(key)
+        _核对键树(cast("dict[object, object]", value), child, 子路径)
+
+
+def test_骨架的段与字段都被模型认识() -> None:
+    """防 extra="ignore" 静默失效：对拍原始骨架的键与模型的字段树。
+
+    从顶层一路递归到叶子：每一层的键都必须落在对应模型认识的键里，只要骨架里写了
+    某个模型不认识的键（含三级嵌套，如 memory.retry 下的键），它就会被 extra="ignore"
+    悄悄丢掉，这里当场指出是哪个键，并给出完整键路径。
+    """
+    raw = read_yaml(_SKELETON)
+    assert raw is not None, f"出厂骨架必须在：{_SKELETON}"
+
+    _核对键树(cast("dict[object, object]", raw), Settings, "")
 
 
 def test_llm的memory段被模型认识且不抢chat(tmp_path: Path) -> None:
