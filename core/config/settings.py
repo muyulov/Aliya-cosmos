@@ -121,13 +121,18 @@ class LLMEndpointSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    """LLM 层配置：chat 与 vision 各是一个端点。
+    """LLM 层配置：chat、vision 与 memory 各是一个端点。
 
-    两头可以指向同一个服务（多数兼容端点如此），也可以分开接不同供应商。
+    三个头可以指向同一个服务（多数兼容端点如此），也可以分开接不同供应商。
+
+    memory 端点有特殊约定：它只接受显式 `endpoint="memory"` 选择，不参与模型名匹配。
+    因此即使它的 model 与 chat 同名，也不会把 chat 的调用抢走——记忆层的抽取与记忆块
+    渲染走它，普通对话仍走 chat。
     """
 
     chat: LLMEndpointSettings = LLMEndpointSettings()
     vision: LLMEndpointSettings = LLMEndpointSettings()
+    memory: LLMEndpointSettings = LLMEndpointSettings()
 
 
 #: 判断层的两个端点名。laya 是本地 laya-serve，jev 是 TypeSafe 云端。

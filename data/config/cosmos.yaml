@@ -73,6 +73,8 @@ llm:
     # 记忆专用端点：抽取与记忆块渲染走这里。
     # 与另两个端点不同，它只接受显式 endpoint="memory" 选择，不参与模型名匹配，
     # 因此 model 与 chat 同名也不会把 chat 调用抢走。
+    # 这里只列常改项，其余字段（timeout / retries / structured_mode / temperature /
+    # max_tokens）走 core/config/settings.py 里 LLMEndpointSettings 的代码默认值。
     base_url: ${MEMORY_LLM_BASE_URL:https://api.openai.com/v1}
     api_key: ${MEMORY_LLM_API_KEY:}
     model: gpt-4o-mini

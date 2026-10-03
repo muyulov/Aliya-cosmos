@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import cast
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from core.config import (
     ConfigError,
@@ -409,13 +410,75 @@ def test_日志文件名前缀不互为包含关系() -> None:
 # ---- 记忆层配置节点 ----
 
 
-def test_记忆段能从骨架读回() -> None:
-    """防 extra="ignore" 静默失效：骨架里的 memory 段必须真的被解析进模型。"""
-    settings = load_settings()
-    assert settings.memory.db_path == "data/memory"
-    assert settings.memory.dimensions >= 1
-    assert settings.memory.retry.deadletter_path.endswith(".jsonl")
-    assert settings.memory.gate.backend in ("laya", "jev")
+def test_记忆段的值从临时yaml读进模型(tmp_path: Path) -> None:
+    """防 extra="ignore" 静默失效：写进 YAML 的记忆段必须真的被解析进模型。
+
+    探针字段刻意取与代码默认值不同的值（骨架里写死），再断言模型里就是这些值。
+    若段名或缩进写错被 extra="ignore" 静默丢掉，模型会落回默认值，此处即红。
+    """
+    yaml_text = (
+        "memory:\n"
+        "  db_path: data/记忆探针\n"
+        "  dimensions: 32\n"
+        "  queue_size: 7\n"
+        "  gate:\n"
+        "    backend: jev\n"
+        "  retry:\n"
+        "    deadletter_path: data/记忆探针/死信.jsonl\n"
+    )
+    config_file = _write(tmp_path / "cosmos.yaml", yaml_text)
+
+    settings = load_settings(config_file=config_file, env_file=tmp_path / ".env")
+
+    assert settings.memory.db_path == "data/记忆探针"
+    assert settings.memory.dimensions == 32
+    assert settings.memory.queue_size == 7
+    assert settings.memory.gate.backend == "jev"
+    assert settings.memory.retry.deadletter_path == "data/记忆探针/死信.jsonl"
+    assert settings.config_source == str(config_file)
+
+
+def test_骨架的段与字段都被模型认识() -> None:
+    """防 extra="ignore" 静默失效：对拍原始骨架的键与模型的字段树。
+
+    顶层键与二级键（值是 dict 的那些段）都必须落在对应模型的字段里，只要骨架里写了
+    某个模型不认识的键，它就会被 extra="ignore" 悄悄丢掉，这里当场指出是哪个键。
+    """
+    raw = read_yaml(_SKELETON)
+    assert raw is not None, f"出厂骨架必须在：{_SKELETON}"
+
+    unknown_top = set(raw) - set(Settings.model_fields)
+    assert not unknown_top, f"骨架里有模型不认识的段（会静默失效）：{sorted(unknown_top)}"
+
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        # 从一个 object 收窄出来的 dict，键值类型是 Unknown；显式 cast 收敛，免得
+        # Unknown 渗进下面的 set 运算与排序（basedpyright 会报 reportUnknown*）。
+        sub_raw = cast("dict[object, object]", value)
+        sub_model = Settings.model_fields[key].annotation
+        # 收窄成「有 model_fields 的模型类」；顶层键已确认都在字段里，取到的是子模型。
+        assert isinstance(sub_model, type) and issubclass(sub_model, BaseModel), key
+        # 字段名与别名的并集：YAML 里写别名（如 log.json 之于 json_output）也算被认识。
+        known = {
+            name
+            for name, field in sub_model.model_fields.items()
+            for name in (name, field.alias)
+            if name is not None
+        }
+        unknown_sub = set(sub_raw) - known
+        assert not unknown_sub, (
+            f"骨架 {key} 段里有模型不认识的键（会静默失效）：{sorted(map(str, unknown_sub))}"
+        )
+
+
+def test_llm的memory段被模型认识且不抢chat(tmp_path: Path) -> None:
+    """回归：llm.memory 段必须被解析进模型（曾因缺字段被 extra="ignore" 整段丢掉）。"""
+    settings = _load(tmp_path, "llm:\n  memory:\n    model: 记忆模型\n")
+
+    assert settings.llm.memory.model == "记忆模型"
+    # memory 端点独立于 chat，不该把 chat 的模型顶掉。
+    assert settings.llm.chat.model != "记忆模型"
 
 
 def test_记忆层默认值全部合法() -> None:
@@ -427,3 +490,31 @@ def test_记忆层默认值全部合法() -> None:
     assert memory.consolidate.min_events >= 1
     assert 0.0 < memory.decay.floor <= 1.0
     assert memory.retry.max_attempts >= 1
+
+
+#: 越界的记忆层字段（YAML 里的完整路径 → 越界值）+ 出错字段名，用于守住加载期拦截。
+#: 路径要对：top_k / hops / budget 在 recall 下，不在 gate 下。
+_越界记忆字段 = [
+    ("memory:\n  recall:\n    top_k: 0\n", "top_k"),
+    ("memory:\n  recall:\n    hops: 4\n", "hops"),
+    ("memory:\n  recall:\n    budget: 0\n", "budget"),
+    ("memory:\n  gate:\n    importance_threshold: 1.1\n", "importance_threshold"),
+    ("memory:\n  gate:\n    novelty_threshold: -0.1\n", "novelty_threshold"),
+    ("memory:\n  queue_size: 0\n", "queue_size"),
+    ("memory:\n  dimensions: 0\n", "dimensions"),
+    ("memory:\n  decay:\n    tau: 0\n", "tau"),
+    ("memory:\n  decay:\n    floor: 0\n", "floor"),
+    ("memory:\n  consolidate:\n    min_events: 0\n", "min_events"),
+    ("memory:\n  retry:\n    max_attempts: 0\n", "max_attempts"),
+    ("memory:\n  retry:\n    backoff: 0\n", "backoff"),
+]
+
+
+@pytest.mark.parametrize(("yaml_text", "出错字段"), _越界记忆字段)
+def test_记忆层越界值在加载期被拦下(tmp_path: Path, yaml_text: str, 出错字段: str) -> None:
+    """守住 Field 约束的拒绝路径：越界值必须在 YAML 加载期就被 pydantic 拦下。
+
+    直接构造模型只覆盖了一半的失败面；走 load_settings 才吃到真实的「配置 → 模型」路径。
+    """
+    with pytest.raises(ValidationError, match=出错字段):
+        _ = _load(tmp_path, yaml_text)
