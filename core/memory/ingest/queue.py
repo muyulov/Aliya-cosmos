@@ -53,11 +53,29 @@ class ObservationQueue:
         return True
 
     async def get(self) -> Observation:
-        """取出一条观测；队列空时等待下一条到来。"""
+        """取出一条观测；队列空时等待下一条到来。
+
+        **不要在 `close()` 之后调用本方法**：关闭只栅住入队，不给 `get` 留出口，
+        也没有哨兵——空队列上它会**永久阻塞**（见 `close()` 的契约）。消费者是被
+        `cancel` 拉出来的，不是靠 `get` 返回。
+        """
         return await self._queue.get()
 
     def close(self) -> None:
-        """置关闭标志：之后入队一律被拒，免得 stop() 期间调用方吊死。幂等。"""
+        """置关闭标志：之后入队一律被拒，免得 stop() 期间调用方吊死。幂等。
+
+        这里要说清它**只管一半**，别把「关闭」理解成「排空后优雅收尾」：
+
+        - 关闭**只影响** `put`：此后的入队一律返回 `False`（观测被丢弃，不计入 `dropped`）；
+        - **关闭后 `get()` 的行为未定义**——队列里没有哨兵，在空队列上它会一直等下去；
+        - 因此调用方的契约是：`close()` 之后必须主动 **cancel** 正在 `get()` 的消费者
+          （`MemoryService.stop()` 正是 `close()` → `worker.cancel()` →
+          `await gather(worker, return_exceptions=True)`），**不得**指望 `get()` 自己返回。
+
+        换成白话：`close()` 之后**永远不该**再调 `get()`。这条不变量由
+        `tests/test_memory_queue.py::test_关闭后拒绝入队` 与
+        `::test_关闭后对空队列取用或永久阻塞_契约` 共同锁定。
+        """
         self._closed = True
 
     @property
