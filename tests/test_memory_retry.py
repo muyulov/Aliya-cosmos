@@ -216,6 +216,11 @@ async def test_重试用尽上抛最后一次() -> None:
     async def 操作() -> str:
         nonlocal 序号
         序号 += 1
+        # 上限**在循环内钉住**：断言排在每次调用里，若 max_attempts 被改大或判断被删，
+        # 循环不会等到 delay() 因 2**n 溢出崩溃（attempt≈1025）才失败，而是在第
+        # max_attempts + 2 次调用时立刻以断言失配变红——这样用例才区分得出
+        # 「正确的上限」与「任意一个错误的上限」，而不是只能靠崩溃变红。
+        assert 序号 <= policy.max_attempts + 1, f"调用次数 {序号} 超过上限"
         raise LLMTimeoutError(f"第{序号}次")
 
     with pytest.raises(LLMTimeoutError) as 捕获:
