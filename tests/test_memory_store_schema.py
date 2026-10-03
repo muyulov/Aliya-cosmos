@@ -26,7 +26,8 @@ async def test_建表幂等(tmp_path: Path) -> None:
 
     表名集 = {行[0] for 行 in await session.run("CALL show_tables() RETURN name")}
 
-    assert {"Character", "StateChange", "Utterance", "Meta"} <= 表名集
+    # 等集断言（非子集）：期一只许建这六张表，多建即违反「不许预留」的硬规格。
+    assert 表名集 == {"Character", "HAS_STATE", "MENTIONS", "Meta", "StateChange", "Utterance"}
 
     await session.close()
 

@@ -28,17 +28,8 @@ _VERSION_KEY = "schema_version"
 #: 向量索引：(表名, 索引名, 列名)。
 _VECTOR_INDEXES: tuple[tuple[str, str, str], ...] = (("Utterance", "utt_vec", "embedding"),)
 
-#: 全文索引：(表名, 索引名, 列名)。FTS 只索引单列文本。
+#: 全文索引：(表名, 索引名, 列名)。本层只支持单列（`CREATE_FTS_INDEX` 收的是列表）。
 _FTS_INDEXES: tuple[tuple[str, str, str], ...] = (("Utterance", "utt_fts", "text"),)
-
-
-def _拼接(*片段: str) -> str:
-    """把多段字符串接成一条 DDL。
-
-    用显式拼接而非相邻字面量：basedpyright 对隐式拼接（`reportImplicitStringConcatenation`）
-    会报警，本仓 strict 模式下警告也算数。
-    """
-    return "".join(片段)
 
 
 def _node_table_ddl(dimensions: int) -> tuple[str, ...]:
@@ -50,20 +41,20 @@ def _node_table_ddl(dimensions: int) -> tuple[str, ...]:
     """
     return (
         "CREATE NODE TABLE IF NOT EXISTS Meta(key STRING, value STRING, PRIMARY KEY(key))",
-        _拼接(
-            "CREATE NODE TABLE IF NOT EXISTS Character(",
-            "id STRING, name STRING, aliases STRING[], kind STRING, PRIMARY KEY(id))",
+        (
+            "CREATE NODE TABLE IF NOT EXISTS Character("
+            + "id STRING, name STRING, aliases STRING[], kind STRING, PRIMARY KEY(id))"
         ),
-        _拼接(
-            "CREATE NODE TABLE IF NOT EXISTS StateChange(",
-            "id STRING, key STRING, value STRING, t_from INT64, t_to INT64, ",
-            "source_utterance STRING, PRIMARY KEY(id))",
+        (
+            "CREATE NODE TABLE IF NOT EXISTS StateChange("
+            + "id STRING, key STRING, value STRING, t_from INT64, t_to INT64, "
+            + "source_utterance STRING, PRIMARY KEY(id))"
         ),
-        _拼接(
-            "CREATE NODE TABLE IF NOT EXISTS Utterance(",
-            "id STRING, text STRING, kind STRING, world_time INT64, ",
-            f"embedding FLOAT[{dimensions}], importance DOUBLE, access_count INT64, ",
-            "last_access INT64, PRIMARY KEY(id))",
+        (
+            "CREATE NODE TABLE IF NOT EXISTS Utterance("
+            + "id STRING, text STRING, kind STRING, world_time INT64, "
+            + f"embedding FLOAT[{dimensions}], importance DOUBLE, access_count INT64, "
+            + "last_access INT64, PRIMARY KEY(id))"
         ),
     )
 
@@ -102,10 +93,8 @@ async def _ensure_version(session: MemorySession) -> None:
     库版本 = 行[0][0]
     if 库版本 != SCHEMA_VERSION:
         raise MemoryStoreError(
-            _拼接(
-                f"库的 schema 版本为 {库版本!r}，与代码要求的 {SCHEMA_VERSION!r} 不符；",
-                "本期不做自动迁移，请重建库或升级版本",
-            ),
+            f"库的 schema 版本为 {库版本!r}，与代码要求的 {SCHEMA_VERSION!r} 不符；"
+            + "本期不做自动迁移，请重建库或升级版本",
             operation="ensure_schema",
         )
 
