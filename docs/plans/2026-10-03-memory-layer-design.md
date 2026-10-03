@@ -505,7 +505,9 @@ async def chat(
 - `LLMSettings` 加 `memory: LLMEndpointSettings`；`LLMService` 加 `_memory` 客户端。
 - `start()` 建三个客户端；`stop()` 关三个；`health()` 的 extra 增加 `记忆模型` / `记忆端点`，**三头全没客户端才 unhealthy**。
 - 缺 key 仍只警告不 fail fast。
-- **实现注意点**：`_endpoint()` 内的局部名 `endpoint` 是端点配置对象，与新的同名形参会遮蔽，需把内部变量改名（如 `slot`）。
+- **实现注意点**：五个能力方法体内原本把 `_endpoint()` 的返回值命名为 `endpoint`（`client, endpoint, resolved = ...`），它与新加的 keyword 形参 `endpoint=` **同名遮蔽**——加了形参后这一行会直接覆盖形参。需把方法体内的局部名改名（实施时用的是 `slot`）。`_endpoint()` 自身内部的局部名是 `vision` / `chat`，不受影响。
+
+> **实施补记（2026-10-03）**：上述遮蔽点已按 `slot` 改名落地。另外端点选择在实施时收敛成**一张表**（`slots: dict[EndpointName, tuple[AsyncOpenAI | None, LLMEndpointSettings]]`），而不是链式三元——因为 `EndpointName` 是闭合的 `Literal`，字典查找可被类型检查证明穷尽，日后新增端点时漏改会在判型阶段暴露，而链式三元会静默落进最后的 `else`。（`EndpointName` 是实施期新引入的模块级类型别名，设计文档原文未列出。）
 
 ---
 
