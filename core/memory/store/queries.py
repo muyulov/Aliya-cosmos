@@ -37,6 +37,7 @@ __all__ = [
     "MERGE_CHARACTER",
     "MERGE_MENTIONS",
     "OPEN_STATE_CHANGES",
+    "STATES_AT",
     "UPSERT_UTTERANCE",
     "UTTERANCE_COUNT",
     "escape_literal",
@@ -87,6 +88,10 @@ UPSERT_UTTERANCE: str = (
 #: 连一条 `Utterance → Character` 的 `MENTIONS` 边。
 #: Kùzu **不去重平行边**（设计 §5.4），故必须 `MERGE` 而非 `CREATE`，否则同一次抽取
 #: 重放会留下两条边。占位符：`{utt}` `{char}`（均已转义）。
+#:
+#: **注意**：语句以 `MATCH` 起头，两端节点若有任一个缺失则**静默 no-op**——不报错、
+#: 也不留边。调用方需保证 `utt` 与 `char` 两个 id 都已存在（先写 `Utterance` 与
+#: `Character`）。这是 Kùzu 的语义，不是可以在此处补的检查。
 MERGE_MENTIONS: str = (
     "MATCH (u:Utterance {{id:'{utt}'}}), (c:Character {{id:'{char}'}}) MERGE (u)-[:MENTIONS]->(c)"
 )
@@ -103,6 +108,11 @@ OPEN_STATE_CHANGES: str = (
 #: 把某角色某个 `key` 的**当前**状态置上 `t_to`（关旧）。
 #: 只动 `t_to` 为空且 key 相符的那条，别键与已关的不受影响。
 #: 占位符：`{key}` `{t_to}` `{char}`；`{key}` 与 `{char}` 须先过 `escape_literal`，`{t_to}` 是数字。
+#:
+#: **依赖单写者保证同 key 至多一条开放**：`WHERE` 只筛 `t_to IS NULL` 而不限条数，
+#: 若该键真有两条开放，这里会**一次把它们全关掉**（实测），此后「当前状态」就丢了
+#: 中间那段历史。想守住那个不变量的调用方请走 `writes.record_state_change`，
+#: 它在单事务里成对地关旧 + 开新。
 CLOSE_STATE_CHANGE: str = (
     "MATCH (c:Character {{id:'{char}'}})-[:HAS_STATE]->(s:StateChange) "
     "WHERE s.key = '{key}' AND s.t_to IS NULL SET s.t_to = {t_to}"
@@ -112,11 +122,24 @@ CLOSE_STATE_CHANGE: str = (
 #: 写入必带 `source_utterance`，否则事后答不了「为什么状态变了」（设计 §5.4）。
 #: 占位符：`{id}` `{key}` `{value}` `{t_from}` `{source}` `{char}`；
 #: 除 `{t_from}` 是数字外，其余文本类须先过 `escape_literal`。`t_to` 落 `null`（新状态即当前）。
+#:
+#: **注意**：语句以 `MATCH` 起头，角色 `{char}` 缺失时**静默 no-op**——状态节点连边
+#: 都不会建，也**不报错**。调用方需保证该角色 id 已存在（先走 `MERGE_CHARACTER`）。
 INSERT_STATE_CHANGE: str = (
     "MATCH (c:Character {{id:'{char}'}}) "
     "CREATE (s:StateChange {{id:'{id}', key:'{key}', value:'{value}', "
     "t_from:{t_from}, t_to:null, source_utterance:'{source}'}}) "
     "CREATE (c)-[:HAS_STATE]->(s)"
+)
+
+#: 查某角色在**某时刻**有效的状态（设计 §5.5：与当前状态是同一个查询，只差这个条件）。
+#: 区间左闭右开 `[t_from, t_to)`：交界点上命中新值，故同一键在任意时刻至多一条。
+#: 占位符：`{char}` `{moment}`；`{char}` 须先过 `escape_literal`，`{moment}` 是数字。
+#: 返回 `key, value`。
+STATES_AT: str = (
+    "MATCH (c:Character {{id:'{char}'}})-[:HAS_STATE]->(s:StateChange) "
+    "WHERE s.t_from <= {moment} AND (s.t_to IS NULL OR {moment} < s.t_to) "
+    "RETURN s.key, s.value"
 )
 
 # --------------------------------------------------------------------------- 计数

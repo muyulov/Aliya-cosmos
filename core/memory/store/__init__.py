@@ -11,12 +11,21 @@ from core.memory.store.queries import (
     MERGE_CHARACTER,
     MERGE_MENTIONS,
     OPEN_STATE_CHANGES,
+    STATES_AT,
     UPSERT_UTTERANCE,
     UTTERANCE_COUNT,
     escape_literal,
 )
 from core.memory.store.schema import SCHEMA_VERSION, ensure_schema
 from core.memory.store.session import MemorySession
+from core.memory.store.writes import (
+    close_state,
+    current_states,
+    insert_state_change,
+    merge_character,
+    record_state_change,
+    states_at,
+)
 
 __all__ = [
     "CHARACTER_COUNT",
@@ -27,9 +36,16 @@ __all__ = [
     "MERGE_MENTIONS",
     "OPEN_STATE_CHANGES",
     "SCHEMA_VERSION",
+    "STATES_AT",
     "UPSERT_UTTERANCE",
     "UTTERANCE_COUNT",
     "MemorySession",
+    "close_state",
+    "current_states",
     "ensure_schema",
     "escape_literal",
+    "insert_state_change",
+    "merge_character",
+    "record_state_change",
+    "states_at",
 ]
