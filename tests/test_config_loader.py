@@ -11,7 +11,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from core.config import ConfigError, LogSettings, Settings, get_settings, load_settings
+from core.config import (
+    ConfigError,
+    LogSettings,
+    MemorySettings,
+    Settings,
+    get_settings,
+    load_settings,
+)
 from core.config.loader import interpolate, read_env, read_yaml
 
 
@@ -397,3 +404,26 @@ def test_日志文件名前缀不互为包含关系() -> None:
 
         assert not app_prefix.startswith(error_prefix), config
         assert not error_prefix.startswith(app_prefix), config
+
+
+# ---- 记忆层配置节点 ----
+
+
+def test_记忆段能从骨架读回() -> None:
+    """防 extra="ignore" 静默失效：骨架里的 memory 段必须真的被解析进模型。"""
+    settings = load_settings()
+    assert settings.memory.db_path == "data/memory"
+    assert settings.memory.dimensions >= 1
+    assert settings.memory.retry.deadletter_path.endswith(".jsonl")
+    assert settings.memory.gate.backend in ("laya", "jev")
+
+
+def test_记忆层默认值全部合法() -> None:
+    """不读文件直接构造也要有一组合法默认值（进程无配置也能起）。"""
+    memory = MemorySettings()
+    assert memory.queue_size > 0
+    assert 0.0 <= memory.gate.importance_threshold <= 1.0
+    assert memory.recall.hops >= 1
+    assert memory.consolidate.min_events >= 1
+    assert 0.0 < memory.decay.floor <= 1.0
+    assert memory.retry.max_attempts >= 1
