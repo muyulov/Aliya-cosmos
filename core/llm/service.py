@@ -359,16 +359,18 @@ class LLMService(Service):
 
         显式指定时，端点参数取该端点配置，model 仍可覆盖；缺客户端时抛 LLMConfigError。
         memory 只能走这条显式路径，永不参与模型名匹配。
+
+        三个端点收在一张表里，客户端与配置一次取齐；EndpointName 是闭合的 Literal，
+        字典查找可被类型检查证明穷尽，新增端点时漏改会在判型阶段暴露，
+        而不是像链式三元那样静默落进最后的 else 走 chat。
         """
         if name is not None:
-            slot = (
-                self._config.memory
-                if name == "memory"
-                else self._config.vision
-                if name == "vision"
-                else self._config.chat
-            )
-            client = {"chat": self._chat, "vision": self._vision, "memory": self._memory}[name]
+            slots: dict[EndpointName, tuple[AsyncOpenAI | None, LLMEndpointSettings]] = {
+                "chat": (self._chat, self._config.chat),
+                "vision": (self._vision, self._config.vision),
+                "memory": (self._memory, self._config.memory),
+            }
+            client, slot = slots[name]
             return self._require(client, name), slot, model or slot.model
         return self._endpoint(model)
 

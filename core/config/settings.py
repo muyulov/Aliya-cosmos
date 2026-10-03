@@ -127,7 +127,7 @@ class LLMSettings(BaseModel):
 
     memory 端点有特殊约定：它只接受显式 `endpoint="memory"` 选择，不参与模型名匹配。
     因此即使它的 model 与 chat 同名，也不会把 chat 的调用抢走——记忆层的抽取与记忆块
-    渲染走它，普通对话仍走 chat。（服务层的端点接线在后续阶段落地。）
+    渲染走它，普通对话仍走 chat。
     """
 
     chat: LLMEndpointSettings = LLMEndpointSettings()
