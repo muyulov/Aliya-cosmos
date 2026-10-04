@@ -1,8 +1,9 @@
 """记忆服务：把「记住」与「想起」收成一个服务。
 
 本模块是记忆层的**编排层**：生命周期、对外端口、队列与 worker 的接线都在这里，
-具体语句归 `store/`，队列与重试归 `ingest/`。期一只有**写入口**（`observe`）；
-读入口 `recall` 与定时循环（反思 / 衰减 / 合并）分别留到 Task 11 与期三。
+具体语句归 `store/`，队列与重试归 `ingest/`，召回三支归 `recall/`。期一已有**两个口**：
+写入口 `observe`（原文落库）与读入口 `recall`（语义 + 结构化 + 模板渲染）；
+定时循环（反思 / 衰减 / 合并）留到期三。
 
 ## 为什么依赖里有两个「没有消费者」的成员
 
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import ClassVar, override
 
@@ -39,7 +41,7 @@ from core.decision import DecisionService
 from core.embedding import EmbeddingService
 from core.llm import LLMService
 from core.memory.errors import MemoryInputError, MemoryStoreError
-from core.memory.ingest.queue import ObservationQueue, PendingObservation
+from core.memory.ingest.queue import AccessWriteBack, ObservationQueue, PendingObservation
 from core.memory.ingest.retry import (
     STAGE_UTTERANCE,
     DeadLetter,
@@ -47,9 +49,13 @@ from core.memory.ingest.retry import (
     RetryPolicy,
     run_with_retry,
 )
-from core.memory.models import Observation, new_id
+from core.memory.models import MemoryContext, Observation, new_id
+from core.memory.recall.assemble import build_trace, fit_budget, render_block
+from core.memory.recall.semantic import recall_utterances
+from core.memory.recall.structured import recall_states
 from core.memory.store.queries import (
     CHARACTER_COUNT,
+    TOUCH_UTTERANCES,
     UPSERT_UTTERANCE,
     UTTERANCE_COUNT,
     escape_literal,
@@ -184,10 +190,63 @@ class MemoryService(Service):
             )
         return utterance_id
 
+    # ---------- 读入口 ----------
+
+    async def recall(
+        self,
+        query: str,
+        *,
+        focus: Sequence[str] = (),
+        world_time: int | None = None,
+        budget: int | None = None,
+    ) -> MemoryContext:
+        """按情境召回一段记忆块；无命中时给空块，**不报错**（记忆为空是合法状态）。
+
+        四路合一（设计文档 §7）：语义召回与结构化召回**并发**跑（两路互不依赖，各走
+        会话的单线程执行器），合并后按 `相关度 × 重要度` 裁剪、用确定性模板渲染成块。
+        期一 `block` 一律走模板：`recall.block_by_llm` 只读配置、不触发 LLM（期三才接）。
+
+        唯一副作用是命中条目的访问回写（衰减要吃 `access_count` / `last_access`）：
+        **不直写**——打包成 `AccessWriteBack` 交给 worker，免得与写路径并发写库。
+        `world_time` 缺省时用进程时间充当本次访问时刻。
+        """
+        session = self._require_session()
+        queue = self._require_queue()
+        vector = await self._embedding.embed(query)
+        维度 = self._config.dimensions
+        if len(vector) != 维度:
+            raise MemoryStoreError(
+                f"嵌入返回 {len(vector)} 维向量，与配置的 {维度} 维不符", operation="recall"
+            )
+        语义, 结构 = await asyncio.gather(
+            recall_utterances(session, query_vector=vector, top_k=self._config.recall.top_k),
+            recall_states(session, character_ids=tuple(focus)),
+        )
+        状态 = [(键, 值) for _, 键, 值 in 结构]
+        允许 = self._config.recall.budget if budget is None else budget
+        # 状态段是「必有」的部分，先扣掉它的长度，剩下的预算才留给回忆条目。
+        剩余 = max(允许 - len(render_block(states=状态, items=[])), 0)
+        裁剪 = fit_budget(语义, budget=剩余)
+        条目 = [命.item for 命 in 裁剪]
+        if 条目:
+            moment = world_time if world_time is not None else _now_epoch()
+            回写 = AccessWriteBack(utterance_ids=tuple(条.source_id for 条 in 条目), moment=moment)
+            if not await queue.put(回写):
+                self.log.error("回写队列已满，访问计数未更新", 条数=len(条目))
+        self.log.info("召回完成", 条目数=len(条目), 状态数=len(状态))
+        return MemoryContext(
+            block=render_block(states=状态, items=条目),
+            items=条目,
+            trace=build_trace(裁剪, 结构),
+        )
+
     # ---------- worker ----------
 
     async def _consume(self) -> None:
-        """常驻消费者：单协程串行取观测、落库。
+        """常驻消费者：单协程串行取工作、落库。
+
+        队列里有两类工作：待处理观测（`PendingObservation`）与召回后的访问回写
+        （`AccessWriteBack`）。两者都必须在**唯一的写者**上串行落库，故共用这一条循环。
 
         整条循环体包 `try/except Exception`，**只记日志、不中断**——一条坏观测不该
         拖垮整条流水线。`CancelledError` 是 `BaseException` 的子类，不会被上面的
@@ -198,13 +257,29 @@ class MemoryService(Service):
             if queue is None:
                 return
             try:
-                pending = await queue.get()
-                # 成败由 _ingest 自己记进死信；worker 只负责循环不断，不看返回值
-                _ = await self._ingest(pending)
+                job = await queue.get()
+                if isinstance(job, AccessWriteBack):
+                    await self._回写访问(job)
+                else:
+                    # 成败由 _ingest 自己记进死信；worker 只负责循环不断，不看返回值
+                    _ = await self._ingest(job)
             except asyncio.CancelledError:
                 raise
             except Exception as 故障:
                 self.log_error("观测处理失败，已跳过", 故障)
+
+    async def _回写访问(self, job: AccessWriteBack) -> None:
+        """访问回写：把命中条目的 `access_count` 加一、`last_access` 记为本次时刻。
+
+        只在 worker 上跑，与 `_ingest` 共用同一个写者（设计文档 §7.2 第 1 条）。
+        调用方保证 `utterance_ids` 非空（`recall` 只在有条目时才入队）。
+        """
+        session = self._require_session()
+        语句 = TOUCH_UTTERANCES.format(
+            ids=", ".join(f"'{escape_literal(编号)}'" for 编号 in job.utterance_ids),
+            moment=str(job.moment),
+        )
+        _ = await session.run(语句)
 
     async def _ingest(self, pending: PendingObservation) -> bool:
         """处理一条待处理观测：嵌入 → 阶段 A（原文落库）。成功为真。

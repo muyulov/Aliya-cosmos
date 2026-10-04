@@ -37,7 +37,9 @@ __all__ = [
     "MERGE_CHARACTER",
     "MERGE_MENTIONS",
     "OPEN_STATE_CHANGES",
+    "SEMANTIC_UTTERANCES",
     "STATES_AT",
+    "TOUCH_UTTERANCES",
     "UPSERT_UTTERANCE",
     "UTTERANCE_COUNT",
     "escape_literal",
@@ -140,6 +142,25 @@ STATES_AT: str = (
     "MATCH (c:Character {{id:'{char}'}})-[:HAS_STATE]->(s:StateChange) "
     "WHERE s.t_from <= {moment} AND (s.t_to IS NULL OR {moment} < s.t_to) "
     "RETURN s.key, s.value"
+)
+
+# --------------------------------------------------------------------------- 召回
+
+#: 向量召回原文：把查询向量喂给 `Utterance` 的 HNSW 索引，取最近的 `k` 条。
+#: 结果别名**固定用 `node`**（实测写成表名会报 `not in scope`）。
+#: 占位符：`{embedding}`（已拼好的浮点列表字面量）、`{k}`（数字）。
+#: 返回列顺序：`id, text, world_time, importance, distance`；`distance` 越小越近。
+SEMANTIC_UTTERANCES: str = (
+    "CALL QUERY_VECTOR_INDEX('Utterance', 'utt_vec', {embedding}, {k}) "
+    "RETURN node.id, node.text, node.world_time, node.importance, distance"
+)
+
+#: 回写访问元数据：召回命中的原文 `access_count` 加一、`last_access` 记为本次时刻。
+#: 衰减（期三）要吃这两个字段，故每次召回都要留痕。
+#: 占位符：`{ids}`（已逐个转义并拼好的字符串列表字面量）、`{moment}`（数字）。
+TOUCH_UTTERANCES: str = (
+    "MATCH (u:Utterance) WHERE u.id IN [{ids}] "
+    "SET u.access_count = u.access_count + 1, u.last_access = {moment}"
 )
 
 # --------------------------------------------------------------------------- 计数
