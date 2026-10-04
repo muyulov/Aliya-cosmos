@@ -113,8 +113,18 @@ class MemoryService(Service):
             return
         session = MemorySession(Path(self._config.db_path), dimensions=self._config.dimensions)
         await session.open()
-        await ensure_schema(session)
+        # **先落账号，再建表**：`ensure_schema` 会因「库的 schema 版本不符」而抛错，
+        # 那是设计明确支持的失败路径。容器回滚调用的 `stop()` 按 `self._session` 找资源，
+        # 先挂上才关得掉；否则已开的 DB 句柄与单线程执行器会泄漏（与 `MemorySession`
+        # docstring 承诺的「start 半途失败对 stop 安全」相矛盾）。再兜一层 close，
+        # 保证不经容器、直接调 start() 失败时也不漏。
         self._session = session
+        try:
+            await ensure_schema(session)
+        except BaseException:
+            await session.close()
+            self._session = None
+            raise
         self._queue = ObservationQueue(self._config.queue_size)
         self._deadletters = DeadLetterBox(Path(self._config.retry.deadletter_path))
         self._worker = asyncio.create_task(self._consume())
@@ -141,17 +151,24 @@ class MemoryService(Service):
 
     @override
     async def health(self) -> HealthStatus:
-        """看会话是否已开，并报出计数。
+        """看会话是否已开，并报出计数与依赖就绪摘要。
 
-        extra 里的三类计数是「库在不在、里面有多少东西」的可观测面：角色数 /
-        原文数直接查库，死信条数直接读文件——后者刻意不经 Kùzu，库里写不进去时
-        它照样报得出来。未运行时不查库（会话可能是 None），套 `not_running_detail`。
+        `healthy` **只看 Kùzu 是否打开**，不把依赖端点（embedding / llm / decision）
+        的就绪状态并进来：decision 默认双端点皆关闭，按「依赖就绪」聚合会让 memory 在
+        默认配置下永远 unhealthy；而缺密钥只是「优雅降级」（写入经不可重试 → 进死信，
+        原文不丢），不是服务损坏。依赖各自就绪与否由它们自己的 health 报出。
+
+        extra 是「库在不在、里面有多少东西、依赖齐不齐」的可观测面：角色数 / 原文数
+        直接查库，死信条数直接读文件——后者刻意不经 Kùzu，库里写不进去时它照样报得出来；
+        `嵌入就绪` 补上依赖视角，暴露「库开着、但写入 / 召回所需的嵌入不可用」的降级态。
+        未运行时不查库（会话可能是 None），套 `not_running_detail`。
         """
         extra: dict[str, object] = {
             "库路径": self._config.db_path,
             "角色数": 0,
             "原文数": 0,
             "死信": self._死信条数(),
+            "嵌入就绪": False,
         }
         session = self._session
         if session is None or not session.opened:
@@ -163,6 +180,7 @@ class MemoryService(Service):
         行角色 = await session.run(CHARACTER_COUNT)
         extra["原文数"] = 行原文[0][0]
         extra["角色数"] = 行角色[0][0]
+        extra["嵌入就绪"] = (await self._embedding.health()).healthy
         return HealthStatus(name=self.label, healthy=True, state=self.state, detail="", extra=extra)
 
     # ---------- 写入口 ----------
@@ -202,9 +220,10 @@ class MemoryService(Service):
     ) -> MemoryContext:
         """按情境召回一段记忆块；无命中时给空块，**不报错**（记忆为空是合法状态）。
 
-        四路合一（设计文档 §7）：语义召回与结构化召回**并发**跑（两路互不依赖，各走
-        会话的单线程执行器），合并后按 `相关度 × 重要度` 裁剪、用确定性模板渲染成块。
-        期一 `block` 一律走模板：`recall.block_by_llm` 只读配置、不触发 LLM（期三才接）。
+        四路合一（设计文档 §7）：语义召回与结构化召回**并发提交**（两路互不依赖），
+        由会话的**单线程执行器串行跑**（Kùzu 连接不跨线程），合并后按
+        `相关度 × 重要度` 裁剪、用确定性模板渲染成块。期一 `block` 一律走模板，未接
+        LLM：`recall.block_by_llm` 到期三才被消费。
 
         唯一副作用是命中条目的访问回写（衰减要吃 `access_count` / `last_access`）：
         **不直写**——打包成 `AccessWriteBack` 交给 worker，免得与写路径并发写库。
@@ -314,11 +333,18 @@ class MemoryService(Service):
         )
         return True
 
-    async def _尝试阶段甲(self, observation: Observation) -> bool:
-        """重放用：跑一遍阶段甲，只看成败，不写死信（由调用方决定条目去留）。"""
+    async def _尝试阶段甲(self, utterance_id: str, observation: Observation) -> bool:
+        """重放用：按**原主键**跑一遍阶段甲，只看成败，不写死信（由调用方决定条目去留）。
+
+        **必须复用死信条的 `utterance_id`，不能另造**。两个理由：其一，另造 id 会让
+        「`observe` 返回值 = 库中主键 = 死信条 id」这条契约在重放路径上断开；其二，
+        `UPSERT_UTTERANCE` 的幂等性依赖同一个 id——若落库成功但死信重写失败（磁盘满），
+        下一轮重放会拿**又一个新 id** 再插一行，同一段原文变成两条记忆，正是本层最想
+        避免的静默污染。复用主键让重放天然幂等。
+        """
         计数: list[int] = [0]
         try:
-            _, _ = await self._阶段甲(new_id(), observation, 计数)
+            _, _ = await self._阶段甲(utterance_id, observation, 计数)
         except Exception as 故障:
             self.log_error("死信重放仍失败，保留待下一轮", 故障)
             return False
@@ -434,7 +460,7 @@ class MemoryService(Service):
         except ValidationError as 故障:
             self.log_error("死信载荷不合法，保留待人工处理", 故障, 回合=条.utterance_id)
             return False
-        return await self._尝试阶段甲(observation)
+        return await self._尝试阶段甲(条.utterance_id, observation)
 
     # ---------- 内部 ----------
 

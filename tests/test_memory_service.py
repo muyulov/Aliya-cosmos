@@ -39,7 +39,7 @@ from core.memory import MemoryInputError, MemoryStoreError, Observation
 from core.memory.ingest.queue import PendingObservation
 from core.memory.ingest.retry import STAGE_STRUCTURED, STAGE_UTTERANCE, DeadLetter, DeadLetterBox
 from core.memory.service import MemoryService
-from core.memory.store import UTTERANCE_COUNT, escape_literal
+from core.memory.store import UTTERANCE_COUNT, MemorySession, escape_literal
 from core.service.base import ServiceState, not_running_detail
 from core.service.manager import ServiceManager
 
@@ -236,6 +236,34 @@ async def test_start幂等(tmp_path: Path) -> None:
     await 服务.stop()
 
 
+async def test_建表失败会关闭已开的会话(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """start() 半途失败（如库的 schema 版本不符）必须关掉已开的会话，不能泄漏。
+
+    `ensure_schema` 抛错是设计支持的失败路径。本用例**直接调 start()**（不经容器回滚），
+    验证实现自己兜住了关闭：否则已开的 Kùzu 句柄与单线程执行器会泄漏。
+    证伪开关：把 `self._session = session` 挪回 `ensure_schema` 之后，会话不会被关。
+    """
+    服务 = _服务(tmp_path)
+    已关: list[bool] = []
+    原关闭 = MemorySession.close
+
+    async def _记录关闭(自身: MemorySession) -> None:
+        await 原关闭(自身)
+        已关.append(True)
+
+    async def _建表炸(_会话: MemorySession) -> None:
+        raise MemoryStoreError("库的 schema 版本不符", operation="ensure_schema")
+
+    monkeypatch.setattr(MemorySession, "close", _记录关闭)
+    monkeypatch.setattr("core.memory.service.ensure_schema", _建表炸)
+
+    with pytest.raises(MemoryStoreError):
+        await 服务.start()
+
+    assert 已关 == [True]
+    assert 服务._session is None  # pyright: ignore[reportPrivateUsage]
+
+
 async def test_未启动时健康检查报未运行(tmp_path: Path) -> None:
     """还没 start：不健康，且详情指出是「未运行」而不是别的。"""
     服务 = _服务(tmp_path)
@@ -249,6 +277,7 @@ async def test_未启动时健康检查报未运行(tmp_path: Path) -> None:
     assert 状态.extra["角色数"] == 0
     assert 状态.extra["原文数"] == 0
     assert 状态.extra["死信"] == 0
+    assert 状态.extra["嵌入就绪"] is False
 
 
 async def test_启动后健康检查与计数(tmp_path: Path) -> None:
@@ -264,6 +293,8 @@ async def test_启动后健康检查与计数(tmp_path: Path) -> None:
         assert 状态.extra["角色数"] == 0
         assert 状态.extra["原文数"] == 0
         assert 状态.extra["死信"] == 0
+        # 本用例的嵌入器注入了假内核，故依赖就绪为真（健康只看库，但 extra 会报依赖视角）
+        assert 状态.extra["嵌入就绪"] is True
     finally:
         await 服务.stop()
 
@@ -288,6 +319,8 @@ async def test_依赖端点没配密钥时start只警告不炸(tmp_path: Path) -
         状态 = await 服务.health()
         # 依赖没密钥不影响记忆服务自身健康：库是开着的
         assert 状态.healthy is True
+        # 但依赖视角在 extra 里暴露出来：嵌入不可用 ⇒ 写入会全进死信（降级态可见）
+        assert 状态.extra["嵌入就绪"] is False
     finally:
         await 管理器.stop_all()
 
@@ -585,9 +618,11 @@ async def test_死信可重放剔除(tmp_path: Path) -> None:
     服务 = _服务(tmp_path, 内核=内核, 配置=配置)
     await 服务.start()
     try:
-        _ = await 服务.observe(Observation(kind="dialogue", text="先失败"))
+        回合 = await 服务.observe(Observation(kind="dialogue", text="先失败"))
         await _等死信(服务)
-        assert len(_死信条(服务)) == 1
+        原条 = _死信条(服务)
+        assert len(原条) == 1
+        assert 原条[0].utterance_id == 回合
 
         # 内核转好：重放应成功并把死信剔除
         内核.fail_times = 0
@@ -597,6 +632,9 @@ async def test_死信可重放剔除(tmp_path: Path) -> None:
         assert 剔除数 == 1
         assert _死信条(服务) == []
         assert await _原文条数(服务) == 1
+        # 契约：重放落库的主键就是 observe 当初返回、也是死信条记下的那个 id。
+        # 证伪开关：若 `_尝试阶段甲` 另造新 id，这里按原 id 查库会落空、本条变红。
+        assert await _按id取原文(服务, 回合) == 回合
     finally:
         await 服务.stop()
 
