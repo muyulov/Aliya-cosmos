@@ -59,32 +59,32 @@ from core.memory.ingest.retry import (
 )
 
 
-async def _不睡(_秒: float) -> None:
+async def _no_sleep(_seconds: float) -> None:
     """零耗时的假 sleep：用例不必真等退避（退避基数在测试里也设 0，双保险）。"""
     return None
 
 
-def _死信(条数: int, 阶段: str = STAGE_UTTERANCE) -> list[DeadLetter]:
+def _deadletter(count: int, stage: str = STAGE_UTTERANCE) -> list[DeadLetter]:
     """造若干条最小死信，便于批量往返与重写用例。"""
     return [
         DeadLetter(
             utterance_id=f"u{i}",
-            stage=阶段,
+            stage=stage,
             error_type="LLMTimeoutError",
             error_message=f"第{i}条超时",
             attempts=2,
             payload={"kind": "dialogue", "text": f"第{i}句"},
             failed_at=1000 + i,
         )
-        for i in range(条数)
+        for i in range(count)
     ]
 
 
-def _改一字段(字段: str, 值: object) -> str:
+def _mutate_field(field: str, value: object) -> str:
     """把一条好死信的某个字段改成非法值并序列化，用来造「合法 JSON 但坏结构」的行。"""
-    原始 = cast("dict[str, object]", json.loads(_死信(1)[0].to_json()))
-    原始[字段] = 值
-    return json.dumps(原始, ensure_ascii=False)
+    raw = cast("dict[str, object]", json.loads(_deadletter(1)[0].to_json()))
+    raw[field] = value
+    return json.dumps(raw, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -170,116 +170,116 @@ def test_策略字段可读() -> None:
 async def test_退避后重试成功() -> None:
     """第一次必败、第二次成功：尝试数为 2；正常返回结果，不进死信。"""
     policy = RetryPolicy(max_attempts=3, backoff=0.0)
-    调用次数 = 0
+    call_count = 0
 
-    async def 操作() -> str:
-        nonlocal 调用次数
-        调用次数 += 1
-        if 调用次数 == 1:
+    async def operation() -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
             raise LLMTimeoutError("第一次超时")
         return "成功了"
 
-    结果, 尝试数 = await run_with_retry(操作, policy=policy, sleep=_不睡)
-    assert 结果 == "成功了"
-    assert 尝试数 == 2
-    assert 调用次数 == 2
+    result, attempt_count = await run_with_retry(operation, policy=policy, sleep=_no_sleep)
+    assert result == "成功了"
+    assert attempt_count == 2
+    assert call_count == 2
 
 
 async def test_退避被真的等过() -> None:
     """注入的 sleep 必须被调用，且等待时长等于 policy.delay(attempt)。"""
     policy = RetryPolicy(max_attempts=3, backoff=0.25)
-    等过: list[float] = []
+    waited: list[float] = []
 
-    async def 假睡(秒: float) -> None:
-        等过.append(秒)
+    async def fake_sleep(seconds: float) -> None:
+        waited.append(seconds)
 
-    第几次 = 0
+    nth = 0
 
-    async def 操作() -> str:
-        nonlocal 第几次
-        第几次 += 1
-        if 第几次 < 3:
+    async def operation() -> str:
+        nonlocal nth
+        nth += 1
+        if nth < 3:
             raise LLMConnectionError("先断两次")
         return "第三次通了"
 
-    _, 尝试数 = await run_with_retry(操作, policy=policy, sleep=假睡)
+    _, attempt_count = await run_with_retry(operation, policy=policy, sleep=fake_sleep)
     # 首次失败 → 等 delay(1)=0.25；第二次失败 → 等 delay(2)=0.5；第三次成功
-    assert 尝试数 == 3
-    assert 等过 == [0.25, 0.5]
+    assert attempt_count == 3
+    assert waited == [0.25, 0.5]
 
 
 async def test_重试用尽上抛最后一次() -> None:
     """全部尝试都失败：抛出的必须是最后一次那个异常，不吞不换。"""
     policy = RetryPolicy(max_attempts=3, backoff=0.0)
-    序号 = 0
+    index = 0
 
-    async def 操作() -> str:
-        nonlocal 序号
-        序号 += 1
+    async def operation() -> str:
+        nonlocal index
+        index += 1
         # 上限**在循环内钉住**：断言排在每次调用里，若 max_attempts 被改大或判断被删，
         # 循环不会等到 delay() 因 2**n 溢出崩溃（attempt≈1025）才失败，而是在第
         # max_attempts + 2 次调用时立刻以断言失配变红——这样用例才区分得出
         # 「正确的上限」与「任意一个错误的上限」，而不是只能靠崩溃变红。
-        assert 序号 <= policy.max_attempts + 1, f"调用次数 {序号} 超过上限"
-        raise LLMTimeoutError(f"第{序号}次")
+        assert index <= policy.max_attempts + 1, f"调用次数 {index} 超过上限"
+        raise LLMTimeoutError(f"第{index}次")
 
-    with pytest.raises(LLMTimeoutError) as 捕获:
-        _ = await run_with_retry(操作, policy=policy, sleep=_不睡)
-    assert 序号 == 4  # 首次 + 3 次重试
-    assert "第4次" in str(捕获.value)
+    with pytest.raises(LLMTimeoutError) as captured:
+        _ = await run_with_retry(operation, policy=policy, sleep=_no_sleep)
+    assert index == 4  # 首次 + 3 次重试
+    assert "第4次" in str(captured.value)
 
 
 async def test_重试用尽保留异常链() -> None:
     """上抛的异常要带 __cause__，调用方能顺链排查原始报错。"""
     policy = RetryPolicy(max_attempts=2, backoff=0.0)
-    底层 = OSError("TLS 握手失败")
-    第几次 = 0
+    inner = OSError("TLS 握手失败")
+    nth = 0
 
-    async def 操作() -> str:
-        nonlocal 第几次
-        第几次 += 1
+    async def operation() -> str:
+        nonlocal nth
+        nth += 1
         # 每次都是**新的**异常实例，但原底（TLS 握手失败）是同一个
-        raise LLMConnectionError(f"第{第几次}次连不上") from 底层
+        raise LLMConnectionError(f"第{nth}次连不上") from inner
 
-    with pytest.raises(LLMConnectionError) as 捕获:
-        _ = await run_with_retry(操作, policy=policy, sleep=_不睡)
-    assert 第几次 == 3  # 首次 + 2 次重试
+    with pytest.raises(LLMConnectionError) as captured:
+        _ = await run_with_retry(operation, policy=policy, sleep=_no_sleep)
+    assert nth == 3  # 首次 + 2 次重试
     # 上抛的是最后一次的实例；链条是「最后一次 →(cause) 上一次 →(cause) TLS 原底」，
     # 顺着走两跳能摸到最早的原始报错。
-    assert "第3次" in str(捕获.value)
-    上一次 = 捕获.value.__cause__
-    assert 上一次 is not None
-    assert 上一次.__cause__ is 底层
+    assert "第3次" in str(captured.value)
+    previous = captured.value.__cause__
+    assert previous is not None
+    assert previous.__cause__ is inner
 
 
 async def test_永久故障立刻上抛不重试() -> None:
     """不可重试的异常立刻上抛，一次都不重试。"""
     policy = RetryPolicy(max_attempts=5, backoff=0.0)
-    调用次数 = 0
+    call_count = 0
 
-    async def 操作() -> str:
-        nonlocal 调用次数
-        调用次数 += 1
+    async def operation() -> str:
+        nonlocal call_count
+        call_count += 1
         raise LLMSchemaError("召回体缺 content")
 
     with pytest.raises(LLMSchemaError):
-        _ = await run_with_retry(操作, policy=policy, sleep=_不睡)
-    assert 调用次数 == 1
+        _ = await run_with_retry(operation, policy=policy, sleep=_no_sleep)
+    assert call_count == 1
 
 
 async def test_零重试配置只跑一次() -> None:
     """max_attempts 为 0 时退化成「试一次」，不进重试循环。"""
     policy = RetryPolicy(max_attempts=0, backoff=0.0)
-    调用次数 = 0
+    call_count = 0
 
-    async def 操作() -> str:
-        nonlocal 调用次数
-        调用次数 += 1
+    async def operation() -> str:
+        nonlocal call_count
+        call_count += 1
         raise LLMTimeoutError("超时")
 
     with pytest.raises(LLMTimeoutError):
-        _ = await run_with_retry(操作, policy=policy, sleep=_不睡)
-    assert 调用次数 == 1
+        _ = await run_with_retry(operation, policy=policy, sleep=_no_sleep)
+    assert call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +289,7 @@ async def test_零重试配置只跑一次() -> None:
 
 def test_死信条JSON往返一致() -> None:
     """to_json / from_json 往返后逐字段相等，且中文不被转义。"""
-    原 = DeadLetter(
+    original = DeadLetter(
         utterance_id="u1",
         stage=STAGE_STRUCTURED,
         error_type="LLMSchemaError",
@@ -298,18 +298,18 @@ def test_死信条JSON往返一致() -> None:
         payload=None,
         failed_at=1735689600,
     )
-    文本 = 原.to_json()
-    assert "\\u" not in 文本  # ensure_ascii=False
-    assert json.loads(文本)["stage"] == STAGE_STRUCTURED
-    assert DeadLetter.from_json(文本) == 原
+    text = original.to_json()
+    assert "\\u" not in text  # ensure_ascii=False
+    assert json.loads(text)["stage"] == STAGE_STRUCTURED
+    assert DeadLetter.from_json(text) == original
 
 
 def test_死信条字段可读() -> None:
     """阶段 A 的死信要带完整载荷，否则原文永久丢失。"""
-    条 = _死信(1)[0]
-    assert 条.payload == {"kind": "dialogue", "text": "第0句"}
-    assert 条.stage == STAGE_UTTERANCE
-    assert 条.utterance_id == "u0"
+    entry = _deadletter(1)[0]
+    assert entry.payload == {"kind": "dialogue", "text": "第0句"}
+    assert entry.stage == STAGE_UTTERANCE
+    assert entry.utterance_id == "u0"
 
 
 def test_阶段常量取值符合约定() -> None:
@@ -325,24 +325,24 @@ def test_阶段常量取值符合约定() -> None:
 
 def test_死信箱追加与读回(tmp_path: Path) -> None:
     """append 是 append-only：两次追加读回两条，顺序不变。"""
-    箱 = DeadLetterBox(tmp_path / "deadletter.jsonl")
-    条 = _死信(2)
-    箱.append(条[0])
-    箱.append(条[1])
-    assert 箱.load() == 条
+    box = DeadLetterBox(tmp_path / "deadletter.jsonl")
+    entry = _deadletter(2)
+    box.append(entry[0])
+    box.append(entry[1])
+    assert box.load() == entry
 
 
 def test_空箱读出空列表(tmp_path: Path) -> None:
     """文件还不存在是合法状态（一次失败都还没发生），读回空表而不是报错。"""
-    箱 = DeadLetterBox(tmp_path / "还没有" / "deadletter.jsonl")
-    assert 箱.load() == []
+    box = DeadLetterBox(tmp_path / "还没有" / "deadletter.jsonl")
+    assert box.load() == []
 
 
 def test_追加自建父目录(tmp_path: Path) -> None:
     """路径的父目录不存在时要能自建——首次失败时没人替它建目录。"""
-    箱 = DeadLetterBox(tmp_path / "深" / "更深" / "deadletter.jsonl")
-    箱.append(_死信(1)[0])
-    assert 箱.load() == _死信(1)
+    box = DeadLetterBox(tmp_path / "深" / "更深" / "deadletter.jsonl")
+    box.append(_deadletter(1)[0])
+    assert box.load() == _deadletter(1)
 
 
 def test_坏行跳过而非整份读不出(tmp_path: Path) -> None:
@@ -351,105 +351,105 @@ def test_坏行跳过而非整份读不出(tmp_path: Path) -> None:
     _ = path.write_text(
         "\n".join(
             [
-                _死信(1)[0].to_json(),
+                _deadletter(1)[0].to_json(),
                 "{这根本不是 JSON",
                 "",
-                _死信(2)[1].to_json(),
+                _deadletter(2)[1].to_json(),
             ]
         )
         + "\n",
         encoding="utf-8",
     )
-    箱 = DeadLetterBox(path)
-    assert 箱.load() == _死信(2)
+    box = DeadLetterBox(path)
+    assert box.load() == _deadletter(2)
 
 
 def test_坏行是合法JSON但缺字段也跳过(tmp_path: Path) -> None:
     """合法 JSON 但不符合死信条结构（缺字段）同样算坏行，不能炸掉整份读。"""
     path = tmp_path / "deadletter.jsonl"
     _ = path.write_text(
-        "\n".join([_死信(1)[0].to_json(), json.dumps({"utterance_id": "u9"})]) + "\n",
+        "\n".join([_deadletter(1)[0].to_json(), json.dumps({"utterance_id": "u9"})]) + "\n",
         encoding="utf-8",
     )
-    箱 = DeadLetterBox(path)
-    assert 箱.load() == _死信(1)
+    box = DeadLetterBox(path)
+    assert box.load() == _deadletter(1)
 
 
 def test_坏行是JSON数组也跳过(tmp_path: Path) -> None:
     """顶层不是对象（比如 JSON 数组）同样算坏行，不炸掉整份读。"""
     path = tmp_path / "deadletter.jsonl"
     _ = path.write_text(
-        "\n".join(["[1, 2, 3]", _死信(1)[0].to_json()]) + "\n",
+        "\n".join(["[1, 2, 3]", _deadletter(1)[0].to_json()]) + "\n",
         encoding="utf-8",
     )
-    箱 = DeadLetterBox(path)
-    assert 箱.load() == _死信(1)
+    box = DeadLetterBox(path)
+    assert box.load() == _deadletter(1)
 
 
 def test_坏行字段类型不符也跳过(tmp_path: Path) -> None:
     """字段存在但类型不符（utterance_id 是数字、attempts 是字符串）也算坏行。"""
     path = tmp_path / "deadletter.jsonl"
-    坏一 = _改一字段("utterance_id", 123)
-    坏二 = _改一字段("attempts", "三次")
+    bad_one = _mutate_field("utterance_id", 123)
+    bad_two = _mutate_field("attempts", "三次")
     _ = path.write_text(
-        "\n".join([坏一, 坏二, _死信(1)[0].to_json()]) + "\n",
+        "\n".join([bad_one, bad_two, _deadletter(1)[0].to_json()]) + "\n",
         encoding="utf-8",
     )
-    箱 = DeadLetterBox(path)
-    assert 箱.load() == _死信(1)
+    box = DeadLetterBox(path)
+    assert box.load() == _deadletter(1)
 
 
 def test_坏行整数字段是布尔值也跳过(tmp_path: Path) -> None:
     """bool 是 int 的子类，但 attempts=True 不该被当成 1 混进好行。"""
     path = tmp_path / "deadletter.jsonl"
-    坏 = _改一字段("failed_at", True)
+    bad = _mutate_field("failed_at", True)
     _ = path.write_text(
-        "\n".join([坏, _死信(1)[0].to_json()]) + "\n",
+        "\n".join([bad, _deadletter(1)[0].to_json()]) + "\n",
         encoding="utf-8",
     )
-    箱 = DeadLetterBox(path)
-    assert 箱.load() == _死信(1)
+    box = DeadLetterBox(path)
+    assert box.load() == _deadletter(1)
 
 
 def test_坏行载荷不是对象也跳过(tmp_path: Path) -> None:
     """payload 必须是对象或空；给个字符串同样是坏行。"""
     path = tmp_path / "deadletter.jsonl"
-    坏 = _改一字段("payload", "这是字符串不是对象")
+    bad = _mutate_field("payload", "这是字符串不是对象")
     _ = path.write_text(
-        "\n".join([坏, _死信(1)[0].to_json()]) + "\n",
+        "\n".join([bad, _deadletter(1)[0].to_json()]) + "\n",
         encoding="utf-8",
     )
-    箱 = DeadLetterBox(path)
-    assert 箱.load() == _死信(1)
+    box = DeadLetterBox(path)
+    assert box.load() == _deadletter(1)
 
 
 def test_重写是原子替换(tmp_path: Path) -> None:
     """rewrite 写临时文件再 replace：目标被整体换掉，不残留旧内容。"""
-    箱 = DeadLetterBox(tmp_path / "deadletter.jsonl")
-    箱.append(_死信(3)[0])
-    箱.append(_死信(3)[1])
-    箱.append(_死信(3)[2])
-    箱.rewrite([_死信(1)[0]])
-    剩余 = 箱.load()
-    assert 剩余 == _死信(1)
+    box = DeadLetterBox(tmp_path / "deadletter.jsonl")
+    box.append(_deadletter(3)[0])
+    box.append(_deadletter(3)[1])
+    box.append(_deadletter(3)[2])
+    box.rewrite([_deadletter(1)[0]])
+    remaining = box.load()
+    assert remaining == _deadletter(1)
     # 临时文件必须已被替换走，目录里不留残渣
-    目录 = sorted(p.name for p in tmp_path.iterdir())
-    assert 目录 == ["deadletter.jsonl"]
+    directory = sorted(p.name for p in tmp_path.iterdir())
+    assert directory == ["deadletter.jsonl"]
 
 
 def test_重写成空清单清空文件(tmp_path: Path) -> None:
     """全部重放成功时 rewrite([]) 把文件清空，而不是留一份旧内容。"""
-    箱 = DeadLetterBox(tmp_path / "deadletter.jsonl")
-    箱.append(_死信(2)[0])
-    箱.rewrite([])
-    assert 箱.load() == []
+    box = DeadLetterBox(tmp_path / "deadletter.jsonl")
+    box.append(_deadletter(2)[0])
+    box.rewrite([])
+    assert box.load() == []
 
 
 def test_重写自建父目录(tmp_path: Path) -> None:
     """父目录不在时 rewrite 也要能自建，避免首次重放直接炸。"""
-    箱 = DeadLetterBox(tmp_path / "新目录" / "deadletter.jsonl")
-    箱.rewrite(_死信(2))
-    assert 箱.load() == _死信(2)
+    box = DeadLetterBox(tmp_path / "新目录" / "deadletter.jsonl")
+    box.rewrite(_deadletter(2))
+    assert box.load() == _deadletter(2)
 
 
 def test_路径可读(tmp_path: Path) -> None:
@@ -469,98 +469,98 @@ async def test_重试用尽进死信(tmp_path: Path) -> None:
     run_with_retry 只上抛，进死信是这里（调用方）显式做的——职责边界可见。
     """
     policy = RetryPolicy(max_attempts=2, backoff=0.0)
-    箱 = DeadLetterBox(tmp_path / "deadletter.jsonl")
-    载荷: dict[str, object] = {"kind": "dialogue", "text": "我要记住这句"}
-    尝试数 = 0
+    box = DeadLetterBox(tmp_path / "deadletter.jsonl")
+    payload: dict[str, object] = {"kind": "dialogue", "text": "我要记住这句"}
+    attempt_count = 0
 
-    async def 阶段甲() -> None:
-        nonlocal 尝试数
-        尝试数 += 1
+    async def stage_a() -> None:
+        nonlocal attempt_count
+        attempt_count += 1
         raise EmbeddingTimeoutError("嵌入端点超时")
 
     try:
-        _ = await run_with_retry(阶段甲, policy=policy, sleep=_不睡)
-    except EmbeddingTimeoutError as 故障:
-        箱.append(
+        _ = await run_with_retry(stage_a, policy=policy, sleep=_no_sleep)
+    except EmbeddingTimeoutError as exc:
+        box.append(
             DeadLetter(
                 utterance_id="u-原文",
                 stage=STAGE_UTTERANCE,
-                error_type=type(故障).__name__,
-                error_message=str(故障),
-                attempts=尝试数,
-                payload=载荷,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                attempts=attempt_count,
+                payload=payload,
                 failed_at=1735689600,
             )
         )
 
-    读回 = 箱.load()
-    assert len(读回) == 1
-    assert 读回[0].utterance_id == "u-原文"
-    assert 读回[0].stage == STAGE_UTTERANCE
-    assert 读回[0].attempts == 3  # 首次 + 2 次重试
-    assert 读回[0].payload == 载荷  # 阶段 A 必须带完整载荷
-    assert 读回[0].error_type == "EmbeddingTimeoutError"
+    read_back = box.load()
+    assert len(read_back) == 1
+    assert read_back[0].utterance_id == "u-原文"
+    assert read_back[0].stage == STAGE_UTTERANCE
+    assert read_back[0].attempts == 3  # 首次 + 2 次重试
+    assert read_back[0].payload == payload  # 阶段 A 必须带完整载荷
+    assert read_back[0].error_type == "EmbeddingTimeoutError"
 
 
 async def test_永久故障零重试直接死信(tmp_path: Path) -> None:
     """LLMSchemaError 是永久故障：一次都不重试，直接进死信，且阶段 B 只记 id。"""
     policy = RetryPolicy(max_attempts=5, backoff=0.0)
-    箱 = DeadLetterBox(tmp_path / "deadletter.jsonl")
-    尝试数 = 0
+    box = DeadLetterBox(tmp_path / "deadletter.jsonl")
+    attempt_count = 0
 
-    async def 阶段乙() -> None:
-        nonlocal 尝试数
-        尝试数 += 1
+    async def stage_b() -> None:
+        nonlocal attempt_count
+        attempt_count += 1
         raise LLMSchemaError("抽取结果不符合 schema")
 
     try:
-        _ = await run_with_retry(阶段乙, policy=policy, sleep=_不睡)
-    except LLMSchemaError as 故障:
-        箱.append(
+        _ = await run_with_retry(stage_b, policy=policy, sleep=_no_sleep)
+    except LLMSchemaError as exc:
+        box.append(
             DeadLetter(
                 utterance_id="u-已在库",
                 stage=STAGE_STRUCTURED,
-                error_type=type(故障).__name__,
-                error_message=str(故障),
-                attempts=尝试数,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                attempts=attempt_count,
                 payload=None,  # 阶段 B：原文已在库，重放时读库即可
                 failed_at=1735689601,
             )
         )
 
-    读回 = 箱.load()
-    assert 尝试数 == 1  # 零重试
-    assert len(读回) == 1
-    assert 读回[0].attempts == 1
-    assert 读回[0].stage == STAGE_STRUCTURED
-    assert 读回[0].payload is None
-    assert 读回[0].error_type == "LLMSchemaError"
+    read_back = box.load()
+    assert attempt_count == 1  # 零重试
+    assert len(read_back) == 1
+    assert read_back[0].attempts == 1
+    assert read_back[0].stage == STAGE_STRUCTURED
+    assert read_back[0].payload is None
+    assert read_back[0].error_type == "LLMSchemaError"
 
 
 async def test_死信可被重放剔除(tmp_path: Path) -> None:
     """重放成功的条目在重写后消失，失败的留下——DLQ 得自己收敛。"""
-    箱 = DeadLetterBox(tmp_path / "deadletter.jsonl")
-    for 条 in _死信(3):
-        箱.append(条)
+    box = DeadLetterBox(tmp_path / "deadletter.jsonl")
+    for entry in _deadletter(3):
+        box.append(entry)
     policy = RetryPolicy(max_attempts=1, backoff=0.0)
 
-    async def 重放(条: DeadLetter) -> bool:
-        async def 操作() -> str:
-            if 条.utterance_id == "u1":
+    async def replay(entry: DeadLetter) -> bool:
+        async def operation() -> str:
+            if entry.utterance_id == "u1":
                 raise LLMTimeoutError("第 2 条还是不行")
             return "重放成功"
 
         try:
-            _ = await run_with_retry(操作, policy=policy, sleep=_不睡)
+            _ = await run_with_retry(operation, policy=policy, sleep=_no_sleep)
         except LLMTimeoutError:
             return False
         return True
 
-    存活: list[DeadLetter] = []
-    for 条 in 箱.load():
-        if not await 重放(条):
-            存活.append(条)
-    箱.rewrite(存活)
+    survivors: list[DeadLetter] = []
+    for entry in box.load():
+        if not await replay(entry):
+            survivors.append(entry)
+    box.rewrite(survivors)
 
-    剩 = 箱.load()
-    assert [条.utterance_id for 条 in 剩] == ["u1"]
+    leftover = box.load()
+    assert [entry.utterance_id for entry in leftover] == ["u1"]

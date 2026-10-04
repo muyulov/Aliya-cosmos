@@ -24,10 +24,10 @@ async def test_建表幂等(tmp_path: Path) -> None:
     await ensure_schema(session)
     await ensure_schema(session)
 
-    表名集 = {行[0] for 行 in await session.run("CALL show_tables() RETURN name")}
+    table_names = {rows[0] for rows in await session.run("CALL show_tables() RETURN name")}
 
     # 等集断言（非子集）：期一只许建这六张表，多建即违反「不许预留」的硬规格。
-    assert 表名集 == {"Character", "HAS_STATE", "MENTIONS", "Meta", "StateChange", "Utterance"}
+    assert table_names == {"Character", "HAS_STATE", "MENTIONS", "Meta", "StateChange", "Utterance"}
 
     await session.close()
 
@@ -39,9 +39,9 @@ async def test_关系表也建起来(tmp_path: Path) -> None:
     await session.open()
     await ensure_schema(session)
 
-    表名集 = {行[0] for 行 in await session.run("CALL show_tables() RETURN name")}
+    table_names = {rows[0] for rows in await session.run("CALL show_tables() RETURN name")}
 
-    assert {"HAS_STATE", "MENTIONS"} <= 表名集
+    assert {"HAS_STATE", "MENTIONS"} <= table_names
 
     await session.close()
 
@@ -84,13 +84,13 @@ async def test_向量与全文索引都落库(tmp_path: Path) -> None:
     await session.open()
     await ensure_schema(session)
 
-    索引名集 = {
-        行[1]
-        for 行 in await session.run("CALL show_indexes() RETURN table_name, index_name")
-        if 行[0] == "Utterance"
+    index_names = {
+        rows[1]
+        for rows in await session.run("CALL show_indexes() RETURN table_name, index_name")
+        if rows[0] == "Utterance"
     }
 
-    assert 索引名集 == {"utt_vec", "utt_fts"}
+    assert index_names == {"utt_vec", "utt_fts"}
 
     await session.close()
 
@@ -103,10 +103,10 @@ async def test_版本落后直接报错(tmp_path: Path) -> None:
     await ensure_schema(session)
     _ = await session.run("MATCH (m:Meta {key:'schema_version'}) SET m.value = '0'")
 
-    with pytest.raises(MemoryStoreError) as 捕获:
+    with pytest.raises(MemoryStoreError) as captured:
         await ensure_schema(session)
 
-    assert 捕获.value.operation == "ensure_schema"
+    assert captured.value.operation == "ensure_schema"
 
     await session.close()
 
@@ -118,8 +118,8 @@ async def test_版本相符放行(tmp_path: Path) -> None:
     await session.open()
     await ensure_schema(session)
 
-    版本行 = await session.run("MATCH (m:Meta {key:'schema_version'}) RETURN m.value")
+    version_rows = await session.run("MATCH (m:Meta {key:'schema_version'}) RETURN m.value")
 
-    assert 版本行 == [[SCHEMA_VERSION]]
+    assert version_rows == [[SCHEMA_VERSION]]
 
     await session.close()

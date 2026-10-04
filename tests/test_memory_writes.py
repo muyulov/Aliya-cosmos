@@ -21,7 +21,7 @@ import pytest
 
 from core.memory import MemoryStoreError
 from core.memory.store import MemorySession
-from core.memory.store import writes as writes模块
+from core.memory.store import writes as writes_module
 from core.memory.store.schema import ensure_schema
 from core.memory.store.writes import (
     close_state,
@@ -33,7 +33,7 @@ from core.memory.store.writes import (
 )
 
 
-async def _起库(tmp_path: Path) -> MemorySession:
+async def _open_db(tmp_path: Path) -> MemorySession:
     """开一个 4 维的临时库并建好表，供各用例复用。"""
     session = MemorySession(tmp_path / "db", dimensions=4)
     await session.open()
@@ -46,7 +46,7 @@ async def _起库(tmp_path: Path) -> MemorySession:
 
 async def test_重复建角色只留一个(tmp_path: Path) -> None:
     """MERGE 语义：同名角色反复写入不会变成两个节点，别名合并不丢。"""
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
 
     await merge_character(
         session, character_id="c1", name="阿黎", kind="person", aliases=("阿黎酱", "小黎")
@@ -56,11 +56,11 @@ async def test_重复建角色只留一个(tmp_path: Path) -> None:
         session, character_id="c1", name="阿黎（改）", kind="other", aliases=("黎黎",)
     )
 
-    行 = await session.run("MATCH (c:Character {id:'c1'}) RETURN c.name, c.aliases")
+    rows = await session.run("MATCH (c:Character {id:'c1'}) RETURN c.name, c.aliases")
 
-    assert len(行) == 1
-    assert 行[0][0] == "阿黎"
-    assert sorted(cast("list[str]", 行[0][1])) == ["小黎", "阿黎酱", "黎黎"]
+    assert len(rows) == 1
+    assert rows[0][0] == "阿黎"
+    assert sorted(cast("list[str]", rows[0][1])) == ["小黎", "阿黎酱", "黎黎"]
 
     await session.close()
 
@@ -70,7 +70,7 @@ async def test_重复建角色只留一个(tmp_path: Path) -> None:
 
 async def test_状态变更关旧开新(tmp_path: Path) -> None:
     """写第二次后旧条 t_to 被填、新条 t_to 为空，当前状态恰好一条。"""
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
     await merge_character(session, character_id="c1", name="阿黎", kind="person")
 
     await record_state_change(
@@ -80,26 +80,26 @@ async def test_状态变更关旧开新(tmp_path: Path) -> None:
         session, character_id="c1", key="mood", value="激动", t_from=5, source_utterance="u2"
     )
 
-    全条 = sorted(
-        (行[0], 行[1], 行[2])
-        for 行 in await session.run(
+    all_entries = sorted(
+        (rows[0], rows[1], rows[2])
+        for rows in await session.run(
             "MATCH (s:StateChange) RETURN s.value, s.t_to, s.t_from ORDER BY s.t_from"
         )
     )
 
     # 旧条被收口在 t_from=5，新条仍开放（t_to 为空）
-    assert 全条 == [("平静", 5, 1), ("激动", None, 5)]
+    assert all_entries == [("平静", 5, 1), ("激动", None, 5)]
 
-    当前 = await current_states(session, character_id="c1")
+    current = await current_states(session, character_id="c1")
 
-    assert 当前 == [("mood", "激动")]
+    assert current == [("mood", "激动")]
 
     await session.close()
 
 
 async def test_当前状态只回报未关闭的那条(tmp_path: Path) -> None:
     """已关闭的历史值不出现在当前状态里；从未写过的角色回报空表而非报错。"""
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
     await merge_character(session, character_id="c1", name="阿黎", kind="person")
     await merge_character(session, character_id="c2", name="空杯", kind="person")
 
@@ -110,11 +110,11 @@ async def test_当前状态只回报未关闭的那条(tmp_path: Path) -> None:
         session, character_id="c1", key="mood", value="激动", t_from=5, source_utterance="u2"
     )
 
-    当前 = await current_states(session, character_id="c1")
-    空角色 = await current_states(session, character_id="c2")
+    current = await current_states(session, character_id="c1")
+    empty_character = await current_states(session, character_id="c2")
 
-    assert [值 for _, 值 in 当前] == ["激动"]
-    assert 空角色 == []
+    assert [value for _, value in current] == ["激动"]
+    assert empty_character == []
 
     await session.close()
 
@@ -125,7 +125,7 @@ async def test_某时刻状态可回溯(tmp_path: Path) -> None:
     一条状态占 [1,5)，另一条从 5 起：取 3 命中旧值、取 5 命中新值（左闭右开）、
     取 9 命中新值；再取一个早于开端的时刻 0 则落空。
     """
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
     await merge_character(session, character_id="c1", name="阿黎", kind="person")
 
     await record_state_change(
@@ -135,15 +135,15 @@ async def test_某时刻状态可回溯(tmp_path: Path) -> None:
         session, character_id="c1", key="mood", value="激动", t_from=5, source_utterance="u2"
     )
 
-    开端前 = await states_at(session, character_id="c1", moment=0)
-    旧时段 = await states_at(session, character_id="c1", moment=3)
-    交界点 = await states_at(session, character_id="c1", moment=5)
-    新时段 = await states_at(session, character_id="c1", moment=9)
+    before_start = await states_at(session, character_id="c1", moment=0)
+    old_span = await states_at(session, character_id="c1", moment=3)
+    boundary = await states_at(session, character_id="c1", moment=5)
+    new_span = await states_at(session, character_id="c1", moment=9)
 
-    assert 开端前 == []
-    assert 旧时段 == [("mood", "平静")]
-    assert 交界点 == [("mood", "激动")]
-    assert 新时段 == [("mood", "激动")]
+    assert before_start == []
+    assert old_span == [("mood", "平静")]
+    assert boundary == [("mood", "激动")]
+    assert new_span == [("mood", "激动")]
 
     await session.close()
 
@@ -154,27 +154,27 @@ async def test_同一键上一条开放态至多一条(tmp_path: Path) -> None:
     `record_state_change` 把「先关旧再开新」收进数据层并在一个事务里完成，
     调用方无需记得成对调用；这条用例盯住的就是那个不变量本身。
     """
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
     await merge_character(session, character_id="c1", name="阿黎", kind="person")
 
-    for 序号, 值 in enumerate(["一", "二", "三", "四", "五"], start=1):
+    for index, value in enumerate(["一", "二", "三", "四", "五"], start=1):
         await record_state_change(
             session,
             character_id="c1",
             key="mood",
-            value=值,
-            t_from=序号,
-            source_utterance=f"u{序号}",
+            value=value,
+            t_from=index,
+            source_utterance=f"u{index}",
         )
 
-    开放条数 = await session.run(
+    open_count = await session.run(
         "MATCH (:Character {id:'c1'})-[:HAS_STATE]->(s:StateChange) "
         + "WHERE s.t_to IS NULL RETURN count(s)"
     )
-    总条数 = await session.run("MATCH (s:StateChange) RETURN count(s)")
+    total_count = await session.run("MATCH (s:StateChange) RETURN count(s)")
 
-    assert 开放条数 == [[1]]
-    assert 总条数 == [[5]]
+    assert open_count == [[1]]
+    assert total_count == [[5]]
     assert await current_states(session, character_id="c1") == [("mood", "五")]
 
     await session.close()
@@ -190,27 +190,27 @@ async def test_撞主键整笔回滚且保留原故障(tmp_path: Path, monkeypat
     Kùzu 自行中止事务，事后 `ROLLBACK` 会报 "No active transaction"，若让它顶掉原异常，
     排查时会被指到完全无关的方向。
     """
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
     await merge_character(session, character_id="c1", name="阿黎", kind="person")
 
-    monkeypatch.setattr(writes模块, "new_id", lambda: "撞车的号")
+    monkeypatch.setattr(writes_module, "new_id", lambda: "撞车的号")
     await record_state_change(
         session, character_id="c1", key="mood", value="平静", t_from=1, source_utterance="u1"
     )
 
     # 再写一次：关旧会先把 s(平静) 的 t_to 置 5，随后插入新条撞上同一主键而失败
-    with pytest.raises(MemoryStoreError) as 捕获:
+    with pytest.raises(MemoryStoreError) as captured:
         await record_state_change(
             session, character_id="c1", key="mood", value="激动", t_from=5, source_utterance="u2"
         )
 
-    旧条 = await session.run("MATCH (s:StateChange) RETURN s.value, s.t_to")
-    当前 = await current_states(session, character_id="c1")
+    old_entry = await session.run("MATCH (s:StateChange) RETURN s.value, s.t_to")
+    current = await current_states(session, character_id="c1")
 
-    assert "No active transaction" not in str(捕获.value)
+    assert "No active transaction" not in str(captured.value)
     # 回滚生效：旧条仍开放、值未变，且没有留下第二把「半关」的痕迹
-    assert 旧条 == [["平静", None]]
-    assert 当前 == [("mood", "平静")]
+    assert old_entry == [["平静", None]]
+    assert current == [("mood", "平静")]
 
     await session.close()
 
@@ -222,17 +222,17 @@ async def test_语法错整笔回滚(tmp_path: Path, monkeypatch: pytest.MonkeyP
     语法错——这正是 `test_memory_queries.py` 里那条反面用例的手法。验证关旧那一步
     也被一并回滚。
     """
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
     await merge_character(session, character_id="c1", name="阿黎", kind="person")
     await record_state_change(
         session, character_id="c1", key="mood", value="平静", t_from=1, source_utterance="u1"
     )
 
-    def _不转义(原值: str) -> str:
+    def _no_escape(original_value: str) -> str:
         """故意的转义直通：含单引号的值会把语句喂成语法错，正是本用例要的失败。"""
-        return 原值
+        return original_value
 
-    monkeypatch.setattr(writes模块, "escape_literal", _不转义)
+    monkeypatch.setattr(writes_module, "escape_literal", _no_escape)
 
     with pytest.raises(MemoryStoreError):
         await record_state_change(
@@ -251,7 +251,7 @@ async def test_语法错整笔回滚(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 async def test_单条写入必带来源话语(tmp_path: Path) -> None:
     """设计 §5.4 第 3 条：每次结构化写入都要带 source_utterance，否则溯源链断在此。"""
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
     await merge_character(session, character_id="c1", name="阿黎", kind="person")
 
     await insert_state_change(
@@ -264,16 +264,16 @@ async def test_单条写入必带来源话语(tmp_path: Path) -> None:
         source_utterance="u1",
     )
 
-    行 = await session.run("MATCH (s:StateChange {id:'s1'}) RETURN s.source_utterance, s.t_to")
+    rows = await session.run("MATCH (s:StateChange {id:'s1'}) RETURN s.source_utterance, s.t_to")
 
-    assert 行 == [["u1", None]]
+    assert rows == [["u1", None]]
 
     await session.close()
 
 
 async def test_收口只动指定键(tmp_path: Path) -> None:
     """close_state 只关该键的开放条；别键与已关闭的历史值不受影响。"""
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
     await merge_character(session, character_id="c1", name="阿黎", kind="person")
     await insert_state_change(
         session,
@@ -296,9 +296,9 @@ async def test_收口只动指定键(tmp_path: Path) -> None:
 
     await close_state(session, character_id="c1", key="mood", t_to=9)
 
-    关掉的行 = await session.run("MATCH (s:StateChange {id:'s1'}) RETURN s.t_to")
+    closed_rows = await session.run("MATCH (s:StateChange {id:'s1'}) RETURN s.t_to")
 
-    assert 关掉的行 == [[9]]
+    assert closed_rows == [[9]]
     assert await current_states(session, character_id="c1") == [("place", "树下")]
 
     await session.close()
@@ -306,18 +306,18 @@ async def test_收口只动指定键(tmp_path: Path) -> None:
 
 async def test_文本取值里的引号原样读回(tmp_path: Path) -> None:
     """外部文本写进状态必须经转义：含单引号与反斜杠的值原样读回，不喂坏语句。"""
-    session = await _起库(tmp_path)
+    session = await _open_db(tmp_path)
     await merge_character(session, character_id="c1", name="阿黎's", kind="person")
 
-    刁钻 = "他说\\'你好'\\"
+    tricky = "他说\\'你好'\\"
 
     await record_state_change(
-        session, character_id="c1", key="intro", value=刁钻, t_from=1, source_utterance="u'1"
+        session, character_id="c1", key="intro", value=tricky, t_from=1, source_utterance="u'1"
     )
 
-    行 = await session.run("MATCH (s:StateChange) RETURN s.value, s.source_utterance")
+    rows = await session.run("MATCH (s:StateChange) RETURN s.value, s.source_utterance")
 
-    assert 行 == [[刁钻, "u'1"]]
-    assert await current_states(session, character_id="c1") == [("intro", 刁钻)]
+    assert rows == [[tricky, "u'1"]]
+    assert await current_states(session, character_id="c1") == [("intro", tricky)]
 
     await session.close()

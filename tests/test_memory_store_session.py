@@ -21,7 +21,7 @@ from core.memory import MemoryStoreError
 from core.memory.store import MemorySession
 
 
-class _假结果:
+class _FakeResult:
     """冒牌的 Kùzu 查询结果：没有下一行。"""
 
     def has_next(self) -> bool:
@@ -31,7 +31,7 @@ class _假结果:
         raise AssertionError("空结果不应被取行")
 
 
-class _线程探针连接:
+class _ThreadProbeConnection:
     """冒牌连接：每次 execute 记下当前线程 id，并短暂占住线程以制造并发重叠。
 
     用它替换真连接后，`run` 依旧走会话的执行器，因此 `execute` 一定运行在
@@ -39,13 +39,13 @@ class _线程探针连接:
     """
 
     def __init__(self) -> None:
-        self.线程id集: list[int] = []
+        self.thread_ids: list[int] = []
 
-    def execute(self, query: str) -> _假结果:
+    def execute(self, query: str) -> _FakeResult:
         _ = query  # 探针不关心语句内容，只为占住执行器线程
-        self.线程id集.append(threading.get_ident())
+        self.thread_ids.append(threading.get_ident())
         time.sleep(0.05)
-        return _假结果()
+        return _FakeResult()
 
     def close(self) -> None:
         """关闭时也会被会话调一次，冒牌件给个空实现即可。"""
@@ -106,11 +106,11 @@ async def test_查询出错包成存储错误(tmp_path: Path) -> None:
     session = MemorySession(tmp_path / "db", dimensions=4)
 
     await session.open()
-    with pytest.raises(MemoryStoreError) as 捕获:
+    with pytest.raises(MemoryStoreError) as captured:
         _ = await session.run("这不是 Cypher")
 
-    assert 捕获.value.operation == "run"
-    assert isinstance(捕获.value.__cause__, RuntimeError)
+    assert captured.value.operation == "run"
+    assert isinstance(captured.value.__cause__, RuntimeError)
 
     await session.close()
 
@@ -118,10 +118,10 @@ async def test_查询出错包成存储错误(tmp_path: Path) -> None:
 async def test_未打开就执行报存储错误(tmp_path: Path) -> None:
     session = MemorySession(tmp_path / "db", dimensions=4)
 
-    with pytest.raises(MemoryStoreError) as 捕获:
+    with pytest.raises(MemoryStoreError) as captured:
         _ = await session.run("RETURN 1")
 
-    assert 捕获.value.operation == "run"
+    assert captured.value.operation == "run"
 
 
 async def test_打开幂等(tmp_path: Path) -> None:
@@ -162,10 +162,10 @@ async def test_关闭之后不能再执行(tmp_path: Path) -> None:
     await session.open()
     await session.close()
 
-    with pytest.raises(MemoryStoreError) as 捕获:
+    with pytest.raises(MemoryStoreError) as captured:
         _ = await session.run("RETURN 1")
 
-    assert 捕获.value.operation == "run"
+    assert captured.value.operation == "run"
 
 
 async def test_打开之前属性取值(tmp_path: Path) -> None:
@@ -179,10 +179,10 @@ async def test_打开失败不留悬挂执行器(tmp_path: Path) -> None:
     """开库半途失败要把执行器收掉，实例退回「未打开」——否则线程池会漏。"""
     session = MemorySession(tmp_path / "db", dimensions=4)
 
-    def _炸() -> tuple[kuzu.Database, kuzu.Connection]:
+    def _boom() -> tuple[kuzu.Database, kuzu.Connection]:
         raise RuntimeError("开库失败")
 
-    session._open_sync = _炸  # pyright: ignore[reportPrivateUsage]
+    session._open_sync = _boom  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(RuntimeError):
         await session.open()
 
@@ -197,10 +197,10 @@ async def test_无执行器时下沉报存储错误(tmp_path: Path) -> None:
     await session.open()
     session._executor = None  # pyright: ignore[reportPrivateUsage]
 
-    with pytest.raises(MemoryStoreError) as 捕获:
+    with pytest.raises(MemoryStoreError) as captured:
         _ = await session._in_thread(lambda: 1)  # pyright: ignore[reportPrivateUsage]
 
-    assert 捕获.value.operation == "run"
+    assert captured.value.operation == "run"
 
     await session.close()
 
@@ -215,14 +215,14 @@ async def test_全部语句跑在同一个线程上(tmp_path: Path) -> None:
     """
     session = MemorySession(tmp_path / "db", dimensions=4)
     await session.open()
-    探针 = _线程探针连接()
+    probe = _ThreadProbeConnection()
     # 白盒注入：冒牌件顶替真连接，只为记下语句实际跑在哪个线程。
     # 先转 object 再转目标类型（双重 cast），否则会撞 reportInvalidCast。
-    session._conn = cast("kuzu.Connection", cast("object", 探针))  # pyright: ignore[reportPrivateUsage]
+    session._conn = cast("kuzu.Connection", cast("object", probe))  # pyright: ignore[reportPrivateUsage]
 
-    结果 = await asyncio.gather(*[session.run(f"RETURN {n}") for n in range(8)])
+    result = await asyncio.gather(*[session.run(f"RETURN {n}") for n in range(8)])
 
-    assert 结果 == [[] for _ in range(8)]
-    assert len(set(探针.线程id集)) == 1
+    assert result == [[] for _ in range(8)]
+    assert len(set(probe.thread_ids)) == 1
 
     await session.close()

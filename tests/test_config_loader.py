@@ -438,7 +438,7 @@ def test_记忆段的值从临时yaml读进模型(tmp_path: Path) -> None:
     assert settings.config_source == str(config_file)
 
 
-def _字段名与别名的并集(model: type[BaseModel]) -> set[str]:
+def _field_and_alias_union(model: type[BaseModel]) -> set[str]:
     """一个模型「认识的键」：字段名与别名的并集。
 
     YAML 里既可以写字段名也可以写别名（如 log.json 之于 json_output），两者都算被认识。
@@ -451,7 +451,7 @@ def _字段名与别名的并集(model: type[BaseModel]) -> set[str]:
     }
 
 
-def _按_yaml键取子模型(model: type[BaseModel], key: object) -> type[BaseModel] | None:
+def _submodel_by_yaml_key(model: type[BaseModel], key: object) -> type[BaseModel] | None:
     """按 YAML 里的键（字段名或别名）取到对应字段，若其注解是模型类就返回该模型。
 
     只认 BaseModel 子类：字段类型是 dict[str, str] 这类普通映射时返回 None，
@@ -466,26 +466,26 @@ def _按_yaml键取子模型(model: type[BaseModel], key: object) -> type[BaseMo
     return None
 
 
-def _核对键树(raw: dict[object, object], model: type[BaseModel], 键路径: str) -> None:
+def _check_key_tree(raw: dict[object, object], model: type[BaseModel], key_path: str) -> None:
     """递归对拍：raw 的每个键都要落在 model 认识的键里，dict 值继续下钻到叶子。
 
     `键路径` 是当前层相对骨架根的路径（顶层为空串），报错时拼成完整路径——
     例如 `memory.retry.deadletter_pth`，三级之后也能定位到具体是哪一段。
     - 只在「值是 dict 且对应字段是 BaseModel 子类」时下钻，叶子与非模型字段都停下。
     """
-    known = _字段名与别名的并集(model)
+    known = _field_and_alias_union(model)
     unknown = set(raw) - known
-    where = f"骨架 {键路径} 段" if 键路径 else "骨架顶层"
+    where = f"骨架 {key_path} 段" if key_path else "骨架顶层"
     assert not unknown, f"{where}里有模型不认识的键（会静默失效）：{sorted(map(str, unknown))}"
 
     for key, value in raw.items():
         if not isinstance(value, dict):
             continue
-        child = _按_yaml键取子模型(model, key)
+        child = _submodel_by_yaml_key(model, key)
         if child is None:
             continue
-        子路径 = f"{键路径}.{key}" if 键路径 else str(key)
-        _核对键树(cast("dict[object, object]", value), child, 子路径)
+        sub_path = f"{key_path}.{key}" if key_path else str(key)
+        _check_key_tree(cast("dict[object, object]", value), child, sub_path)
 
 
 def test_骨架的段与字段都被模型认识() -> None:
@@ -498,7 +498,7 @@ def test_骨架的段与字段都被模型认识() -> None:
     raw = read_yaml(_SKELETON)
     assert raw is not None, f"出厂骨架必须在：{_SKELETON}"
 
-    _核对键树(cast("dict[object, object]", raw), Settings, "")
+    _check_key_tree(cast("dict[object, object]", raw), Settings, "")
 
 
 def test_llm的memory段被模型认识且不抢chat(tmp_path: Path) -> None:
@@ -523,7 +523,7 @@ def test_记忆层默认值全部合法() -> None:
 
 #: 越界的记忆层字段（YAML 里的完整路径 → 越界值）+ 出错字段名，用于守住加载期拦截。
 #: 路径要对：top_k / hops / budget 在 recall 下，不在 gate 下。
-_越界记忆字段 = [
+_out_of_range_memory_field = [
     ("memory:\n  recall:\n    top_k: 0\n", "top_k"),
     ("memory:\n  recall:\n    hops: 4\n", "hops"),
     ("memory:\n  recall:\n    budget: 0\n", "budget"),
@@ -539,11 +539,11 @@ _越界记忆字段 = [
 ]
 
 
-@pytest.mark.parametrize(("yaml_text", "出错字段"), _越界记忆字段)
-def test_记忆层越界值在加载期被拦下(tmp_path: Path, yaml_text: str, 出错字段: str) -> None:
+@pytest.mark.parametrize(("yaml_text", "offending_field"), _out_of_range_memory_field)
+def test_记忆层越界值在加载期被拦下(tmp_path: Path, yaml_text: str, offending_field: str) -> None:
     """守住 Field 约束的拒绝路径：越界值必须在 YAML 加载期就被 pydantic 拦下。
 
     直接构造模型只覆盖了一半的失败面；走 load_settings 才吃到真实的「配置 → 模型」路径。
     """
-    with pytest.raises(ValidationError, match=出错字段):
+    with pytest.raises(ValidationError, match=offending_field):
         _ = _load(tmp_path, yaml_text)
