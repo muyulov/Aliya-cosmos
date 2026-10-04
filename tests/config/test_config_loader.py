@@ -387,7 +387,8 @@ def test_判断层超时必须为正数(tmp_path: Path) -> None:
 # ---- 出厂配置守护 ----
 
 #: 出厂骨架：需要真实读一份，按相对本文件的路径取以免依赖工作目录
-_SKELETON = Path(__file__).resolve().parent.parent / "data" / "config" / "cosmos.yaml"
+#: 本文件位于 tests/config/ 下，需上溯三级才到项目根
+_SKELETON = Path(__file__).resolve().parents[2] / "data" / "config" / "cosmos.yaml"
 
 
 def test_日志文件名前缀不互为包含关系() -> None:
