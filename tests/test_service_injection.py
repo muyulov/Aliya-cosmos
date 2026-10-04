@@ -297,7 +297,13 @@ async def test_默认注册表装配后可启动并健康() -> None:
 
     assert mgr.get(ClockService).running is True
     statuses = await mgr.health()
-    assert [status.name for status in statuses] == ["clock", "embedding", "llm", "decision"]
+    assert [status.name for status in statuses] == [
+        "clock",
+        "embedding",
+        "llm",
+        "decision",
+        "memory",
+    ]
     # 内置服务都自报身份：健康日志里能直接看出接的模型 / 端点 / 时区
     by_name = {status.name: status for status in statuses}
     assert "时区" in by_name["clock"].extra
@@ -312,6 +318,14 @@ def test_注册表包含判断服务() -> None:
 
     types = [service_type.name for service_type in manager._types]  # pyright: ignore[reportPrivateUsage]
     assert "decision" in types
+
+
+def test_注册表包含记忆服务() -> None:
+    """回归：记忆服务必须装进默认注册表，且排在依赖它的三支之后（最下游）。"""
+    manager = build_manager()
+
+    types = [service_type.name for service_type in manager._types]  # pyright: ignore[reportPrivateUsage]
+    assert types[-1] == "memory"
 
 
 async def test_健康检查用展示名() -> None:
