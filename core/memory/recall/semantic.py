@@ -24,17 +24,17 @@ __all__ = [
 ]
 
 
-def _向量字面量(vector: Sequence[float]) -> str:
+def _vector_literal(vector: Sequence[float]) -> str:
     """把查询向量拼成 Kùzu 的浮点列表字面量（向量是数值，无需 `escape_literal`）。"""
-    return "[" + ", ".join(repr(float(分量)) for 分量 in vector) + "]"
+    return "[" + ", ".join(repr(float(component)) for component in vector) + "]"
 
 
-def _相关度(distance: float) -> float:
+def _relevance(distance: float) -> float:
     """把 L2 距离折成「越大越相关」的分数：`1 / (1 + 距离)`，落在 (0, 1]。"""
     return 1.0 / (1.0 + max(distance, 0.0))
 
 
-def _可选整数(value: object) -> int | None:
+def _optional_int(value: object) -> int | None:
     """库里的可空整数列：`None` 原样保留（世界时间未知就是不伪造），否则收成 `int`。"""
     return None if value is None else int(cast("int", value))
 
@@ -59,21 +59,21 @@ async def recall_utterances(
 
     库为空或索引里没有任何命中时返回空表（**不报错**）——记忆为空是合法状态。
     """
-    语句 = SEMANTIC_UTTERANCES.format(embedding=_向量字面量(query_vector), k=top_k)
-    命中: list[SemanticHit] = []
-    for 行 in await session.run(语句):
-        距离 = float(cast("float", 行[4]))
-        命中.append(
+    statement = SEMANTIC_UTTERANCES.format(embedding=_vector_literal(query_vector), k=top_k)
+    hits: list[SemanticHit] = []
+    for row in await session.run(statement):
+        distance = float(cast("float", row[4]))
+        hits.append(
             SemanticHit(
                 item=MemoryItem(
                     kind="utterance",
-                    text=str(行[1]),
-                    source_id=str(行[0]),
-                    score=_相关度(距离),
-                    world_time=_可选整数(行[2]),
+                    text=str(row[1]),
+                    source_id=str(row[0]),
+                    score=_relevance(distance),
+                    world_time=_optional_int(row[2]),
                 ),
-                distance=距离,
-                importance=float(cast("float", 行[3])),
+                distance=distance,
+                importance=float(cast("float", row[3])),
             )
         )
-    return 命中
+    return hits

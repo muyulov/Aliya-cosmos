@@ -633,7 +633,7 @@ async def test_死信可重放剔除(tmp_path: Path) -> None:
         assert _死信条(服务) == []
         assert await _原文条数(服务) == 1
         # 契约：重放落库的主键就是 observe 当初返回、也是死信条记下的那个 id。
-        # 证伪开关：若 `_尝试阶段甲` 另造新 id，这里按原 id 查库会落空、本条变红。
+        # 证伪开关：若 `_try_stage_a` 另造新 id，这里按原 id 查库会落空、本条变红。
         assert await _按id取原文(服务, 回合) == 回合
     finally:
         await 服务.stop()

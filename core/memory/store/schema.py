@@ -69,7 +69,7 @@ _REL_TABLE_DDL: tuple[str, ...] = (
 async def _ensure_vector_index(session: MemorySession, table: str, name: str, column: str) -> None:
     """向量索引不存在时才建（同名重复创建会报错）。"""
     existing = await session.run("CALL show_indexes() RETURN table_name, index_name")
-    if any(行[0] == table and 行[1] == name for 行 in existing):
+    if any(row[0] == table and row[1] == name for row in existing):
         return
     _ = await session.run(f"CALL CREATE_VECTOR_INDEX('{table}', '{name}', '{column}')")
 
@@ -77,23 +77,23 @@ async def _ensure_vector_index(session: MemorySession, table: str, name: str, co
 async def _ensure_fts_index(session: MemorySession, table: str, name: str, column: str) -> None:
     """全文索引不存在时才建（同名重复创建会报错，重建需先 DROP）。"""
     existing = await session.run("CALL show_indexes() RETURN table_name, index_name")
-    if any(行[0] == table and 行[1] == name for 行 in existing):
+    if any(row[0] == table and row[1] == name for row in existing):
         return
     _ = await session.run(f"CALL CREATE_FTS_INDEX('{table}', '{name}', ['{column}'])")
 
 
 async def _ensure_version(session: MemorySession) -> None:
     """对账 `Meta.schema_version`：无则写入，相符放行，不符报错。"""
-    行 = await session.run(f"MATCH (m:Meta {{key:'{_VERSION_KEY}'}}) RETURN m.value")
-    if not 行:
+    rows = await session.run(f"MATCH (m:Meta {{key:'{_VERSION_KEY}'}}) RETURN m.value")
+    if not rows:
         _ = await session.run(
             f"MERGE (m:Meta {{key:'{_VERSION_KEY}'}}) ON CREATE SET m.value = '{SCHEMA_VERSION}'"
         )
         return
-    库版本 = 行[0][0]
-    if 库版本 != SCHEMA_VERSION:
+    stored_version = rows[0][0]
+    if stored_version != SCHEMA_VERSION:
         raise MemoryStoreError(
-            f"库的 schema 版本为 {库版本!r}，与代码要求的 {SCHEMA_VERSION!r} 不符；"
+            f"库的 schema 版本为 {stored_version!r}，与代码要求的 {SCHEMA_VERSION!r} 不符；"
             + "本期不做自动迁移，请重建库或升级版本",
             operation="ensure_schema",
         )

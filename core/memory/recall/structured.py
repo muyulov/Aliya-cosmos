@@ -22,8 +22,8 @@ async def recall_states(
     没有任何状态的角色不出现在结果里（空状态是合法状态，不是错误）；
     角色不存在同样只是查不到状态、静默落空，与 `current_states` 的语义一致。
     """
-    命中: list[tuple[str, str, str]] = []
-    for 角色 in character_ids:
-        for 键, 值 in await current_states(session, character_id=角色):
-            命中.append((角色, 键, 值))
-    return 命中
+    hits: list[tuple[str, str, str]] = []
+    for character in character_ids:
+        for key, value in await current_states(session, character_id=character):
+            hits.append((character, key, value))
+    return hits

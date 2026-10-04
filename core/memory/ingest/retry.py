@@ -158,32 +158,32 @@ class DeadLetter:
         **绝不静默补默认值**——那会让坏行混进好行里。刻意用 `isinstance` 显式校验
         而不是 `cast` 强转：`cast` 只是对类型检查器的谎言，坏行照样能构造出半成品条。
         """
-        解出 = cast("object", json.loads(text))  # json 返回 Any，先 cast 成 object
-        if not isinstance(解出, dict):
+        decoded = cast("object", json.loads(text))  # json 返回 Any，先 cast 成 object
+        if not isinstance(decoded, dict):
             raise TypeError("死信行必须是 JSON 对象")
-        原始 = cast("dict[str, object]", 解出)
-        payload = 原始["payload"]
+        mapping = cast("dict[str, object]", decoded)
+        payload = mapping["payload"]
         if payload is not None and not isinstance(payload, dict):
             raise TypeError("死信条的 payload 必须是对象或空")
         return cls(
-            utterance_id=_要字符串(原始["utterance_id"]),
-            stage=_要字符串(原始["stage"]),
-            error_type=_要字符串(原始["error_type"]),
-            error_message=_要字符串(原始["error_message"]),
-            attempts=_要整数(原始["attempts"]),
+            utterance_id=_require_str(mapping["utterance_id"]),
+            stage=_require_str(mapping["stage"]),
+            error_type=_require_str(mapping["error_type"]),
+            error_message=_require_str(mapping["error_message"]),
+            attempts=_require_int(mapping["attempts"]),
             payload=cast("dict[str, object] | None", payload),
-            failed_at=_要整数(原始["failed_at"]),
+            failed_at=_require_int(mapping["failed_at"]),
         )
 
 
-def _要字符串(value: object) -> str:
+def _require_str(value: object) -> str:
     """从 JSON 解出的值里取字符串，类型不符就抛错（坏行交给调用方跳过）。"""
     if not isinstance(value, str):
         raise TypeError("死信条的该字段必须是字符串")
     return value
 
 
-def _要整数(value: object) -> int:
+def _require_int(value: object) -> int:
     """取整数。`bool` 是 `int` 的子类，要挡在门外，免得 `True` 混成 1。"""
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError("死信条的该字段必须是整数")
@@ -213,8 +213,8 @@ class DeadLetterBox:
         因此**单条失败不会丢掉已有记录**（这正是「不能把 DLQ 存 Kùzu」的同一考量）。
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as 文件:
-            _ = 文件.write(entry.to_json() + "\n")
+        with self._path.open("a", encoding="utf-8") as handle:
+            _ = handle.write(entry.to_json() + "\n")
 
     def load(self) -> list[DeadLetter]:
         """读回全部死信，**逐行解析、坏行跳过**。
@@ -226,17 +226,17 @@ class DeadLetterBox:
         """
         if not self._path.exists():
             return []
-        条目: list[DeadLetter] = []
-        with self._path.open("r", encoding="utf-8") as 文件:
-            for 行 in 文件:
-                行 = 行.strip()
-                if not 行:
+        entries: list[DeadLetter] = []
+        with self._path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
                     continue
                 try:
-                    条目.append(DeadLetter.from_json(行))
+                    entries.append(DeadLetter.from_json(line))
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     continue  # 坏行：跳过，读后面的
-        return 条目
+        return entries
 
     def rewrite(self, entries: list[DeadLetter]) -> None:
         """用新清单整体替换死信文件（**原子替换**）。
@@ -246,15 +246,15 @@ class DeadLetterBox:
         若直接原地截断重写，进程在写到一半时崩掉会留下一份半残的死信，好行也一起丢。
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        临时 = self._path.with_name(self._path.name + ".tmp")
-        with 临时.open("w", encoding="utf-8") as 文件:
+        temp = self._path.with_name(self._path.name + ".tmp")
+        with temp.open("w", encoding="utf-8") as handle:
             for entry in entries:
-                _ = 文件.write(entry.to_json() + "\n")
-        _ = 临时.replace(self._path)
+                _ = handle.write(entry.to_json() + "\n")
+        _ = temp.replace(self._path)
 
 
 async def run_with_retry[V](
-    操作: Callable[[], Awaitable[V]],
+    operation: Callable[[], Awaitable[V]],
     *,
     policy: RetryPolicy,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -276,18 +276,18 @@ async def run_with_retry[V](
     **本函数不写死信**：它只把最后一次异常交给调用方，进死信由调用方决定
     （这样重试循环与死信落盘可各自独立测试）。
     """
-    尝试 = 0
-    上一个: BaseException | None = None
+    attempt = 0
+    previous: BaseException | None = None
     while True:
-        尝试 += 1
+        attempt += 1
         try:
-            return await 操作(), 尝试
-        except BaseException as 故障:  # 先分类，不可重试的原样上抛
-            if not is_retryable(故障):
+            return await operation(), attempt
+        except BaseException as exc:  # 先分类，不可重试的原样上抛
+            if not is_retryable(exc):
                 raise
-            if 尝试 > policy.max_attempts:
-                if 上一个 is not None:
-                    raise 故障 from 上一个
+            if attempt > policy.max_attempts:
+                if previous is not None:
+                    raise exc from previous
                 raise
-            上一个 = 故障
-            await sleep(policy.delay(尝试))
+            previous = exc
+            await sleep(policy.delay(attempt))

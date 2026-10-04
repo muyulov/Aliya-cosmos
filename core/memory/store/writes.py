@@ -50,22 +50,22 @@ __all__ = [
 ]
 
 
-def _别名列表(aliases: Sequence[str]) -> str:
+def _alias_literal(aliases: Sequence[str]) -> str:
     """把别名拼成 Kùzu 的原生 `STRING[]` 字面量，逐个过 `escape_literal`。
 
     `aliases` 是原生数组列，整体作为字面量赋给 `ON CREATE`，故必须先在 Python 侧
     拼成 `['a', 'b']` 的形状；空序列给出 `[]`（合法的空数组字面量）。
     """
-    return "[" + ", ".join(f"'{escape_literal(别名)}'" for 别名 in aliases) + "]"
+    return "[" + ", ".join(f"'{escape_literal(alias)}'" for alias in aliases) + "]"
 
 
-def _取值行(rows: list[list[object]]) -> list[tuple[str, str]]:
+def _key_value_rows(rows: list[list[object]]) -> list[tuple[str, str]]:
     """把 `key, value` 两列的结果收成 `(str, str)` 元组表。
 
     列在库里都是 `STRING`，但 `get_next()` 的静态类型是 `object`，故在此一次性收窄，
     免得每个调用点各写一遍 `str(...)`。
     """
-    return [(str(行[0]), str(行[1])) for 行 in rows]
+    return [(str(row[0]), str(row[1])) for row in rows]
 
 
 async def merge_character(
@@ -82,13 +82,13 @@ async def merge_character(
     ——身份一旦落定就是落定，改名属于另一个语义，不该由一次「确保存在」顺手改掉。
     别名走 `list_distinct` 合并，故传重复别名也不会写出重复项。
     """
-    语句 = MERGE_CHARACTER.format(
+    statement = MERGE_CHARACTER.format(
         id=escape_literal(character_id),
         name=escape_literal(name),
-        aliases=_别名列表(aliases),
+        aliases=_alias_literal(aliases),
         kind=escape_literal(kind),
     )
-    _ = await session.run(语句)
+    _ = await session.run(statement)
 
 
 async def close_state(session: MemorySession, *, character_id: str, key: str, t_to: int) -> None:
@@ -97,12 +97,12 @@ async def close_state(session: MemorySession, *, character_id: str, key: str, t_
     **依赖单写者保证同键至多一条开放**：若有两条开放，这一条语句会把它们**一起**关掉。
     需要这个不变量的调用方请用 `record_state_change`，它在一个事务里把数量关系守住。
     """
-    语句 = CLOSE_STATE_CHANGE.format(
+    statement = CLOSE_STATE_CHANGE.format(
         key=escape_literal(key),
         t_to=str(t_to),
         char=escape_literal(character_id),
     )
-    _ = await session.run(语句)
+    _ = await session.run(statement)
 
 
 async def insert_state_change(
@@ -124,7 +124,7 @@ async def insert_state_change(
     **节点缺失时是静默 no-op**：语句以 `MATCH (c:Character ...)` 起头，角色不存在
     则什么也不发生、也不报错。调用方需保证该角色 id 已经存在（先 `merge_character`）。
     """
-    语句 = INSERT_STATE_CHANGE.format(
+    statement = INSERT_STATE_CHANGE.format(
         id=escape_literal(change_id),
         key=escape_literal(key),
         value=escape_literal(value),
@@ -132,7 +132,7 @@ async def insert_state_change(
         source=escape_literal(source_utterance),
         char=escape_literal(character_id),
     )
-    _ = await session.run(语句)
+    _ = await session.run(statement)
 
 
 async def current_states(session: MemorySession, *, character_id: str) -> list[tuple[str, str]]:
@@ -141,8 +141,8 @@ async def current_states(session: MemorySession, *, character_id: str) -> list[t
     同一键至多一条开放态，故同一键在结果里不会出现两次（不变量由
     `record_state_change` 守住）。
     """
-    语句 = OPEN_STATE_CHANGES.format(char=escape_literal(character_id))
-    return _取值行(await session.run(语句))
+    statement = OPEN_STATE_CHANGES.format(char=escape_literal(character_id))
+    return _key_value_rows(await session.run(statement))
 
 
 async def states_at(
@@ -153,8 +153,8 @@ async def states_at(
     区间取**左闭右开** `[t_from, t_to)`：交界点上命中新值而不是旧值，故「先关旧再开新」
     时两条状态不会同时命中同一时刻，同一键在任意时刻至多一条有效值。
     """
-    语句 = STATES_AT.format(char=escape_literal(character_id), moment=str(moment))
-    return _取值行(await session.run(语句))
+    statement = STATES_AT.format(char=escape_literal(character_id), moment=str(moment))
+    return _key_value_rows(await session.run(statement))
 
 
 async def record_state_change(
@@ -182,7 +182,7 @@ async def record_state_change(
     两种情况都以上抛**最初那个异常**为准，回滚失败只当它已经被 Kùzu 中止了。
     """
     change_id = new_id()
-    语句列表 = (
+    statements = (
         CLOSE_STATE_CHANGE.format(
             key=escape_literal(key),
             t_to=str(t_from),
@@ -199,8 +199,8 @@ async def record_state_change(
     )
     _ = await session.run("BEGIN TRANSACTION")
     try:
-        for 语句 in 语句列表:
-            _ = await session.run(语句)
+        for statement in statements:
+            _ = await session.run(statement)
     except BaseException:
         # 关旧与插新必须同生共死：不留「已关未开」的空档，也不留半开的痕迹。
         # 约束错已被 Kùzu 自行中止（实测），此时回滚无事可做；不顶掉原始故障。
