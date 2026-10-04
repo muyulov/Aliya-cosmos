@@ -2,7 +2,7 @@
 
 Python + uv 通用脚手架。三层结构：`service` / `logger` / `config`，开箱可跑，后续往里填业务。
 
-技术栈：Python 3.12+、uv、pydantic、PyYAML、loguru、openai、httpx2、ruff、pytest。
+技术栈：Python 3.12+、uv、pydantic、PyYAML、loguru、openai、httpx2、kuzu、ruff、pytest。
 
 ## 快速开始
 
@@ -40,11 +40,12 @@ core/
   embedding/     向量层：单条 / 批量文本向量化
   llm/           LLM 层：对话 / 流式 / 结构化 / 工具调用 / 多模态
   decision/      判断层：批量提问与 choice / score / noul 三原语
+  memory/        记忆层：原始回合与角色状态入库，向量 + 结构化召回
 data/           配置与运行数据：config/cosmos.yaml 为配置骨架，可安全提交
 tests/           测试
 ```
 
-依赖方向单向：`service → (config, logger)`、`embedding / llm / decision → (config, logger, service)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm` / `decision`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
+依赖方向单向：`service → (config, logger)`、`embedding / llm / decision → (config, logger, service)`、`memory → (config, logger, service, embedding, llm, decision)`（记忆层依赖前三支，是容器里最下游的服务）。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm` / `decision` / `memory`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
 
 ## 配置
 
@@ -111,7 +112,7 @@ log:
 | `batch_size` | `10` | 单次请求最多几条文本；阿里 v3 上限就是 10（v1/v2 为 25、OpenAI 为 2048），超了会 400 |
 | `dimensions` | `null` | `null` 用模型原始维度；设值则请求截断，做不到的模型会报错 |
 
-`llm.chat` 与 `llm.vision` 是两个端点，字段完全相同（可指向同一服务，也可分开接不同供应商）：
+`llm.chat` / `llm.vision` / `llm.memory` 是三个端点，字段完全相同（可指向同一服务，也可分开接不同供应商）：
 
 | 端点字段 | 默认 | 说明 |
 | --- | --- | --- |
@@ -124,6 +125,8 @@ log:
 | `temperature` | `null` | 温度，`null` 表示不传该参数（用服务端默认） |
 | `max_tokens` | `null` | 最大输出 token，`null` 表示不传该参数 |
 
+`llm.memory` 是记忆专用端点（记忆层的抽取与记忆块渲染走它）。与另两个端点不同，它**只接受显式 `endpoint="memory"` 选择，不参与按模型名匹配**：`chat` / `vision` 之间的切换仍按「传的 `model` 命中 `vision.model` 且 vision 已启用」的规则，而 `memory` 永远不接管同名模型——第三个端点一旦也参与模型名匹配，两头 `model` 同名时就会把 chat 调用抢走。五项能力方法都接受 keyword-only 的 `endpoint="chat" | "vision" | "memory"`，**缺省行为与引入该端点前一字不变**；记忆层一律显式传 `"memory"`。
+
 `decision.jev`（云端）与 `decision.laya`（本地 laya-serve）是两个端点，字段完全相同，同一套 `/systemone` 协议；`base_url` 只写到 `/v1` 为止，路径 `/systemone` 由代码补上：
 
 | 端点字段 | 默认 | 说明 |
@@ -134,6 +137,32 @@ log:
 | `model` | jev `jev-latest` / laya 空 | 该端点的模型；Jev 必填（空会 422），Laya 留空表示不带 `model` 字段、交给 Router 按语种自动选 checkpoint |
 | `timeout` | `60` | 单次请求超时秒数，必须为正数 |
 | `retries` | `2` | 429 / 529 的退避重试次数，`0` 关闭 |
+
+`memory` 是记忆层配置（Kùzu 一体存储：图 + 向量 + 全文；一库一世界，换世界即换 `db_path`）：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `db_path` | `data/memory` | Kùzu 数据库目录；换世界就是换这里 |
+| `dimensions` | `1024` | 向量列维度 `FLOAT[d]`，**建表时确定且不可变更**，必须与嵌入端点实际返回一致（写入 / 召回都复核，不符即报 `MemoryStoreError`） |
+| `queue_size` | `256` | 观测队列上限；满则丢弃该回合并记 ERROR（过载 ≠ 故障，不进死信） |
+| `gate.backend` | `laya` | 写入门控第一层走哪个判断端点（`laya` / `jev`） |
+| `gate.importance_threshold` | `0.5` | 重要度阈值（0~1） |
+| `gate.novelty_threshold` | `0.5` | 新颖度阈值（0~1） |
+| `gate.skip_laya` | `false` | 跳过第一层直接进 LLM，laya 不可用时的应急开关 |
+| `recall.top_k` | `8` | 召回时每张表各取多少条 |
+| `recall.hops` | `2` | 图多跳的跳数（1~3） |
+| `recall.budget` | `2000` | 记忆块的字符预算 |
+| `recall.block_by_llm` | `true` | 记忆块交给 LLM 编排；`false` 恒走确定性模板 |
+| `consolidate.enabled` | `true` | 定时循环开关；`false` 时退化成纯写入 + 召回 |
+| `consolidate.interval` | `3600` | 定时循环周期（秒） |
+| `consolidate.min_events` | `20` | 累积够多少条事件才触发一轮 |
+| `decay.tau` | `30` | 遗忘衰减常数（世界时间单位） |
+| `decay.floor` | `0.05` | 衰减分跌破此值即删除 |
+| `retry.max_attempts` | `3` | 单条失败最多重试次数（首次不计） |
+| `retry.backoff` | `1.0` | 退避基数（秒），按 `backoff * 2^n` 递增 |
+| `retry.deadletter_path` | `data/memory/deadletter.jsonl` | 死信队列落点，append-only，刻意独立于 Kùzu |
+
+> 期一真正读到的字段是 `db_path` / `dimensions` / `queue_size` / `retry.*` / `recall.top_k` / `recall.budget`；`gate.*`、`recall.hops`、`recall.block_by_llm`、`consolidate.*`、`decay.*` 是期二、期三的接线项，现阶段只进配置、不触发行为。
 
 ### 失败行为
 
@@ -270,8 +299,8 @@ async def main(svc: LLMService, picture_url: str) -> None:
 | --- | --- |
 | 不记正文 | 日志只记模型 / 端点 / 耗时 / token 用量；消息正文该不该记由调用方自己决定并自己打 |
 | 不自动多轮 | `chat_tools` 只发一轮并返回 `tool_calls`，回传用 `assistant(tool_calls=...)` + `tool_result(...)`，循环由调用方写 |
-| chat / vision 双端点 | 两个端点各自带连接与采样参数，可指向同一服务也可分开接；给 `chat` 传 `model=svc.vision_model` 就走 vision 端点，vision 没启用时不会接管（两头的 model 常常同名）。用 Chat Completions 而非 Responses API，因为兼容端点普遍只实现前者 |
-| 缺密钥不 fail fast | 端点没配 `api_key` 时只警告、不建客户端；两个端点全没配健康检查才 unhealthy，调用时才抛 `LLMConfigError` |
+| chat / vision / memory 三端点 | 三个端点各自带连接与采样参数，可指向同一服务也可分开接；给 `chat` 传 `model=svc.vision_model` 就走 vision 端点，vision 没启用时不会接管（两头的 model 常常同名）；`memory` 只接受显式 `endpoint="memory"`，不参与模型名匹配（见上）。用 Chat Completions 而非 Responses API，因为兼容端点普遍只实现前者 |
+| 缺密钥不 fail fast | 端点没配 `api_key` 时只警告、不建客户端；三个端点全没配健康检查才 unhealthy，调用时才抛 `LLMConfigError` |
 | 重试交给 SDK | 超时与重试由端点的 `timeout` / `retries` 控制；流式一旦开始消费就不再重试，断流是否重放由调用方决定 |
 | `json_object` 要提示词配合 | 该模式要求提示词里出现 json 字样，属调用方责任 |
 
@@ -379,6 +408,52 @@ async def main(svc: DecisionService, message: str) -> None:
 | `DecisionConnectionError` | 连不上端点（超时除外），或其余请求错误 | `httpx2.TransportError` / `httpx2.RequestError` |
 | `DecisionResponseError` | 返回体不合法：非 JSON（含非 UTF-8）/ 压缩体解不开 / 顶层不是对象 / 缺 answers / 答案字段不完整 | JSON 解析异常或 `httpx2.DecodingError`；其余无 |
 
+## 记忆层
+
+`MemoryService`（代号「归忆」）是一个**自带常驻 worker 的全自动观察者**：外部喂入原始回合，它自己决定怎么记，并随时可被召回。存储用 Kùzu 一体（图 + HNSW 向量 + 全文检索），一库一世界——切换世界就是换 `memory.db_path`。
+
+对外只有两个口：`observe` 只写、`recall` 只读。
+
+```python
+from core.memory import MemoryService, Observation
+
+
+async def main(svc: MemoryService, text: str, speaker: str) -> None:
+    # 写入：喂入原始回合，**入队即返回**，绝不等 LLM 或落库
+    utterance_id = await svc.observe(Observation(kind="dialogue", text=text, speaker=speaker))
+
+    # 读取：按情境召回一段可直接塞进 prompt 的记忆块
+    context = await svc.recall("她刚才提到的约定", focus=["alice"], world_time=12)
+    prompt_block = context.block  # 可直接拼进 prompt
+    for item in context.items:  # 结构化条目：类型 / 文本 / 来源 id / 分数 / 世界时间
+        ...
+    for step in context.trace:  # 召回依据：向量距离 / 结构化命中
+        ...
+```
+
+约定：
+
+| 约定 | 说明 |
+| --- | --- |
+| 两段式接口 | `observe` 只写、`recall` 只读；唯一副作用是命中条目的访问回写，且经 worker 串行落库（不直写，避免与写路径并发） |
+| 写入不阻塞 | `observe` 入队即返回 `utterance_id`；队列有界（`memory.queue_size`），满则丢弃 + 记 ERROR，绝不拖慢对话循环 |
+| 失败可补偿 | 瞬时故障（超时 / 连接 / 请求错）按 `retry` 退避重试；永久故障或重试用尽落**死信队列**（append-only JSONL，刻意独立于 Kùzu），`replay_deadletters()` 可重放 |
+| 原文优先 | 无论后续成败，原始回合先落库；阶段 A 失败时死信条带**完整载荷**，原文绝不无声消失 |
+| 单写者 | 一个常驻 worker 串行消费「观测 + 访问回写」，天然满足 Kùzu 单写者要求 |
+| 无命中给空块 | 记忆为空是合法状态，`recall` 返回空 `block` 而不报错 |
+| 缺依赖不 fail fast | 依赖端点（embedding / llm / decision）没配密钥只警告；Kùzu 打不开才让健康检查 unhealthy、调用时抛 `MemoryError` |
+
+错误全部继承 `MemoryError`，调用方一次 `except` 就能兜住整层；下层异常（如 Kùzu 的 `RuntimeError`）挂在 `__cause__`：
+
+| 类型 | 触发条件 | 属性 |
+| --- | --- | --- |
+| `MemoryConfigError` | 依赖端点未就绪却发生调用 | `dependency` |
+| `MemoryStoreError` | Kùzu 打开 / 建表 / 查询 / 事务失败，或向量维度不符 | `operation` |
+| `MemoryInputError` | `observe` 载荷非法（空文本、未知 kind） | 无 |
+| `MemoryExtractError` | 抽取结果不符合 schema（包装 `LLMSchemaError`） | 无 |
+
+> 期一只实现**两个口的地基**：原文与角色 / 状态入库、向量 + 结构化召回、失败重试与死信。LLM 抽取、`laya` / `jev` 双重门控、事件与反思、关系演化、衰减与合并留在期二、期三。
+
 ## 如何新增一个服务
 
 服务是继承 `Service` 的类，`ServiceManager` 负责装配、启停与健康检查。
@@ -426,7 +501,7 @@ manager.register(CacheService)  # 支持一次传入多个类型：register(A, B
 | 整份配置注入 | 需要全局视野时在构造器声明 `settings: Settings`，容器注入应用持有的那份实例 |
 | 超时覆盖 | 默认走 `service.start_timeout` / `service.stop_timeout`；单独调整时写 `start_timeout: ClassVar[float \| Unset \| None] = 300.0`（需 `from core.service.base import Unset`），`None` 表示该服务不限制，不写即跟随全局 |
 | 判「在跑」用 `running` | `Service.running` 是 `state is ServiceState.RUNNING` 的统一出口，调用点不要再散写状态比较，改判定规则时才不必全仓搜 |
-| 健康检查可附带信息 | `health()` 返回的 `HealthStatus.extra` 会作为字段带进启动时的「服务健康」日志（内置服务用它报身份：clock 报 `时区`，embedding 报 `模型` / `端点`，llm 报 `对话模型` / `对话端点` / `多模态模型` / `多模态端点`，decision 报 `jev模型` / `jev端点` / `laya模型` / `laya端点`）。与保留名同名的一律让位：`name` / `healthy` / `state` / `detail`，以及日志侧的 `服务` / `健康` / `状态` / `详情` |
+| 健康检查可附带信息 | `health()` 返回的 `HealthStatus.extra` 会作为字段带进启动时的「服务健康」日志（内置服务用它报身份：clock 报 `时区`，embedding 报 `模型` / `端点`，llm 报 `对话模型` / `对话端点` / `多模态模型` / `多模态端点` / `记忆模型` / `记忆端点`，decision 报 `jev模型` / `jev端点` / `laya模型` / `laya端点`，memory 报 `库路径` / `角色数` / `原文数` / `死信`）。与保留名同名的一律让位：`name` / `healthy` / `state` / `detail`，以及日志侧的 `服务` / `健康` / `状态` / `详情` |
 
 启停语义：`start` / `stop` 需幂等（重复调用不应报错），并且 **`stop()` 必须能安全作用在「从未成功启动过」的服务上**——启动失败者同样会被回滚调用。启动按依赖**分层**：同层并发、层间串行；单个服务超时或抛错都判该服务失败，并逆序回滚本次动过的服务（**含失败者**：`start()` 可能已经申请了部分资源，`stop()` 是它唯一的回收入口；失败者的状态保持 `FAILED`，清理成功不等于它启动成功过；**已 RUNNING、被本次跳过启动的服务也在回滚名单里**——整体启动失败意味着进程即将退出，而那时 `stop_all` 不会被调用），随后抛出 `ServiceStartError`；**被取消时（外层 `asyncio.timeout`、`task.cancel()`）走同一条回滚路径**——`lifespan()` 的 `__aenter__` 抛错时 `__aexit__` 不会执行、`stop_all` 不会被调用，所以回滚必须在 `start_all` 内部完成，已启动的服务不会留在 `RUNNING`。关闭按启动的逆序**串行**执行，单个服务超时或出错只记日志（状态置 `FAILED`），不影响其余服务停下。
 

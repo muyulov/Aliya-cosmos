@@ -7,11 +7,19 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import cast
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from core.config import ConfigError, LogSettings, Settings, get_settings, load_settings
+from core.config import (
+    ConfigError,
+    LogSettings,
+    MemorySettings,
+    Settings,
+    get_settings,
+    load_settings,
+)
 from core.config.loader import interpolate, read_env, read_yaml
 
 
@@ -397,3 +405,145 @@ def test_日志文件名前缀不互为包含关系() -> None:
 
         assert not app_prefix.startswith(error_prefix), config
         assert not error_prefix.startswith(app_prefix), config
+
+
+# ---- 记忆层配置节点 ----
+
+
+def test_记忆段的值从临时yaml读进模型(tmp_path: Path) -> None:
+    """防 extra="ignore" 静默失效：写进 YAML 的记忆段必须真的被解析进模型。
+
+    探针字段刻意取与代码默认值不同的值（骨架里写死），再断言模型里就是这些值。
+    若段名或缩进写错被 extra="ignore" 静默丢掉，模型会落回默认值，此处即红。
+    """
+    yaml_text = (
+        "memory:\n"
+        "  db_path: data/记忆探针\n"
+        "  dimensions: 32\n"
+        "  queue_size: 7\n"
+        "  gate:\n"
+        "    backend: jev\n"
+        "  retry:\n"
+        "    deadletter_path: data/记忆探针/死信.jsonl\n"
+    )
+    config_file = _write(tmp_path / "cosmos.yaml", yaml_text)
+
+    settings = load_settings(config_file=config_file, env_file=tmp_path / ".env")
+
+    assert settings.memory.db_path == "data/记忆探针"
+    assert settings.memory.dimensions == 32
+    assert settings.memory.queue_size == 7
+    assert settings.memory.gate.backend == "jev"
+    assert settings.memory.retry.deadletter_path == "data/记忆探针/死信.jsonl"
+    assert settings.config_source == str(config_file)
+
+
+def _field_and_alias_union(model: type[BaseModel]) -> set[str]:
+    """一个模型「认识的键」：字段名与别名的并集。
+
+    YAML 里既可以写字段名也可以写别名（如 log.json 之于 json_output），两者都算被认识。
+    """
+    return {
+        name
+        for name, field in model.model_fields.items()
+        for name in (name, field.alias)
+        if name is not None
+    }
+
+
+def _submodel_by_yaml_key(model: type[BaseModel], key: object) -> type[BaseModel] | None:
+    """按 YAML 里的键（字段名或别名）取到对应字段，若其注解是模型类就返回该模型。
+
+    只认 BaseModel 子类：字段类型是 dict[str, str] 这类普通映射时返回 None，
+    调用方据此停下，不拿它去做字段对拍（否则会误报）。
+    """
+    for name, field in model.model_fields.items():
+        if key == name or key == field.alias:
+            annotation = field.annotation
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                return annotation
+            return None
+    return None
+
+
+def _check_key_tree(raw: dict[object, object], model: type[BaseModel], key_path: str) -> None:
+    """递归对拍：raw 的每个键都要落在 model 认识的键里，dict 值继续下钻到叶子。
+
+    `键路径` 是当前层相对骨架根的路径（顶层为空串），报错时拼成完整路径——
+    例如 `memory.retry.deadletter_pth`，三级之后也能定位到具体是哪一段。
+    - 只在「值是 dict 且对应字段是 BaseModel 子类」时下钻，叶子与非模型字段都停下。
+    """
+    known = _field_and_alias_union(model)
+    unknown = set(raw) - known
+    where = f"骨架 {key_path} 段" if key_path else "骨架顶层"
+    assert not unknown, f"{where}里有模型不认识的键（会静默失效）：{sorted(map(str, unknown))}"
+
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        child = _submodel_by_yaml_key(model, key)
+        if child is None:
+            continue
+        sub_path = f"{key_path}.{key}" if key_path else str(key)
+        _check_key_tree(cast("dict[object, object]", value), child, sub_path)
+
+
+def test_骨架的段与字段都被模型认识() -> None:
+    """防 extra="ignore" 静默失效：对拍原始骨架的键与模型的字段树。
+
+    从顶层一路递归到叶子：每一层的键都必须落在对应模型认识的键里，只要骨架里写了
+    某个模型不认识的键（含三级嵌套，如 memory.retry 下的键），它就会被 extra="ignore"
+    悄悄丢掉，这里当场指出是哪个键，并给出完整键路径。
+    """
+    raw = read_yaml(_SKELETON)
+    assert raw is not None, f"出厂骨架必须在：{_SKELETON}"
+
+    _check_key_tree(cast("dict[object, object]", raw), Settings, "")
+
+
+def test_llm的memory段被模型认识且不抢chat(tmp_path: Path) -> None:
+    """回归：llm.memory 段必须被解析进模型（曾因缺字段被 extra="ignore" 整段丢掉）。"""
+    settings = _load(tmp_path, "llm:\n  memory:\n    model: 记忆模型\n")
+
+    assert settings.llm.memory.model == "记忆模型"
+    # memory 端点独立于 chat，不该把 chat 的模型顶掉。
+    assert settings.llm.chat.model != "记忆模型"
+
+
+def test_记忆层默认值全部合法() -> None:
+    """不读文件直接构造也要有一组合法默认值（进程无配置也能起）。"""
+    memory = MemorySettings()
+    assert memory.queue_size > 0
+    assert 0.0 <= memory.gate.importance_threshold <= 1.0
+    assert memory.recall.hops >= 1
+    assert memory.consolidate.min_events >= 1
+    assert 0.0 < memory.decay.floor <= 1.0
+    assert memory.retry.max_attempts >= 1
+
+
+#: 越界的记忆层字段（YAML 里的完整路径 → 越界值）+ 出错字段名，用于守住加载期拦截。
+#: 路径要对：top_k / hops / budget 在 recall 下，不在 gate 下。
+_out_of_range_memory_field = [
+    ("memory:\n  recall:\n    top_k: 0\n", "top_k"),
+    ("memory:\n  recall:\n    hops: 4\n", "hops"),
+    ("memory:\n  recall:\n    budget: 0\n", "budget"),
+    ("memory:\n  gate:\n    importance_threshold: 1.1\n", "importance_threshold"),
+    ("memory:\n  gate:\n    novelty_threshold: -0.1\n", "novelty_threshold"),
+    ("memory:\n  queue_size: 0\n", "queue_size"),
+    ("memory:\n  dimensions: 0\n", "dimensions"),
+    ("memory:\n  decay:\n    tau: 0\n", "tau"),
+    ("memory:\n  decay:\n    floor: 0\n", "floor"),
+    ("memory:\n  consolidate:\n    min_events: 0\n", "min_events"),
+    ("memory:\n  retry:\n    max_attempts: 0\n", "max_attempts"),
+    ("memory:\n  retry:\n    backoff: 0\n", "backoff"),
+]
+
+
+@pytest.mark.parametrize(("yaml_text", "offending_field"), _out_of_range_memory_field)
+def test_记忆层越界值在加载期被拦下(tmp_path: Path, yaml_text: str, offending_field: str) -> None:
+    """守住 Field 约束的拒绝路径：越界值必须在 YAML 加载期就被 pydantic 拦下。
+
+    直接构造模型只覆盖了一半的失败面；走 load_settings 才吃到真实的「配置 → 模型」路径。
+    """
+    with pytest.raises(ValidationError, match=offending_field):
+        _ = _load(tmp_path, yaml_text)

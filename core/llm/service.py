@@ -3,7 +3,9 @@
 约定：
 - 五项能力：chat / stream / chat_structured / chat_tools / 多模态。
   多模态不单独开方法，由调用方给 chat 传 `model=svc.vision_model`。
-- chat 与 vision 是两个端点，各持一个客户端；服务按传进来的模型名挑端点。
+- chat / vision / memory 是三个端点，各持一个客户端。不给 `endpoint=` 时按传进来的
+  模型名在 chat 与 vision 之间挑；memory **只接受显式选择**（`endpoint="memory"`），
+  不参与模型名匹配——否则与 chat 同名的记忆模型会把对话调用抢走。
 - 工具调用只做单轮：返回 tool_calls，回传用 `assistant(tool_calls=...)` +
   `tool_result(...)`，循环由调用方写。
 - 日志不记消息正文：正文该不该记由调用方自己决定并自己打。
@@ -16,7 +18,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import ClassVar, TypeVar, cast, override
+from typing import ClassVar, Literal, TypeVar, cast, override
 
 from openai import (
     APIConnectionError,
@@ -55,6 +57,9 @@ T = TypeVar("T", bound=BaseModel)
 
 #: 没配密钥时的统一措辞：start 的警告、health 的详情、调用时的报错共用
 NO_API_KEY = "未配置 api_key，LLM 功能不可用"
+
+#: 可显式选择的端点名；不给则退回「按模型名在 chat / vision 之间匹配」的旧规则
+type EndpointName = Literal["chat", "vision", "memory"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +124,7 @@ class LLMService(Service):
         self._config: LLMSettings = config
         self._chat: AsyncOpenAI | None = None
         self._vision: AsyncOpenAI | None = None
+        self._memory: AsyncOpenAI | None = None
 
     # ---------- 模型槽位 ----------
 
@@ -132,32 +138,41 @@ class LLMService(Service):
         """多模态模型：给 chat 传它就走 vision 端点。"""
         return self._config.vision.model
 
+    @property
+    def memory_model(self) -> str:
+        """记忆专用模型：供记忆层的抽取与记忆块渲染使用，需配 `endpoint="memory"`。"""
+        return self._config.memory.model
+
     # ---------- 生命周期 ----------
 
     @override
     async def start(self) -> None:
-        """两个端点各建一个客户端。没配 api_key 的端点只警告：脚手架不该因为没密钥就起不来。"""
+        """三个端点各建一个客户端。没配 api_key 的端点只警告：脚手架不该因为没密钥就起不来。"""
         if self.running:
             return
         self._chat = self._build("chat", self._config.chat, self._chat)
         self._vision = self._build("vision", self._config.vision, self._vision)
+        self._memory = self._build("memory", self._config.memory, self._memory)
 
     @override
     async def stop(self) -> None:
-        """关两个客户端。必须幂等：回滚时它也会作用在没建过客户端的实例上。"""
+        """关三个客户端。必须幂等：回滚时它也会作用在没建过客户端的实例上。"""
         chat, self._chat = self._chat, None
         vision, self._vision = self._vision, None
+        memory, self._memory = self._memory, None
         if chat is not None:
             await chat.close()
         if vision is not None:
             await vision.close()
+        if memory is not None:
+            await memory.close()
 
     @override
     async def health(self) -> HealthStatus:
         """只看有没有客户端：健康检查不该发请求（有副作用、花钱、受网络抖动影响）。
 
-        两个端点全没配才算不健康：只启用一头也是能用的。
-        extra 里带出两个端点各自配置的模型与地址——「未配置 api_key」时也照样报，
+        三个端点全没配才算不健康：只启用一头也是能用的。
+        extra 里带出三个端点各自配置的模型与地址——「未配置 api_key」时也照样报，
         否则看不出缺的是哪一个端点的密钥。
         """
         extra: dict[str, object] = {
@@ -165,8 +180,10 @@ class LLMService(Service):
             "对话端点": self._config.chat.base_url,
             "多模态模型": self._config.vision.model,
             "多模态端点": self._config.vision.base_url,
+            "记忆模型": self._config.memory.model,
+            "记忆端点": self._config.memory.base_url,
         }
-        if self._chat is not None or self._vision is not None:
+        if self._chat is not None or self._vision is not None or self._memory is not None:
             return HealthStatus(
                 name=self.label, healthy=True, state=self.state, detail="", extra=extra
             )
@@ -183,24 +200,28 @@ class LLMService(Service):
         self,
         messages: Sequence[ChatCompletionMessageParam],
         *,
+        endpoint: EndpointName | None = None,
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        """对话补全，返回消息正文。"""
-        client, endpoint, resolved = self._endpoint(model)
+        """对话补全，返回消息正文。
+
+        `endpoint` 显式选端点（多模态传 `vision`、记忆层传 `memory`）；不给则按模型名挑。
+        """
+        client, slot, resolved = self._resolve_endpoint(model, endpoint)
         begin = time.perf_counter()
-        async with _wrap_errors(endpoint.base_url, resolved):
+        async with _wrap_errors(slot.base_url, resolved):
             response = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
-                temperature=_pick(temperature, endpoint.temperature),
-                max_tokens=_pick(max_tokens, endpoint.max_tokens),
+                temperature=_pick(temperature, slot.temperature),
+                max_tokens=_pick(max_tokens, slot.max_tokens),
             )
         usage = response.usage
         self._log_done(
             begin,
-            endpoint,
+            slot,
             resolved,
             usage.prompt_tokens if usage else None,
             usage.completion_tokens if usage else None,
@@ -211,6 +232,7 @@ class LLMService(Service):
         self,
         messages: Sequence[ChatCompletionMessageParam],
         *,
+        endpoint: EndpointName | None = None,
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
@@ -219,27 +241,28 @@ class LLMService(Service):
 
         SDK 明确「流已消费则不重试」，中途断流会直接抛错，是否重放由调用方决定。
         """
-        client, endpoint, resolved = self._endpoint(model)
+        client, slot, resolved = self._resolve_endpoint(model, endpoint)
         begin = time.perf_counter()
-        async with _wrap_errors(endpoint.base_url, resolved):
+        async with _wrap_errors(slot.base_url, resolved):
             chunks = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
-                temperature=_pick(temperature, endpoint.temperature),
-                max_tokens=_pick(max_tokens, endpoint.max_tokens),
+                temperature=_pick(temperature, slot.temperature),
+                max_tokens=_pick(max_tokens, slot.max_tokens),
                 stream=True,
             )
             async for chunk in chunks:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 if delta:
                     yield delta
-        self._log_done(begin, endpoint, resolved, None)
+        self._log_done(begin, slot, resolved, None)
 
     async def chat_structured(
         self,
         messages: Sequence[ChatCompletionMessageParam],
         schema: type[T],
         *,
+        endpoint: EndpointName | None = None,
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
@@ -248,20 +271,20 @@ class LLMService(Service):
 
         不传 strict：strict 要求所有字段 required，默认关掉更不容易踩坑。
         """
-        client, endpoint, resolved = self._endpoint(model)
+        client, slot, resolved = self._resolve_endpoint(model, endpoint)
         begin = time.perf_counter()
-        async with _wrap_errors(endpoint.base_url, resolved):
+        async with _wrap_errors(slot.base_url, resolved):
             response = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
-                temperature=_pick(temperature, endpoint.temperature),
-                max_tokens=_pick(max_tokens, endpoint.max_tokens),
-                response_format=self._response_format(endpoint, schema),
+                temperature=_pick(temperature, slot.temperature),
+                max_tokens=_pick(max_tokens, slot.max_tokens),
+                response_format=self._response_format(slot, schema),
             )
         usage = response.usage
         self._log_done(
             begin,
-            endpoint,
+            slot,
             resolved,
             usage.prompt_tokens if usage else None,
             usage.completion_tokens if usage else None,
@@ -277,25 +300,26 @@ class LLMService(Service):
         messages: Sequence[ChatCompletionMessageParam],
         tools: Sequence[ChatCompletionToolParam],
         *,
+        endpoint: EndpointName | None = None,
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> AssistantReply:
         """工具调用（单轮）：返回正文与 tool_calls，不自动发起第二轮。"""
-        client, endpoint, resolved = self._endpoint(model)
+        client, slot, resolved = self._resolve_endpoint(model, endpoint)
         begin = time.perf_counter()
-        async with _wrap_errors(endpoint.base_url, resolved):
+        async with _wrap_errors(slot.base_url, resolved):
             response = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
                 tools=list(tools),
-                temperature=_pick(temperature, endpoint.temperature),
-                max_tokens=_pick(max_tokens, endpoint.max_tokens),
+                temperature=_pick(temperature, slot.temperature),
+                max_tokens=_pick(max_tokens, slot.max_tokens),
             )
         usage = response.usage
         self._log_done(
             begin,
-            endpoint,
+            slot,
             resolved,
             usage.prompt_tokens if usage else None,
             usage.completion_tokens if usage else None,
@@ -327,6 +351,28 @@ class LLMService(Service):
             self.log.warning(NO_API_KEY, 端点=name, 地址=endpoint.base_url)
             return None
         return build_client(endpoint)
+
+    def _resolve_endpoint(
+        self, model: str | None, name: EndpointName | None
+    ) -> tuple[AsyncOpenAI, LLMEndpointSettings, str]:
+        """挑端点：显式 name 优先；不给 name 时保持旧规则（只在 chat / vision 之间按模型名匹配）。
+
+        显式指定时，端点参数取该端点配置，model 仍可覆盖；缺客户端时抛 LLMConfigError。
+        memory 只能走这条显式路径，永不参与模型名匹配。
+
+        三个端点收在一张表里，客户端与配置一次取齐；EndpointName 是闭合的 Literal，
+        字典查找可被类型检查证明穷尽，新增端点时漏改会在判型阶段暴露，
+        而不是像链式三元那样静默落进最后的 else 走 chat。
+        """
+        if name is not None:
+            slots: dict[EndpointName, tuple[AsyncOpenAI | None, LLMEndpointSettings]] = {
+                "chat": (self._chat, self._config.chat),
+                "vision": (self._vision, self._config.vision),
+                "memory": (self._memory, self._config.memory),
+            }
+            client, slot = slots[name]
+            return self._require(client, name), slot, model or slot.model
+        return self._endpoint(model)
 
     def _endpoint(self, model: str | None) -> tuple[AsyncOpenAI, LLMEndpointSettings, str]:
         """挑端点：默认 chat；传 vision 的模型且 vision 已启用时走 vision。

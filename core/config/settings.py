@@ -121,13 +121,18 @@ class LLMEndpointSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    """LLM 层配置：chat 与 vision 各是一个端点。
+    """LLM 层配置：chat、vision 与 memory 各是一个端点。
 
-    两头可以指向同一个服务（多数兼容端点如此），也可以分开接不同供应商。
+    三个头可以指向同一个服务（多数兼容端点如此），也可以分开接不同供应商。
+
+    memory 端点有特殊约定：它只接受显式 `endpoint="memory"` 选择，不参与模型名匹配。
+    因此即使它的 model 与 chat 同名，也不会把 chat 的调用抢走——记忆层的抽取与记忆块
+    渲染走它，普通对话仍走 chat。
     """
 
     chat: LLMEndpointSettings = LLMEndpointSettings()
     vision: LLMEndpointSettings = LLMEndpointSettings()
+    memory: LLMEndpointSettings = LLMEndpointSettings()
 
 
 #: 判断层的两个端点名。laya 是本地 laya-serve，jev 是 TypeSafe 云端。
@@ -163,6 +168,60 @@ class DecisionSettings(BaseModel):
     )
 
 
+class MemoryGateSettings(BaseModel):
+    """写入门控：双重判定（laya 与 LLM 各判一次，每次判重要度与新颖度）。"""
+
+    backend: Backend = "laya"  # 第一层判定走哪个判断端点
+    importance_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    novelty_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    skip_laya: bool = False  # True = 跳过第一层，直接进 LLM（laya 不可用时的应急开关）
+
+
+class MemoryRecallSettings(BaseModel):
+    """召回策略。"""
+
+    top_k: int = Field(default=8, gt=0)  # 每张表各取多少条
+    hops: int = Field(default=2, ge=1, le=3)  # 图多跳的跳数
+    budget: int = Field(default=2000, gt=0)  # 记忆块的字符预算
+    block_by_llm: bool = True  # False = 恒走确定性模板
+
+
+class MemoryDecaySettings(BaseModel):
+    """遗忘衰减：score = importance * exp(-Δt/τ) * (1 + log(1 + access_count))。"""
+
+    tau: float = Field(default=30.0, gt=0)  # 衰减常数（世界时间单位）
+    floor: float = Field(default=0.05, gt=0.0, le=1.0)  # 跌破此值即删除
+
+
+class MemoryConsolidateSettings(BaseModel):
+    """定时循环。"""
+
+    enabled: bool = True
+    interval: float = Field(default=3600.0, gt=0)  # 周期（秒）
+    min_events: int = Field(default=20, gt=0)  # 累积够多少条事件才触发一轮
+
+
+class MemoryRetrySettings(BaseModel):
+    """失败重试与死信。"""
+
+    max_attempts: int = Field(default=3, ge=1)  # 单条最多重试次数（首次不计）
+    backoff: float = Field(default=1.0, gt=0)  # 退避基数（秒），按 backoff * 2^n 递增
+    deadletter_path: str = "data/memory/deadletter.jsonl"  # append-only，刻意独立于 Kùzu
+
+
+class MemorySettings(BaseModel):
+    """记忆层配置。"""
+
+    db_path: str = "data/memory"  # Kùzu 数据库目录（一库一世界）
+    dimensions: int = Field(default=1024, gt=0)  # 向量列维度，必须与嵌入端点实际返回一致
+    queue_size: int = Field(default=256, gt=0)
+    gate: MemoryGateSettings = MemoryGateSettings()
+    recall: MemoryRecallSettings = MemoryRecallSettings()
+    consolidate: MemoryConsolidateSettings = MemoryConsolidateSettings()
+    decay: MemoryDecaySettings = MemoryDecaySettings()
+    retry: MemoryRetrySettings = MemoryRetrySettings()
+
+
 class Settings(BaseModel):
     """顶层配置，按子模块分组，避免一个扁平大类。"""
 
@@ -175,6 +234,7 @@ class Settings(BaseModel):
     embedding: EmbeddingSettings = EmbeddingSettings()
     llm: LLMSettings = LLMSettings()
     decision: DecisionSettings = DecisionSettings()
+    memory: MemorySettings = MemorySettings()
 
     #: 本次配置的来源；由 load_settings() 写入，直接构造实例时保持 None
     _source: str | None = PrivateAttr(default=None)

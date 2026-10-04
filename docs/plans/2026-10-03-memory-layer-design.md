@@ -29,6 +29,7 @@
 | 扩展 | `INSTALL VECTOR` / `INSTALL FTS` / `LOAD ...` **离线可用**（wheel 自带，实测本机无 `~/.kuzu` 目录），无需联网 |
 | 依赖 | 纯 Python 取值用 `has_next()` / `get_next()`，**不需要 numpy / pandas**（`get_as_df()` 才需要 numpy） |
 | 建表幂等 | 节点表与关系表都支持 `CREATE ... IF NOT EXISTS` |
+| `Database(path)` 语义 | 把 path 当**文件**（不是目录）：父目录不存在报 `IO exception: Cannot open file ... No such file or directory`；传一个已存在的目录报 `RuntimeError: Database path cannot be a directory`。因此 `db_path` 落成「目录」（由我们 `mkdir`），库文件固定为 `db_path / "memory.kuzu"`（**实施补记**：本节原文写的是 `kuzu.Database(str(db_path))`，那是错的） |
 | 版本 | 0.11.3；`uv` 之外只新增 `kuzu` 一个依赖 |
 
 ---
@@ -263,7 +264,7 @@ class MemoryService(Service):
 
 - `start()`：建 Kùzu 连接 → 幂等建表与索引 → 起 worker → 起定时循环。`enabled: false` 的依赖端点只警告不 fail fast（沿用既有惯例）。
 - `stop()`：cancel 定时循环与 worker（`await` 收殓，**绝不吞 `CancelledError`**）→ 关 Kùzu。必须幂等。
-- `health()`：Kùzu 可打开 + 依赖端点状态；extra 报 `库路径` / `角色数` / `事件数` / `条带`. 未启动时套 `not_running_detail(state)`。
+- `health()`：**只看 Kùzu 是否可打开**（依赖端点的就绪状态不并入 `healthy`，见文末实施补记）；extra 报 `库路径` / `角色数` / `原文数` / `死信` / `嵌入就绪`。未启动时套 `not_running_detail(state)`。
 
 ---
 
@@ -505,7 +506,9 @@ async def chat(
 - `LLMSettings` 加 `memory: LLMEndpointSettings`；`LLMService` 加 `_memory` 客户端。
 - `start()` 建三个客户端；`stop()` 关三个；`health()` 的 extra 增加 `记忆模型` / `记忆端点`，**三头全没客户端才 unhealthy**。
 - 缺 key 仍只警告不 fail fast。
-- **实现注意点**：`_endpoint()` 内的局部名 `endpoint` 是端点配置对象，与新的同名形参会遮蔽，需把内部变量改名（如 `slot`）。
+- **实现注意点**：五个能力方法体内原本把 `_endpoint()` 的返回值命名为 `endpoint`（`client, endpoint, resolved = ...`），它与新加的 keyword 形参 `endpoint=` **同名遮蔽**——加了形参后这一行会直接覆盖形参。需把方法体内的局部名改名（实施时用的是 `slot`）。`_endpoint()` 自身内部的局部名是 `vision` / `chat`，不受影响。
+
+> **实施补记（2026-10-03）**：上述遮蔽点已按 `slot` 改名落地。另外端点选择在实施时收敛成**一张表**（`slots: dict[EndpointName, tuple[AsyncOpenAI | None, LLMEndpointSettings]]`），而不是链式三元——因为 `EndpointName` 是闭合的 `Literal`，字典查找可被类型检查证明穷尽，日后新增端点时漏改会在判型阶段暴露，而链式三元会静默落进最后的 `else`。（`EndpointName` 是实施期新引入的模块级类型别名，设计文档原文未列出。）
 
 ---
 
@@ -598,7 +601,7 @@ async def chat(
 1. `uvx basedpyright core tests` = `0 errors, 0 warnings, 0 notes`。
 2. `pytest --cov=core` = **100%**，`core/main.py` 维持 omit。
 3. `uv run ruff check .` 与 `ruff format --check .` 全绿。
-4. `python -m core.main` 冒烟：无任何密钥时进程正常启动，`memory` 服务健康检查为 unhealthy 且详情可读、优雅关闭。
+4. `python -m core.main` 冒烟：无任何密钥时进程正常启动，`memory` 服务健康检查可读（**健康判据只看 Kùzu**，见文末实施补记；依赖就绪由 `extra.嵌入就绪` 反映）、优雅关闭。
 5. 端到端实测：喂入若干回合后，`recall` 能召回相关记忆；重启进程后库中数据仍在（持久化）。
 6. 端到端实测：`RELATES` 反复写入同一对角色，库中始终只有一条边。
 7. 端到端实测：`consolidate_once()` 后低分条目被删、角色与关系仍在。
@@ -622,3 +625,12 @@ async def chat(
 ## 实施补记（留白）
 
 实施期间与本文的偏差写在这里（体例同 `2026-10-02-decision-layer-design.md` 的「实施补记」）。
+
+### 期一（2026-10-04）
+
+- **健康判定口径（修订 §四 / §十四 第 4 条）**：`MemoryService.health()` 的 `healthy` **只看 Kùzu 是否打开**，不把依赖端点（embedding / llm / decision）的就绪状态并进来。原因：`decision` 默认双端点皆 `enabled: false`，若按「依赖就绪」聚合，memory 在默认配置下会永远 unhealthy，噪音且误导；缺密钥时 `observe` 走「不可重试 → 进死信」的降级路径、原文不丢，属优雅降级而非服务损坏；依赖各自就绪与否已由 embedding / llm / decision 各自的 `health()` 报出。为弥补可观测性，`health().extra` 增列 `嵌入就绪`，暴露「库开着、写入 / 召回却会不可用」的降级态。
+- **`db_path` 是目录**：Kùzu 的 `Database` 只接受文件路径（传已存在目录会报 `Database path cannot be a directory`），故 `memory.db_path` 是**目录**，库文件固定为 `<db_path>/memory.kuzu`。设计正文未写明这一点。
+- **死信重放复用原主键**：`replay_deadletters()` 重放阶段 A 时复用 `DeadLetter.utterance_id` 作为落库主键（不另造 id），保证「`observe` 返回值 = 库中主键 = 死信条 id」在重放路径上也成立，并使重放天然幂等（落库成功但死信重写失败时，下一轮不会插出重复原文）。
+- **`start()` 半途失败的资源收口**：会话在 `ensure_schema` **之前**即挂到 `self._session`，并在建表失败时 `close()` 后置回 `None`——保证「库的 schema 版本不符」这类失败既不泄漏 Kùzu 句柄 / 执行器，也对直接调用 `start()` 安全。
+- **期一接线范围**：`gate.*`、`recall.hops`、`recall.block_by_llm`、`consolidate.*`、`decay.*` 只进配置、期二 / 期三才被消费；`MemoryConfigError` / `MemoryExtractError` / `STAGE_STRUCTURED` 为后续期的错误树与协议预留。
+- **重放的两处已知缺口（留到期三）**：① 未做「连续失败超 `max_attempts` 不再自动重试」的计数；② 单轮重放里 `DeadLetterBox.rewrite` 的磁盘异常会外抛（设计 §8.1 第 7 条要求「单轮失败只记日志」）。期一重放尚未挂进定时循环，影响有限。
