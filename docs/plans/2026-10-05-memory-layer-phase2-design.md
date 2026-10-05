@@ -426,7 +426,7 @@ core/memory/
 | `core/memory/recall/**` | 新增 `graph`；泛化 `semantic`；扩展 `assemble` |
 | `core/memory/service.py` | 拆两段、重排缓冲、stop 收殓 |
 | `README.md` | 记忆层章节补事件与多跳；配置表补 `memory.pipeline.*` |
-| `tests/**` | 新增期二用例；期一用例全绿。**三个文件必然要改**（见 §十 末的「地雷清单」），其余一字不改 |
+| `tests/**` | 新增期二用例；期一用例全绿。**两个文件必然要改**（见 §十 末的「地雷清单」），其余一字不改 |
 
 > `.env.example` **无需改动**：`MEMORY_LLM_API_KEY` 期一已补。
 
@@ -459,23 +459,23 @@ core/memory/
 | 12 | `Event` 的向量召回（`evt_vec`）与访问计数回写 | 6.2 / 6.5 |
 | 13 | 单事务：一条观测的增量写中途失败 ⇒ 整笔回滚（角色/事件都没留下） | 3.3 |
 | 14 | 阶段 B 死信重放：从库里读回 `text`+`embedding` 重跑，成功后剔除 | 决策 13 |
-| 15 | **回归**：期一既有用例全绿（三个必然要改的文件见下） | 不破坏既有契约 |
+| 15 | **回归**：期一既有用例全绿（两个必然要改的文件见下） | 不破坏既有契约 |
 
 > 测试名不得含断言关键词（期一全局约束第 6 条），否则会被日志文件的 `tmp_path` 命中而假红。
 
-### 10.1 地雷清单：期一这三个文件**必然要改**
+### 10.1 地雷清单：期一这两个文件**必然要改**
 
 这不是回归，是期二语义变更的直接后果。把清单钉在这里，是为了让「红了」与「坏了」一眼分得开。
 
 | 文件 | 为什么会红 | 怎么改 |
 | --- | --- | --- |
 | `tests/memory/test_memory_store_schema.py` | ① `test_建表幂等` 是**等集**断言（六张表），期二必然多出五张；② `test_版本落后直接报错` 把版本设成 `'0'` 求报错，而决策 6 之后 `'0' < '2'` 属**向前迁移**、不再报错 | ① 表集合改成期二的十一张；② 该用例改写成「版本**高于**代码 ⇒ 报错」，另补一条「版本低于代码 ⇒ 迁移并写回当前版本」 |
-| `tests/memory/test_memory_assemble.py` | `render_block` 的参数从 `(states, items)` 变成 `(states, characters, items)` | 按新签名传参；补「相关人物」段的断言 |
 | `tests/memory/test_memory_service.py` | `_service` 挂具里塞的是 `LLMService.__new__(LLMService)` 与 `DecisionService.__new__(DecisionService)`（裸实例，无 `_config`）。期二阶段 B 会真的调用它们 ⇒ 每回合都抛 `AttributeError` ⇒ 进死信；于是 `test_嵌入失败重试后成功` / `test_嵌入连接错误也重试` 里 `_deadletters(service) == []` 的断言当场变红 | 挂具换成**能跑阶段 B 的假 LLM / 假 decision**（可开关「未就绪」）；并把「零死信」断言限定到阶段 A 的死信 |
 
 **不受影响、必须保持一字不改的**（尤其要盯住）：
 
 - `tests/memory/test_memory_queue.py` —— 正因为决策 9 保住了 `put`（观测专用、满则丢）的签名与语义，这个文件**一行都不用动**。若实施时把 `put` 改成通用入口，这个文件会整片变红，那就是走错了路。
+- `tests/memory/test_memory_assemble.py` —— `render_block` 新增的 `characters` 与 `build_trace` 新增的 `graph` **都给默认值 `()`**，期一的旧调用因此逐字不变、输出逐行不变。这是刻意留的默认值，不是可有可无的糖。
 - `tests/memory/test_memory_recall.py`、`test_memory_writes.py`、`test_memory_queries.py`、`test_memory_retry.py`、`test_memory_models.py`、`test_memory_store_session.py` —— 全部一字不改。
 - 非记忆层的 `tests/**` —— 全部一字不改。
 
@@ -508,7 +508,7 @@ core/memory/
 6. 端到端：A、B 共同参与一事件后，`recall(focus=[A])` 能召回该事件并带出 B（判据二）。
 7. 端到端：本机期一建的 v1 库被**平滑升到 v2**，旧数据仍在。
 8. 端到端：`memory` 端点无 key 时，`observe` 不阻塞、原文仍在、阶段 B 落死信且可显式重放。
-9. 回归：期一既有用例全绿 —— 其中三个文件按 §10.1「地雷清单」改写（期二语义变更的直接后果），其余一字不改。
+9. 回归：期一既有用例全绿 —— 其中两个文件按 §10.1「地雷清单」改写（期二语义变更的直接后果），其余一字不改。
 
 ---
 
