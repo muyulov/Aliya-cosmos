@@ -55,7 +55,7 @@
 | 6 | schema 升级 | **只加表的向前迁移**：`SCHEMA_VERSION` `"1"` → `"2"`；`stored < current` 补建新表后写回版本，`stored > current` 报错 | 一律报错（每加一层表就要手删一次开发库）；不升版本号（两个结构不同的库都自称 `"1"`，版本号失去意义） |
 | 7 | 流水线结构 | **拆两段**：worker 只做「写」（阶段 A + 阶段 B 的落库指令），LLM 抽取与 laya 判定放独立并发任务（上限 `pipeline.extract_workers`，默认 4） | 维持单协程串行（吞吐降到 ~1/抽取耗时，队列满丢的是**原文**，且 recall 回写排到 LLM 后面）；阶段 B 独立单协程（简单，但慢回合仍在阶段 B 内排队，本可以并发） |
 | 8 | 写入保序 | **`seq` + 重排缓冲 + 墓碑**：阶段 A 领单调递增 `seq`，阶段 B 带 `seq` 回交，worker 按序提交；失败/死信的 `seq` 交墓碑 | 按 `world_time` 排序（`world_time` 在配置里明确允许缺失，那时的错序是**静默**的）；改 `record_state_change` 容忍乱序（要拆接区间，复杂度远大于加一个缓冲） |
-| 9 | 内部写入指令的队列语义 | **过载闸门移到 `observe()` 入口**：队列本身不再对「写入指令 / 墓碑」设界，`observe` 在深度达到 `queue_size` 时才丢弃观测 | 内部指令与观测共用有界队列（**丢一个 `StructuredResult` 会让它的 `seq` 永不抵达，重排缓冲永久卡死**，此后所有写入都停摆）；内部另起一条无界队列 + 双队列 select（同一件事要两套取用逻辑） |
+| 9 | 内部写入指令的队列语义 | **同一个队列、两个入口**：`put(观测)` 保留期一的「满则丢弃 + 计数」语义，新增 `put_internal(写入指令 / 墓碑 / 访问回写)` **不设界** | 内部指令与观测共用同一个有界入口（**丢一个 `StructuredResult` 会让它的 `seq` 永不抵达，重排缓冲永久卡死**，此后所有写入都停摆）；把队列整体改成无界（观测的背压闸门就没了）；另起一条无界队列 + 双队列 select（同一件事要两套取用逻辑） |
 | 10 | `Event` 的访问列 | **本期顺手加上 `access_count` / `last_access`** | 不加（期三衰减要吃这两个字段，届时要再迁一次 schema） |
 | 11 | 归位 FTS 的范围 | **只对 `Character.name` 建全文索引**；`aliases` 仍走精确命中（既有 `FIND_CHARACTER_BY_NAME` 已覆盖） | 对 `aliases` 也建 FTS（`aliases` 是 `STRING[]`，数组列能否进 FTS **未实测**，为一条未验证的能力押上归位的主路径不划算） |
 | 12 | 判定结果的去向 | **门控判出的重要度回写 `Utterance.importance`** | 不回写（`fit_budget` 按 `相关度 × 重要度` 排序，而期一写死 `0.0` —— 不回写等于预算裁剪名存实亡） |
@@ -426,7 +426,7 @@ core/memory/
 | `core/memory/recall/**` | 新增 `graph`；泛化 `semantic`；扩展 `assemble` |
 | `core/memory/service.py` | 拆两段、重排缓冲、stop 收殓 |
 | `README.md` | 记忆层章节补事件与多跳；配置表补 `memory.pipeline.*` |
-| `tests/**` | 新增期二用例；期一用例**一字不改**地通过 |
+| `tests/**` | 新增期二用例；期一用例全绿。**三个文件必然要改**（见 §十 末的「地雷清单」），其余一字不改 |
 
 > `.env.example` **无需改动**：`MEMORY_LLM_API_KEY` 期一已补。
 
@@ -459,9 +459,25 @@ core/memory/
 | 12 | `Event` 的向量召回（`evt_vec`）与访问计数回写 | 6.2 / 6.5 |
 | 13 | 单事务：一条观测的增量写中途失败 ⇒ 整笔回滚（角色/事件都没留下） | 3.3 |
 | 14 | 阶段 B 死信重放：从库里读回 `text`+`embedding` 重跑，成功后剔除 | 决策 13 |
-| 15 | **回归**：期一全部既有用例一字不改地通过 | 不破坏既有契约 |
+| 15 | **回归**：期一既有用例全绿（三个必然要改的文件见下） | 不破坏既有契约 |
 
 > 测试名不得含断言关键词（期一全局约束第 6 条），否则会被日志文件的 `tmp_path` 命中而假红。
+
+### 10.1 地雷清单：期一这三个文件**必然要改**
+
+这不是回归，是期二语义变更的直接后果。把清单钉在这里，是为了让「红了」与「坏了」一眼分得开。
+
+| 文件 | 为什么会红 | 怎么改 |
+| --- | --- | --- |
+| `tests/memory/test_memory_store_schema.py` | ① `test_建表幂等` 是**等集**断言（六张表），期二必然多出五张；② `test_版本落后直接报错` 把版本设成 `'0'` 求报错，而决策 6 之后 `'0' < '2'` 属**向前迁移**、不再报错 | ① 表集合改成期二的十一张；② 该用例改写成「版本**高于**代码 ⇒ 报错」，另补一条「版本低于代码 ⇒ 迁移并写回当前版本」 |
+| `tests/memory/test_memory_assemble.py` | `render_block` 的参数从 `(states, items)` 变成 `(states, characters, items)` | 按新签名传参；补「相关人物」段的断言 |
+| `tests/memory/test_memory_service.py` | `_service` 挂具里塞的是 `LLMService.__new__(LLMService)` 与 `DecisionService.__new__(DecisionService)`（裸实例，无 `_config`）。期二阶段 B 会真的调用它们 ⇒ 每回合都抛 `AttributeError` ⇒ 进死信；于是 `test_嵌入失败重试后成功` / `test_嵌入连接错误也重试` 里 `_deadletters(service) == []` 的断言当场变红 | 挂具换成**能跑阶段 B 的假 LLM / 假 decision**（可开关「未就绪」）；并把「零死信」断言限定到阶段 A 的死信 |
+
+**不受影响、必须保持一字不改的**（尤其要盯住）：
+
+- `tests/memory/test_memory_queue.py` —— 正因为决策 9 保住了 `put`（观测专用、满则丢）的签名与语义，这个文件**一行都不用动**。若实施时把 `put` 改成通用入口，这个文件会整片变红，那就是走错了路。
+- `tests/memory/test_memory_recall.py`、`test_memory_writes.py`、`test_memory_queries.py`、`test_memory_retry.py`、`test_memory_models.py`、`test_memory_store_session.py` —— 全部一字不改。
+- 非记忆层的 `tests/**` —— 全部一字不改。
 
 ---
 
@@ -492,7 +508,7 @@ core/memory/
 6. 端到端：A、B 共同参与一事件后，`recall(focus=[A])` 能召回该事件并带出 B（判据二）。
 7. 端到端：本机期一建的 v1 库被**平滑升到 v2**，旧数据仍在。
 8. 端到端：`memory` 端点无 key 时，`observe` 不阻塞、原文仍在、阶段 B 落死信且可显式重放。
-9. 回归：期一全部既有用例一字未改地通过。
+9. 回归：期一既有用例全绿 —— 其中三个文件按 §10.1「地雷清单」改写（期二语义变更的直接后果），其余一字不改。
 
 ---
 
