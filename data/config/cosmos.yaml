@@ -38,9 +38,10 @@ clock:
 # 文本向量化端点。与 llm 分开配：DeepSeek 没有 embedding 端点，两家通常不是同一个服务。
 # 没配 api_key 时只警告、健康检查 unhealthy，进程照常启动（不 fail fast）。
 embedding:
-  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1 # OpenAI 兼容端点
-  api_key: ${DASHSCOPE_API_KEY:} # 冒号后为空：.env 里没配时取空串，该端点不可用
-  model: text-embedding-v3 # 向量化模型
+  base_url: http://127.0.0.1:9080/v1 # OpenAI 兼容端点
+  # 本地 llama.cpp 不校验鉴权，但服务层要求 api_key 非空才建内核； api_key=local
+  api_key: ${EMBEDDING_API_KEY:local} # 非空占位，本地端点直接接受
+  model: Qwen3-Embedding-4B-Q4_K_M # 向量化模型
   timeout: 60 # 单次请求超时（秒），必须为正数
   retries: 2 # SDK 重试次数，0 关闭
   batch_size: 10 # 单次请求最多几条文本。阿里 v3 上限 10（v1/v2 为 25，OpenAI 为 2048），超了会 400
@@ -55,7 +56,7 @@ llm:
     model: deepseek-flash # 该端点的模型
     timeout: 60 # 单次请求超时（秒），必须为正数
     retries: 2 # SDK 重试次数，0 关闭；流式一旦开始消费就不再重试
-    structured_mode: json_schema # 兼容端点不支持时改 json_object（该模式要求提示词里出现 json 字样）
+    structured_mode: json_object # 兼容端点不支持时改 json_object（该模式要求提示词里出现 json 字样）
     temperature: null # null = 不传该参数，用服务端默认；传值则覆盖
     max_tokens: null # 同上。结构化输出建议给值，避免输出被截断
   vision:
@@ -66,19 +67,9 @@ llm:
     model: deepseek-flash
     timeout: 60
     retries: 2
-    structured_mode: json_schema
+    structured_mode: json_object
     temperature: null
     max_tokens: null
-  memory:
-    # 记忆专用端点：抽取与记忆块渲染走这里。
-    # 与另两个端点不同，它只接受显式 endpoint="memory" 选择，不参与模型名匹配，
-    # 因此 model 与 chat 同名也不会把 chat 调用抢走。
-    # 这里只列常改项，其余字段（timeout / retries / structured_mode / temperature /
-    # max_tokens）走 core/config/settings.py 里 LLMEndpointSettings 的代码默认值。
-    base_url: ${MEMORY_LLM_BASE_URL:https://api.openai.com/v1}
-    api_key: ${MEMORY_LLM_API_KEY:}
-    model: gpt-4o-mini
-
 # 判断层：jev（云端）与 laya（本地 laya-serve）是两个端点，同一套 /systemone 协议。
 # base_url 只写到 /v1 为止，路径 /systemone 由代码补上，多写一段会 404。
 # 两个端点默认都关着：进程照常启动（不 fail fast），调用时才报未启用。
@@ -97,30 +88,3 @@ decision:
     model: "" # 空 = 不带 model 字段，交给 Laya 的 Router 按语种自动选 checkpoint
     timeout: 60
     retries: 2
-
-# 记忆层（归忆）：Kùzu 一体存储（图 + 向量 + 全文），一库一世界。
-memory:
-  db_path: data/memory # Kùzu 数据库目录；换世界就是换这里
-  dimensions: 1024 # 向量列维度 FLOAT[d]，建表时确定且不可变更，必须与嵌入端点实际返回一致
-  queue_size: 256 # 观测队列上限，满则丢弃并记 ERROR（过载 ≠ 故障，不进死信）
-  gate:
-    backend: laya # 第一层写入门控走哪个判断端点：laya / jev
-    importance_threshold: 0.5 # 重要度阈值（0~1）；默认取保守值，宁多记勿漏记
-    novelty_threshold: 0.5 # 新颖度阈值（0~1）
-    skip_laya: false # true = 跳过第一层直接进 LLM，laya 不可用时的应急开关
-  recall:
-    top_k: 8 # 每张表各取多少条
-    hops: 2 # 图多跳的跳数（1~3）
-    budget: 2000 # 记忆块的字符预算
-    block_by_llm: true # 记忆块交给 LLM 编排；false = 恒走确定性模板
-  consolidate:
-    enabled: true # false 时模块退化成纯写入 + 召回
-    interval: 3600 # 定时循环周期（秒）
-    min_events: 20 # 累积够多少条事件才触发一轮，避免空转
-  decay:
-    tau: 30 # 衰减常数（世界时间单位）
-    floor: 0.05 # 跌破此值即删除；默认保守，宁留不删
-  retry:
-    max_attempts: 3 # 单条最多重试次数（首次不计）
-    backoff: 1.0 # 退避基数（秒），按 backoff * 2^n 递增
-    deadletter_path: data/memory/deadletter.jsonl # append-only，刻意独立于 Kùzu

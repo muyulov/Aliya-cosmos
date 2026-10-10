@@ -3,9 +3,8 @@
 约定：
 - 五项能力：chat / stream / chat_structured / chat_tools / 多模态。
   多模态不单独开方法，由调用方给 chat 传 `model=svc.vision_model`。
-- chat / vision / memory 是三个端点，各持一个客户端。不给 `endpoint=` 时按传进来的
-  模型名在 chat 与 vision 之间挑；memory **只接受显式选择**（`endpoint="memory"`），
-  不参与模型名匹配——否则与 chat 同名的记忆模型会把对话调用抢走。
+- chat / vision 是两个端点，各持一个客户端。不给 `endpoint=` 时按传进来的
+  模型名在两者之间挑。
 - 工具调用只做单轮：返回 tool_calls，回传用 `assistant(tool_calls=...)` +
   `tool_result(...)`，循环由调用方写。
 - 日志不记消息正文：正文该不该记由调用方自己决定并自己打。
@@ -59,7 +58,7 @@ T = TypeVar("T", bound=BaseModel)
 NO_API_KEY = "未配置 api_key，LLM 功能不可用"
 
 #: 可显式选择的端点名；不给则退回「按模型名在 chat / vision 之间匹配」的旧规则
-type EndpointName = Literal["chat", "vision", "memory"]
+type EndpointName = Literal["chat", "vision"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +123,6 @@ class LLMService(Service):
         self._config: LLMSettings = config
         self._chat: AsyncOpenAI | None = None
         self._vision: AsyncOpenAI | None = None
-        self._memory: AsyncOpenAI | None = None
 
     # ---------- 模型槽位 ----------
 
@@ -138,41 +136,32 @@ class LLMService(Service):
         """多模态模型：给 chat 传它就走 vision 端点。"""
         return self._config.vision.model
 
-    @property
-    def memory_model(self) -> str:
-        """记忆专用模型：供记忆层的抽取与记忆块渲染使用，需配 `endpoint="memory"`。"""
-        return self._config.memory.model
-
     # ---------- 生命周期 ----------
 
     @override
     async def start(self) -> None:
-        """三个端点各建一个客户端。没配 api_key 的端点只警告：脚手架不该因为没密钥就起不来。"""
+        """两个端点各建一个客户端。没配 api_key 的端点只警告：脚手架不该因为没密钥就起不来。"""
         if self.running:
             return
         self._chat = self._build("chat", self._config.chat, self._chat)
         self._vision = self._build("vision", self._config.vision, self._vision)
-        self._memory = self._build("memory", self._config.memory, self._memory)
 
     @override
     async def stop(self) -> None:
-        """关三个客户端。必须幂等：回滚时它也会作用在没建过客户端的实例上。"""
+        """关两个客户端。必须幂等：回滚时它也会作用在没建过客户端的实例上。"""
         chat, self._chat = self._chat, None
         vision, self._vision = self._vision, None
-        memory, self._memory = self._memory, None
         if chat is not None:
             await chat.close()
         if vision is not None:
             await vision.close()
-        if memory is not None:
-            await memory.close()
 
     @override
     async def health(self) -> HealthStatus:
         """只看有没有客户端：健康检查不该发请求（有副作用、花钱、受网络抖动影响）。
 
-        三个端点全没配才算不健康：只启用一头也是能用的。
-        extra 里带出三个端点各自配置的模型与地址——「未配置 api_key」时也照样报，
+        两个端点全没配才算不健康：只启用一头也是能用的。
+        extra 里带出两个端点各自配置的模型与地址——「未配置 api_key」时也照样报，
         否则看不出缺的是哪一个端点的密钥。
         """
         extra: dict[str, object] = {
@@ -180,10 +169,8 @@ class LLMService(Service):
             "对话端点": self._config.chat.base_url,
             "多模态模型": self._config.vision.model,
             "多模态端点": self._config.vision.base_url,
-            "记忆模型": self._config.memory.model,
-            "记忆端点": self._config.memory.base_url,
         }
-        if self._chat is not None or self._vision is not None or self._memory is not None:
+        if self._chat is not None or self._vision is not None:
             return HealthStatus(
                 name=self.label, healthy=True, state=self.state, detail="", extra=extra
             )
@@ -207,7 +194,7 @@ class LLMService(Service):
     ) -> str:
         """对话补全，返回消息正文。
 
-        `endpoint` 显式选端点（多模态传 `vision`、记忆层传 `memory`）；不给则按模型名挑。
+        `endpoint` 显式选端点（多模态传 `vision`）；不给则按模型名挑。
         """
         client, slot, resolved = self._resolve_endpoint(model, endpoint)
         begin = time.perf_counter()
@@ -355,12 +342,11 @@ class LLMService(Service):
     def _resolve_endpoint(
         self, model: str | None, name: EndpointName | None
     ) -> tuple[AsyncOpenAI, LLMEndpointSettings, str]:
-        """挑端点：显式 name 优先；不给 name 时保持旧规则（只在 chat / vision 之间按模型名匹配）。
+        """挑端点：显式 name 优先；不给 name 时保持旧规则（在 chat / vision 之间按模型名匹配）。
 
         显式指定时，端点参数取该端点配置，model 仍可覆盖；缺客户端时抛 LLMConfigError。
-        memory 只能走这条显式路径，永不参与模型名匹配。
 
-        三个端点收在一张表里，客户端与配置一次取齐；EndpointName 是闭合的 Literal，
+        两个端点收在一张表里，客户端与配置一次取齐；EndpointName 是闭合的 Literal，
         字典查找可被类型检查证明穷尽，新增端点时漏改会在判型阶段暴露，
         而不是像链式三元那样静默落进最后的 else 走 chat。
         """
@@ -368,7 +354,6 @@ class LLMService(Service):
             slots: dict[EndpointName, tuple[AsyncOpenAI | None, LLMEndpointSettings]] = {
                 "chat": (self._chat, self._config.chat),
                 "vision": (self._vision, self._config.vision),
-                "memory": (self._memory, self._config.memory),
             }
             client, slot = slots[name]
             return self._require(client, name), slot, model or slot.model

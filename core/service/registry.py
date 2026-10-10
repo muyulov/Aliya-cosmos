@@ -13,7 +13,6 @@ from core.config import Settings
 from core.decision.service import DecisionService
 from core.embedding.service import EmbeddingService
 from core.llm.service import LLMService
-from core.memory.service import MemoryService
 from core.service.clock_service import ClockService
 from core.service.manager import ServiceManager
 
@@ -21,9 +20,8 @@ from core.service.manager import ServiceManager
 def build_manager(settings: Settings | None = None) -> ServiceManager:
     """构造并装配全部服务的 manager。
 
-    注册顺序即依赖顺序：记忆层依赖嵌入 / LLM / 判断三支，是容器里最下游的服务，
-    故排在最后（`ServiceManager` 会据此分层并按序启动）。
+    注册顺序即依赖顺序（`ServiceManager` 会据此分层并按序启动）。
     """
     manager = ServiceManager(settings)
-    manager.register(ClockService, EmbeddingService, LLMService, DecisionService, MemoryService)
+    manager.register(ClockService, EmbeddingService, LLMService, DecisionService)
     return manager
