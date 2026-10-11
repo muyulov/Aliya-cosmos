@@ -19,6 +19,7 @@ from core.decision.errors import (
     DecisionError,
     DecisionRequestError,
     DecisionResponseError,
+    DecisionRetryError,
     DecisionTimeoutError,
 )
 from core.decision.questions import (
@@ -35,6 +36,7 @@ from core.decision.service import (
     ChoiceAnswer,
     DecisionResult,
     DecisionService,
+    PredictCall,
     ScoreAnswer,
     State,
 )
@@ -49,10 +51,12 @@ __all__ = [
     "DecisionRequestError",
     "DecisionResponseError",
     "DecisionResult",
+    "DecisionRetryError",
     "DecisionService",
     "DecisionTimeoutError",
     "NoulCriteria",
     "NoulQuestion",
+    "PredictCall",
     "Question",
     "ScoreAnswer",
     "ScoreQuestion",

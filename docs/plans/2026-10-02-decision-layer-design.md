@@ -466,3 +466,54 @@ service._clients = {"laya": _mock_client(handler)}  # pyright: ignore[reportPriv
 4. `pytest --cov=core` = **100%**。
 5. `uv run python -m core.main` 能启动并优雅关闭；两端点默认关时多一条 `decision` 的 unhealthy 健康检查，不报错退出。
 6. README 配置项表含 `decision.*` 各字段；「判断层」章节含四个调用示例与三条约定（不记正文、confidence 不可跨后端比较、零样本质量差）。
+
+## 十三、优化补记（2026-10-11）
+
+在既有契约（三原语、answers 原样透传、层内不兜底、`backend` 显式选）之上做一轮优化，
+不改上述任何设计决策；下述条目覆盖本文中对应的旧表述。
+
+### 13.1 错误分类
+
+- 新增 `DecisionRetryError(DecisionRequestError)`：可重试状态码**退避用尽**时抛它，
+  非可重试的 4xx / 5xx 仍是 `DecisionRequestError`。继承宽类，既有 `except DecisionRequestError`
+  不受影响，调用方按需单独识别「限流 / 过载持续」。
+
+### 13.2 重试（覆盖决策 9 与 §七）
+
+- 可重试状态码扩至 `{429, 502, 503, 504, 529}`：后三者是网关与上游的瞬时不可用，同样值得退避再试。
+- 退避改为「指数 + 全抖动」：上限仍是 `_BACKOFF_BASE * 2**attempt`，实际取 `[0, 上限]` 的随机值，
+  打散同端点多并发时的齐步重试。`_BACKOFF_BASE` 为 0 时恒为 0，测试免伪造 `asyncio.sleep` 的约定不变。
+
+### 13.3 API 增强
+
+- `DecisionResult.backend: Backend`：记录本次实际走的端点。`confidence` 跨后端不可比，
+  调用方据此按后端分别校准阈值。
+- `DecisionResult.answer(qid)`：按键取一条答案并校验其为对象（键不在 / 非对象 → `DecisionResponseError`）。
+  三原语便捷方法与调用方共用这一个出口，取代原先散在服务内部的取答逻辑。
+- `predict_many(calls, *, backend=None, limit=None)`：并发跑多条**相互独立**的提问，返回顺序与入参一致；
+  `limit` 用信号量限制同时在飞的请求数，压住对端点的并发压力。空入参早退（不发请求、不查端点配置），
+  `limit < 1` 抛 `ValueError`，任一题失败原样抛出（层内不兜底）。
+- `State` 放宽为任意 JSON（含 `int` / `float` / `bool` / `null`），与 docstring 的「任意 JSON」对齐。
+
+### 13.4 一致性
+
+- 端点名的**顺序**收敛为单一常量 `ENDPOINTS`，`_endpoints()` 由它展开；`_settings_of` 仍用显式分支
+  完成名到配置的映射（不用 `getattr`）。
+- `predict` 成功日志补 `后端` 字段，与重试日志同字段体系（`端点` 一律取 `settings.base_url`、
+  `后端` 一律取裸名），采集端按端点 / 后端聚合不会分叉。
+- `usage` 的 token 与 `noul` / `confidence` / `probability` 等数值字段一律**排除 `bool`**
+  （JSON 的 `true` 在 Python 里是 `int` 的子类，不拦会被当成 1）；`probabilities` / `legend`
+  改为逐值校验类型（键由 JSON 协议保证为字符串），不合法统一走「字段不完整」的 `DecisionResponseError`。
+
+### 13.5 配置
+
+- `DecisionEndpointSettings.max_connections: int | None`（默认 `null`）：给值时收窄该端点的
+  httpx2 连接池，`null` 时整段不传 `limits`、沿用 httpx2 默认。YAML 骨架两端点各补一行。
+
+### 13.6 明确不做
+
+- **结果缓存**：决策的 `state` 多为一次性文本，命中率低；缓存还会让「同一输入换后端 / 改阈值」
+  的语义变得隐晦，与「层内不做隐式决策」相悖，故不加。
+- **`/systemone/batch`**：仍是决策 4 / 九节里的非目标（Laya 专有、Jev 无对应能力）。
+- **参数上限本地校验**：仍是决策 10，交给端点裁决。
+

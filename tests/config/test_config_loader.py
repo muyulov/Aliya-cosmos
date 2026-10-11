@@ -383,6 +383,22 @@ def test_判断层超时必须为正数(tmp_path: Path) -> None:
         _ = load_settings(config_file=config, env_file=tmp_path / ".env")
 
 
+def test_判断层连接池上限默认与覆盖(tmp_path: Path) -> None:
+    assert Settings().decision.laya.max_connections is None
+
+    settings = _load(tmp_path, "decision:\n  laya:\n    max_connections: 4\n")
+
+    assert settings.decision.laya.max_connections == 4
+
+
+def test_判断层连接池上限必须为正数(tmp_path: Path) -> None:
+    config = tmp_path / "cosmos.yaml"
+    _ = config.write_text("decision:\n  laya:\n    max_connections: 0\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        _ = load_settings(config_file=config, env_file=tmp_path / ".env")
+
+
 # ---- 出厂配置守护 ----
 
 #: 出厂骨架：需要真实读一份，按相对本文件的路径取以免依赖工作目录

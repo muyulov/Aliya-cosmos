@@ -47,6 +47,14 @@ class DecisionRequestError(DecisionError):
         super().__init__(message)
 
 
+class DecisionRetryError(DecisionRequestError):
+    """限流 / 过载类状态码（429 / 502 / 503 / 504 / 529）退避重试后仍失败。
+
+    继承 DecisionRequestError：调用方按宽类捕获（`except DecisionRequestError`）不受影响，
+    需要区分「重试已耗尽」时再单独捕这个子类。对账坐标与父类一致，无 __cause__。
+    """
+
+
 class DecisionTimeoutError(DecisionError):
     """请求超时。
 

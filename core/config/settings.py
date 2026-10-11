@@ -149,7 +149,9 @@ class DecisionEndpointSettings(BaseModel):
     api_key: str = ""  # 留空则不发 Authorization 头（laya-serve 默认不要求认证）
     model: str = ""
     timeout: float = Field(default=60.0, gt=0)  # 单次请求超时（秒）
-    retries: int = Field(default=2, ge=0)  # 429/529 退避重试次数，0 关闭
+    retries: int = Field(default=2, ge=0)  # 429/502/503/504/529 退避重试次数，0 关闭
+    #: 连接池上限：并发 predict / predict_many 时压住对端点的连接数；None 用 httpx2 默认
+    max_connections: int | None = Field(default=None, gt=0)
 
 
 class DecisionSettings(BaseModel):

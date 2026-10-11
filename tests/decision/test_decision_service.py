@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -24,8 +25,10 @@ from core.decision import (
     DecisionRequestError,
     DecisionResponseError,
     DecisionResult,
+    DecisionRetryError,
     DecisionService,
     DecisionTimeoutError,
+    PredictCall,
     choice,
     noul,
     score,
@@ -717,3 +720,238 @@ async def test_stop后再start会重建客户端() -> None:
     assert rebuilt is not first
     assert first.is_closed
     await service.stop()
+
+
+# ---- 日志一致性 / 重试分类 / 字段校验 / 并发批量 ----
+
+
+async def test_成功日志带后端字段(tmp_path: Path) -> None:
+    """回归：成功日志与重试日志同字段体系（端点 + 后端），聚合端按同一取值分组。"""
+    files = setup_logging(LogSettings(dir=str(tmp_path), level="TRACE"))
+    service = _service(lambda request: httpx2.Response(200, json=_NOUL_BODY))
+
+    _ = await service.predict("state", {_QID: noul("是否要求退款？")})
+
+    lines = files.app.read_text(encoding="utf-8").splitlines()
+    done_line = next(line for line in lines if "判断调用完成" in line)
+    assert "后端=laya" in done_line
+    assert f"端点={DecisionSettings().laya.base_url}" in done_line
+
+
+async def test_predict结果带上后端名() -> None:
+    service = _service(lambda request: httpx2.Response(200, json=_NOUL_BODY))
+
+    result = await service.predict("state", {})
+
+    assert result.backend == "laya"
+
+
+async def test_predict显式jev时结果后端为jev() -> None:
+    service = _service(lambda request: httpx2.Response(200, json=_NOUL_BODY))
+    service._clients["jev"] = httpx2.AsyncClient(  # pyright: ignore[reportPrivateUsage]
+        transport=httpx2.MockTransport(lambda request: httpx2.Response(200, json=_NOUL_BODY)),
+        base_url="https://api.typesafe.ai/v1",
+    )
+
+    result = await service.predict("state", {}, backend="jev")
+
+    assert result.backend == "jev"
+
+
+def test_退避抖动不超过指数上限(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.5)
+
+    for attempt in range(4):
+        delay = decision_service._backoff_delay(attempt)  # pyright: ignore[reportPrivateUsage]
+        assert 0.0 <= delay <= 0.5 * 2**attempt
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+async def test_网关瞬时错误会重试(status: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
+    calls: list[int] = []
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx2.Response(status, json={})
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+
+    _ = await _service(handler).predict("state", {})
+
+    assert len(calls) == 2
+
+
+async def test_重试耗尽抛重试错误子类(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回归：限流 / 过载退避用尽时换子类，既保留宽类兼容又能单独识别。"""
+    monkeypatch.setattr(decision_service, "_BACKOFF_BASE", 0.0)
+    service = _service(lambda request: httpx2.Response(429, json={}))
+
+    with pytest.raises(DecisionRetryError) as excinfo:
+        _ = await service.predict("state", {})
+
+    assert isinstance(excinfo.value, DecisionRequestError)
+    assert excinfo.value.status_code == 429
+
+
+async def test_普通状态码不是重试错误() -> None:
+    service = _service(lambda request: httpx2.Response(400, json={}))
+
+    with pytest.raises(DecisionRequestError) as excinfo:
+        _ = await service.predict("state", {})
+
+    assert not isinstance(excinfo.value, DecisionRetryError)
+
+
+async def test_usage里的布尔不算token() -> None:
+    """回归：JSON 的 true / false 是 int 的子类，不该被当成 token 数记账。"""
+    service = _service(
+        lambda request: httpx2.Response(
+            200,
+            json={
+                "model": "m",
+                "answers": {},
+                "usage": {"input_tokens": True, "output_tokens": False},
+            },
+        )
+    )
+
+    result = await service.predict("state", {})
+
+    assert (result.input_tokens, result.output_tokens) == (None, None)
+
+
+async def test_choice概率值非数值时报错() -> None:
+    service = _service(
+        lambda request: httpx2.Response(
+            200,
+            json={
+                "model": "m",
+                "answers": {
+                    _QID: {
+                        "type": "choice",
+                        "choice": "billing",
+                        "probabilities": {"billing": "high"},
+                        "confidence": 0.8,
+                    }
+                },
+                "usage": {},
+            },
+        )
+    )
+
+    with pytest.raises(DecisionResponseError, match="choice"):
+        _ = await service.choose("state", "选一个", {"billing": None})
+
+
+async def test_rate档位说明非字符串时报错() -> None:
+    service = _service(
+        lambda request: httpx2.Response(
+            200,
+            json={
+                "model": "m",
+                "answers": {
+                    _QID: {
+                        "type": "score",
+                        "score": 1.0,
+                        "legend": {"0": 1},
+                        "probabilities": {"0": 1.0},
+                        "confidence": 0.9,
+                    }
+                },
+                "usage": {},
+            },
+        )
+    )
+
+    with pytest.raises(DecisionResponseError, match="score"):
+        _ = await service.rate("state", "打分", ["低", "高"])
+
+
+async def test_noul为布尔时报错() -> None:
+    service = _service(
+        lambda request: httpx2.Response(
+            200,
+            json={"model": "m", "answers": {_QID: {"type": "noul", "noul": True}}, "usage": {}},
+        )
+    )
+
+    with pytest.raises(DecisionResponseError, match="noul"):
+        _ = await service.ask("state", "是否？")
+
+
+async def test_result_answer按键取答() -> None:
+    service = _service(lambda request: httpx2.Response(200, json=_CHOICE_BODY))
+
+    result = await service.predict("state", {_QID: choice("选一个", {"billing": None})})
+
+    assert result.answer(_QID)["choice"] == "billing"
+
+    with pytest.raises(DecisionResponseError, match="missing"):
+        _ = result.answer("missing")
+
+
+async def test_result_answer值不是对象时报错() -> None:
+    service = _service(
+        lambda request: httpx2.Response(200, json={"model": "m", "answers": {_QID: 5}})
+    )
+
+    result = await service.predict("state", {})
+
+    with pytest.raises(DecisionResponseError, match="answer"):
+        _ = result.answer(_QID)
+
+
+async def test_predict_many_顺序与入参一致() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        state = cast("dict[str, object]", json.loads(request.content))["state"]
+        return httpx2.Response(200, json={"model": f"m-{state}", "answers": {}, "usage": {}})
+
+    service = _service(handler)
+    calls: list[PredictCall] = [("a", {}), ("b", {}), ("c", {})]
+
+    results = await service.predict_many(calls)
+
+    assert [result.model for result in results] == ["m-a", "m-b", "m-c"]
+
+
+async def test_predict_many_空入参不发请求也不查端点() -> None:
+    """空表早退：一个端点都没启用时也不该报 DecisionConfigError。"""
+    service = DecisionService(DecisionSettings())
+
+    assert await service.predict_many([]) == []
+
+
+async def test_predict_many_limit必须为正() -> None:
+    service = _service(lambda request: httpx2.Response(200, json=_NOUL_BODY))
+    calls: list[PredictCall] = [("state", {})]
+
+    with pytest.raises(ValueError, match="limit"):
+        _ = await service.predict_many(calls, limit=0)
+
+
+async def test_predict_many_限制同时在飞的请求数() -> None:
+    inflight = 0
+    peak = 0
+
+    async def handler(_request: httpx2.Request) -> httpx2.Response:
+        nonlocal inflight, peak
+        inflight += 1
+        peak = max(peak, inflight)
+        await asyncio.sleep(0.01)
+        inflight -= 1
+        return httpx2.Response(200, json={"model": "m", "answers": {}, "usage": {}})
+
+    settings = DecisionSettings()
+    service = DecisionService(settings)
+    service._clients = {  # pyright: ignore[reportPrivateUsage]
+        "laya": httpx2.AsyncClient(
+            transport=httpx2.MockTransport(handler), base_url=settings.laya.base_url
+        )
+    }
+    calls: list[PredictCall] = [("state", {}) for _ in range(5)]
+
+    results = await service.predict_many(calls, limit=2)
+
+    assert len(results) == 5
+    assert peak <= 2
