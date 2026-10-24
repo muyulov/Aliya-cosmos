@@ -2,9 +2,9 @@
 
 约定：
 - 五项能力：chat / stream / chat_structured / chat_tools / 多模态。
-  多模态不单独开方法，由调用方给 chat 传 `model=svc.vision_model`。
-- chat / vision 是两个端点，各持一个客户端。不给 `endpoint=` 时按传进来的
-  模型名在两者之间挑。
+  多模态不单独开方法，由调用方给 chat 传 `endpoint="vision"`。
+- chat / vision 是两个端点，各持一个客户端。端点只按 `endpoint=` 显式选择，
+  不给就走 chat；不按模型名自动切换。
 - 工具调用只做单轮：返回 tool_calls，回传用 `assistant(tool_calls=...)` +
   `tool_result(...)`，循环由调用方写。
 - 日志不记消息正文：正文该不该记由调用方自己决定并自己打。
@@ -57,7 +57,7 @@ T = TypeVar("T", bound=BaseModel)
 #: 没配密钥时的统一措辞：start 的警告、health 的详情、调用时的报错共用
 NO_API_KEY = "未配置 api_key，LLM 功能不可用"
 
-#: 可显式选择的端点名；不给则退回「按模型名在 chat / vision 之间匹配」的旧规则
+#: 可显式选择的端点名；不给则走 chat
 type EndpointName = Literal["chat", "vision"]
 
 
@@ -133,7 +133,7 @@ class LLMService(Service):
 
     @property
     def vision_model(self) -> str:
-        """多模态模型：给 chat 传它就走 vision 端点。"""
+        """多模态模型：显式传 `endpoint="vision"` 调用时用的模型名。"""
         return self._config.vision.model
 
     # ---------- 生命周期 ----------
@@ -194,7 +194,7 @@ class LLMService(Service):
     ) -> str:
         """对话补全，返回消息正文。
 
-        `endpoint` 显式选端点（多模态传 `vision`）；不给则按模型名挑。
+        `endpoint` 显式选端点（多模态传 `vision`）；不给则走 chat。
         """
         client, slot, resolved = self._resolve_endpoint(model, endpoint)
         begin = time.perf_counter()
@@ -342,36 +342,21 @@ class LLMService(Service):
     def _resolve_endpoint(
         self, model: str | None, name: EndpointName | None
     ) -> tuple[AsyncOpenAI, LLMEndpointSettings, str]:
-        """挑端点：显式 name 优先；不给 name 时保持旧规则（在 chat / vision 之间按模型名匹配）。
+        """挑端点：只认显式 name，不给则走 chat（不按模型名自动切换）。
 
-        显式指定时，端点参数取该端点配置，model 仍可覆盖；缺客户端时抛 LLMConfigError。
+        端点参数取该端点配置，model 仍可覆盖；缺客户端时抛 LLMConfigError。
 
         两个端点收在一张表里，客户端与配置一次取齐；EndpointName 是闭合的 Literal，
         字典查找可被类型检查证明穷尽，新增端点时漏改会在判型阶段暴露，
         而不是像链式三元那样静默落进最后的 else 走 chat。
         """
-        if name is not None:
-            slots: dict[EndpointName, tuple[AsyncOpenAI | None, LLMEndpointSettings]] = {
-                "chat": (self._chat, self._config.chat),
-                "vision": (self._vision, self._config.vision),
-            }
-            client, slot = slots[name]
-            return self._require(client, name), slot, model or slot.model
-        return self._endpoint(model)
-
-    def _endpoint(self, model: str | None) -> tuple[AsyncOpenAI, LLMEndpointSettings, str]:
-        """挑端点：默认 chat；传 vision 的模型且 vision 已启用时走 vision。
-
-        其余情况按 chat 端点覆盖模型名。
-
-        vision 没启用时不接管自己的模型：两头 model 常常同名，
-        免得 chat 调用因为 vision 没配密钥而报错。
-        """
-        vision = self._config.vision
-        if model is not None and model == vision.model and self._vision is not None:
-            return self._vision, vision, model
-        chat = self._config.chat
-        return self._require(self._chat, "chat"), chat, model or chat.model
+        key: EndpointName = "chat" if name is None else name
+        slots: dict[EndpointName, tuple[AsyncOpenAI | None, LLMEndpointSettings]] = {
+            "chat": (self._chat, self._config.chat),
+            "vision": (self._vision, self._config.vision),
+        }
+        client, slot = slots[key]
+        return self._require(client, key), slot, model or slot.model
 
     @staticmethod
     def _require(client: AsyncOpenAI | None, name: str) -> AsyncOpenAI:

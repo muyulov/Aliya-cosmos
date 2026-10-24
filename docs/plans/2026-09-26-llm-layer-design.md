@@ -18,10 +18,10 @@
    用户要求）。本文决策 4 的「单端点 + 三个模型槽位」作废：端点配置抽成
    `LLMEndpointSettings`（`base_url` / `api_key` / `model` / `timeout` / `retries` /
    `structured_mode` / `temperature` / `max_tokens`），`LLMSettings` 持有 `chat` 与
-   `vision` 两份，服务各建一个客户端。路由规则：默认走 chat，传
-   `model=svc.vision_model` 且 vision 已启用时走 vision；vision 未启用时不接管自己的
-   模型（两头 model 常常同名，否则 chat 会被 vision 的缺失密钥拖垮）。`embed()`
-   与 `embed_model` 一并删除。
+   `vision` 两份，服务各建一个客户端。`embed()` 与 `embed_model` 一并删除。
+   路由规则（2026-10-24 起）：**只按显式 `endpoint=` 选择**，不给就走 chat，
+   不按模型名自动切换。初版曾用「传 `model=svc.vision_model` 且 vision 已启用时
+   走 vision」，已移除——两头 model 常常同名，按名推断容易误路由。
 4. **`health()` 的 `detail` 按状态区分**（2026-09-30，与向量层一起改）：没客户端时只有
    `state is RUNNING` 才说 `NO_API_KEY`，否则复用 `core/service/base.not_running_detail()`——
    `stop()` 之后客户端被清空、但密钥其实是配了的，一律套用 `NO_API_KEY` 是误导。
@@ -165,7 +165,7 @@ class LLMService(Service):
 
 要点：
 
-- **模型解析**：`chat` / `stream` / `chat_tools` / `chat_structured` 用 `chat_model`；`embed` 用 `embed_model`（留空 → `LLMConfigError`）。多模态**不新增方法**，由调用方传 `model=svc.vision_model`。因此服务暴露三个只读属性 `chat_model` / `embed_model` / `vision_model`（返回已解析回退后的值）。
+- **模型解析**：`chat` / `stream` / `chat_tools` / `chat_structured` 默认走 chat 端点；`embed` 用 `embed_model`（留空 → `LLMConfigError`）。多模态**不新增方法**，由调用方显式传 `endpoint="vision"`（双端点改动前为传 `model=svc.vision_model`）。因此服务暴露三个只读属性 `chat_model` / `embed_model` / `vision_model`（返回已解析回退后的值）。
 - **`temperature` / `max_tokens` 传给 SDK 前必须把 `None` 换成 `NOT_GIVEN`**：SDK 的 `_transform_typeddict` 只剔除 `NotGiven`，显式 `None` 会被原样序列化成 JSON `null`（端点多半 400 或当 0 处理）。配置层保留 `None` 表达"未设置"，转换只发生在调用边界（`from openai import NOT_GIVEN`）。
 - **`chat` 返回 `str`**：`choices[0].message.content` 为 `None`（如被工具调用占用）时抛 `LLMResponseError`。
 - **`stream` 是 async generator**：逐 `delta.content` yield 非空片段；不自动拼接（调用方要整串自己 `join`）。

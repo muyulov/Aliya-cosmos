@@ -117,7 +117,7 @@ log:
 | --- | --- | --- |
 | `base_url` | `https://api.openai.com/v1` | 端点地址，接 DeepSeek 等兼容端点时改成对应地址 |
 | `api_key` | 空 | 密钥，YAML 里写 `${DEEPSEEK_API_KEY:}` 由 `.env` 提供；留空则该端点不可用（只警告，不影响启动） |
-| `model` | `gpt-4o-mini` | 该端点的模型；给 `chat` 传 `model=svc.vision_model` 即走 vision 端点 |
+| `model` | `gpt-4o-mini` | 该端点的模型；走 vision 端点需显式传 `endpoint="vision"` |
 | `timeout` | `60` | 单次请求超时秒数，必须为正数 |
 | `retries` | `2` | SDK 重试次数，`0` 关闭 |
 | `structured_mode` | `json_schema` | 结构化输出模式，兼容端点不支持时改 `json_object` |
@@ -259,9 +259,9 @@ async def main(svc: LLMService, picture_url: str) -> None:
         messages += [assistant(tool_calls=call_reply.tool_calls), tool_result(call.id, "晴 26℃")]
         final = await svc.chat(messages)
 
-    # 多模态：不单独开方法，传 vision 端点的模型即走 vision 端点
+    # 多模态：不单独开方法，显式指定 vision 端点
     seen = await svc.chat(
-        [user_with_images("这是什么", image_url(picture_url))], model=svc.vision_model
+        [user_with_images("这是什么", image_url(picture_url))], endpoint="vision"
     )
 ```
 
@@ -271,7 +271,7 @@ async def main(svc: LLMService, picture_url: str) -> None:
 | --- | --- |
 | 不记正文 | 日志只记模型 / 端点 / 耗时 / token 用量；消息正文该不该记由调用方自己决定并自己打 |
 | 不自动多轮 | `chat_tools` 只发一轮并返回 `tool_calls`，回传用 `assistant(tool_calls=...)` + `tool_result(...)`，循环由调用方写 |
-| chat / vision 两端点 | 两个端点各自带连接与采样参数，可指向同一服务也可分开接；给 `chat` 传 `model=svc.vision_model` 就走 vision 端点，vision 没启用时不会接管（两头的 model 常常同名）。用 Chat Completions 而非 Responses API，因为兼容端点普遍只实现前者 |
+| chat / vision 两端点 | 两个端点各自带连接与采样参数，可指向同一服务也可分开接；端点只按 `endpoint=` 显式选（多模态传 `"vision"`），不给就走 chat——不按模型名自动切换。用 Chat Completions 而非 Responses API，因为兼容端点普遍只实现前者 |
 | 缺密钥不 fail fast | 端点没配 `api_key` 时只警告、不建客户端；两个端点全没配健康检查才 unhealthy，调用时才抛 `LLMConfigError` |
 | 重试交给 SDK | 超时与重试由端点的 `timeout` / `retries` 控制；流式一旦开始消费就不再重试，断流是否重放由调用方决定 |
 | `json_object` 要提示词配合 | 该模式要求提示词里出现 json 字样，属调用方责任 |

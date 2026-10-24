@@ -60,8 +60,8 @@ llm:
     temperature: null # null = 不传该参数，用服务端默认；传值则覆盖
     max_tokens: null # 同上。结构化输出建议给值，避免输出被截断
   vision:
-    # 多模态走这个端点：给 svc.chat 传 model=svc.vision_model 就切过来。
-    # 本端点没配 api_key 时不会接管自己的模型，chat 调用不受影响。
+    # 多模态走这个端点：调用时显式传 endpoint="vision" 才切过来（不按 model 名自动切换）。
+    # 本端点没配 api_key 时只是它自己不可用，不指定 endpoint 的调用仍走 chat。
     base_url: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY:}
     model: deepseek-flash

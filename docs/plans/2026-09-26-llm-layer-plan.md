@@ -226,7 +226,7 @@ git commit -m "docs(llm): 补充 LLM 层文档与配置项"
 
 ### 后续变更：配置改双端点、移除 embedding
 
-`llm` 下改为 `chat` / `vision` 两个端点（字段同 `LLMEndpointSettings`），`embed()` 删除。服务持有两个客户端，按 `model` 覆盖值挑端点（见 design 补记第 3 条）。影响：`app.yaml`、`LLMSettings` / `LLMEndpointSettings`、`client.build_client`、`LLMService` 的生命周期与全部调用方法、测试注入点由 `_client` 变 `_chat` / `_vision`、README 配置项表与示例。
+`llm` 下改为 `chat` / `vision` 两个端点（字段同 `LLMEndpointSettings`），`embed()` 删除。服务持有两个客户端，端点只按显式 `endpoint=` 选择（不给走 chat，不按模型名自动切换；见 design 补记第 3 条）。影响：`app.yaml`、`LLMSettings` / `LLMEndpointSettings`、`client.build_client`、`LLMService` 的生命周期与全部调用方法、测试注入点由 `_client` 变 `_chat` / `_vision`、README 配置项表与示例。
 
 ---
 

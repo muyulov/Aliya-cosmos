@@ -139,7 +139,7 @@ def _service(
     chat: LLMEndpointSettings | None = None,
     vision: LLMEndpointSettings | None = None,
 ) -> LLMService:
-    """默认两头都配好密钥，vision 的模型名与 chat 不同，便于分辨走了哪个端点。"""
+    """默认两头都配好密钥；vision 的模型名与 chat 不同，便于分辨显式选中的是哪个端点。"""
     return LLMService(
         LLMSettings(
             chat=chat or _endpoint(),
@@ -282,7 +282,8 @@ def test_两个端点各有自己的模型() -> None:
     assert _service().vision_model == "vision-m"
 
 
-async def test_传vision模型时走vision端点() -> None:
+async def test_传vision模型名不自动切换端点() -> None:
+    """端点只认 endpoint=：光给 vision 的模型名仍走 chat，不按模型名自动切换。"""
     service = _service()
     chat_client = _FakeClient(completion=_completion())
     vision_client = _FakeClient(completion=_completion())
@@ -290,12 +291,24 @@ async def test_传vision模型时走vision端点() -> None:
     _attach(service, vision_client, vision=True)
 
     _ = await service.chat([user("看图")], model=service.vision_model)
+    assert chat_client.calls[0]["model"] == "vision-m"
+    assert vision_client.calls == []
+
+
+async def test_显式endpoint走vision端点() -> None:
+    service = _service()
+    chat_client = _FakeClient(completion=_completion())
+    vision_client = _FakeClient(completion=_completion())
+    _attach(service, chat_client)
+    _attach(service, vision_client, vision=True)
+
+    _ = await service.chat([user("看图")], endpoint="vision", model=service.vision_model)
     assert vision_client.calls[0]["model"] == "vision-m"
     assert chat_client.calls == []
 
 
-async def test_vision端点没启用时不接管() -> None:
-    """两头的 model 常常同名：vision 没配密钥时不能让 chat 调用跟着报错。"""
+async def test_vision端点没启用时不打扰chat() -> None:
+    """两头的 model 常常同名：vision 没配密钥时，不显式指定就仍走 chat。"""
     service = _service(vision=_endpoint(model="vision-m", api_key=""))
     client = _FakeClient(completion=_completion())
     _attach(service, client)

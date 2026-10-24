@@ -124,6 +124,7 @@ class LLMSettings(BaseModel):
     """LLM 层配置：chat 与 vision 各是一个端点。
 
     两个头可以指向同一个服务（多数兼容端点如此），也可以分开接不同供应商。
+    走哪个端点由调用时的 `endpoint=` 显式决定（不给走 chat），配置本身不参与路由。
     """
 
     chat: LLMEndpointSettings = LLMEndpointSettings()
