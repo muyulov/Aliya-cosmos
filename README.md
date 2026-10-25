@@ -400,6 +400,8 @@ async def main(svc: DecisionService, message: str) -> None:
 
 `core/agent/` 把「工具怎么声明、怎么交给模型、结果怎么回填」「Skill 怎么按需披露」「MCP server 怎么接入」收成一个小库。**ReAct 循环仍由调用方写**：拿 `reply.tool_calls` 判断要不要继续、把 `assistant(tool_calls=...)` 与各条 `tool_result` 追加回 `messages`、决定最多几轮。
 
+完整的开发指南（工具/Skill/MCP 的扩展流程、ReAct 循环写法、错误与日志约定、测试门禁）见 `docs/agent-development.md`。
+
 ```python
 from core.agent import MCPManager, SkillLibrary, ToolRegistry, system_prompt, tool
 from core.llm import LLMService, assistant, tool_result, user
