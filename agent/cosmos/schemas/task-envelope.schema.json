@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aliya-cosmos.local/schemas/task-envelope.schema.json",
+  "title": "TaskEnvelope",
+  "description": "cosmos 下发给子 agent 的任务信封。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "request_id",
+    "trace_id",
+    "agent_id",
+    "issued_by",
+    "issued_at",
+    "deadline_at",
+    "priority",
+    "intent",
+    "input",
+    "context",
+    "callback",
+    "policy"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task_id": {"type": "string", "minLength": 1},
+    "request_id": {"type": "string", "minLength": 1},
+    "trace_id": {"type": "string", "minLength": 1},
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{1,31}$"
+    },
+    "parent_task_id": {"type": ["string", "null"]},
+    "retry_of": {"type": ["string", "null"]},
+    "issued_by": {"const": "cosmos"},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "deadline_at": {"type": "string", "format": "date-time"},
+    "priority": {"enum": ["critical", "high", "normal", "low"]},
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary"],
+      "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "raw_text": {"type": ["string", "null"]},
+        "action": {"type": "string"},
+        "objects": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "input": {"type": "object"},
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "workspace"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "workspace": {"type": "string", "pattern": "^/"},
+        "locale": {"type": "string"},
+        "attachments": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/attachment"}
+        }
+      }
+    },
+    "callback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events_url", "artifacts_url", "token", "heartbeat_ms"],
+      "properties": {
+        "events_url": {"type": "string", "format": "uri"},
+        "artifacts_url": {"type": "string", "format": "uri"},
+        "token": {"type": "string", "minLength": 1},
+        "heartbeat_ms": {"type": "integer", "minimum": 1000, "maximum": 60000}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout_ms", "max_retries", "retry_safe", "requires_approval"],
+      "properties": {
+        "timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 3600000},
+        "max_retries": {"type": "integer", "minimum": 0, "maximum": 10},
+        "retry_safe": {"type": "boolean"},
+        "requires_approval": {"type": "boolean"}
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "route_source": {"enum": ["desktop", "natural_language", "auto", "retry"]},
+        "plan_id": {"type": ["string", "null"]},
+        "step_id": {"type": ["string", "null"]}
+      }
+    }
+  },
+  "$defs": {
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "mime", "sha256"],
+      "properties": {
+        "artifact_id": {"type": "string"},
+        "name": {"type": "string"},
+        "mime": {"type": "string"},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "uri": {"type": "string"}
+      }
+    }
+  }
+}

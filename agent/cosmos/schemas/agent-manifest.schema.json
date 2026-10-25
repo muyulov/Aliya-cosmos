@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aliya-cosmos.local/schemas/agent-manifest.schema.json",
+  "title": "AgentManifest",
+  "description": "cosmos 子 agent 注册清单。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "agent_id",
+    "display_name",
+    "version",
+    "summary",
+    "description",
+    "icon",
+    "capabilities",
+    "boundaries",
+    "routing",
+    "transport",
+    "concurrency",
+    "permissions",
+    "desktop"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{1,31}$"
+    },
+    "display_name": {"type": "string", "minLength": 1, "maxLength": 32},
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+([+-][0-9A-Za-z.-]+)?$"
+    },
+    "summary": {"type": "string", "minLength": 1, "maxLength": 120},
+    "description": {"type": "string", "minLength": 1},
+    "icon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset"],
+      "properties": {
+        "asset": {"type": "string", "minLength": 1},
+        "accent": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"}
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "description", "risk"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+          },
+          "description": {"type": "string", "minLength": 1},
+          "risk": {"enum": ["read", "write", "destructive", "external"]},
+          "input_schema": {"type": "object"}
+        }
+      }
+    },
+    "boundaries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_only", "allowed_paths", "denied_actions"],
+      "properties": {
+        "workspace_only": {"type": "boolean"},
+        "allowed_paths": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^/"}
+        },
+        "denied_actions": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "max_input_bytes": {"type": "integer", "minimum": 1024, "maximum": 10485760},
+        "max_artifacts": {"type": "integer", "minimum": 0, "maximum": 128}
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["keywords"],
+      "properties": {
+        "keywords": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "examples": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "embedding_text": {"type": "string"}
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["in_process", "http"]},
+        "endpoint": {"type": "string", "format": "uri"},
+        "health_path": {"type": "string", "pattern": "^/"},
+        "describe_path": {"type": "string", "pattern": "^/"},
+        "token": {"type": "string"},
+        "timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 3600000},
+        "start_timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 120000},
+        "heartbeat_ms": {"type": "integer", "minimum": 1000, "maximum": 60000},
+        "cancel_grace_ms": {"type": "integer", "minimum": 0, "maximum": 60000}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "http"}}},
+          "then": {"required": ["endpoint"]}
+        }
+      ]
+    },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "max_running", "queue_limit"],
+      "properties": {
+        "mode": {"enum": ["serial_write", "parallel"]},
+        "max_running": {"type": "integer", "minimum": 1, "maximum": 16},
+        "queue_limit": {"type": "integer", "minimum": 1, "maximum": 1000}
+      }
+    },
+    "features": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["cancel", "input_request", "approval", "artifacts", "pause"]}
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scopes"],
+      "properties": {
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"}
+        },
+        "approval_required_for": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "desktop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group", "order", "pinned", "visible", "size"],
+      "properties": {
+        "group": {"type": "string", "minLength": 1},
+        "order": {"type": "integer", "minimum": 0},
+        "pinned": {"type": "boolean"},
+        "visible": {"type": "boolean"},
+        "size": {"enum": ["1x1", "2x1", "2x2"]}
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "on_started": {"type": "boolean"},
+        "on_completed": {"type": "boolean"},
+        "on_failed": {"type": "boolean"},
+        "progress_step": {"type": "integer", "minimum": 0, "maximum": 100}
+      }
+    },
+    "input_schema": {"type": "object"}
+  }
+}

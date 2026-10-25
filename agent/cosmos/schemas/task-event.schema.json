@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aliya-cosmos.local/schemas/task-event.schema.json",
+  "title": "TaskEvent",
+  "description": "子 agent 上报给 cosmos 的任务事件。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "task_id",
+    "agent_id",
+    "seq",
+    "type",
+    "at",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "event_id": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{1,31}$"
+    },
+    "seq": {"type": "integer", "minimum": 1},
+    "type": {
+      "enum": [
+        "task.started",
+        "task.progress",
+        "task.heartbeat",
+        "task.log",
+        "task.artifact",
+        "task.needs_input",
+        "task.approval_required",
+        "task.completed",
+        "task.failed",
+        "task.cancelled"
+      ]
+    },
+    "at": {"type": "string", "format": "date-time"},
+    "payload": {
+      "type": "object",
+      "properties": {
+        "started_at": {"type": "string", "format": "date-time"},
+        "progress": {"type": "number", "minimum": 0, "maximum": 1},
+        "current_step": {"type": ["string", "null"]},
+        "message": {"type": "string"},
+        "elapsed_ms": {"type": "integer", "minimum": 0},
+        "queue_position": {"type": "integer", "minimum": 0},
+        "health": {"enum": ["healthy", "degraded", "unhealthy"]},
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu_pct": {"type": "number", "minimum": 0},
+            "mem_mb": {"type": "number", "minimum": 0}
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "elapsed_ms": {"type": "integer", "minimum": 0},
+            "steps": {"type": "integer", "minimum": 0},
+            "tokens": {"type": "integer", "minimum": 0}
+          }
+        },
+        "level": {"enum": ["debug", "info", "warning", "error"]},
+        "fields": {"type": "object"},
+        "artifact": {"$ref": "task-result.schema.json#/$defs/artifact"},
+        "artifacts": {
+          "type": "array",
+          "items": {"$ref": "task-result.schema.json#/$defs/artifact"}
+        },
+        "input_request_id": {"type": "string"},
+        "question": {"type": "string"},
+        "input_schema": {"type": "object"},
+        "allow_free_text": {"type": "boolean"},
+        "approval_id": {"type": "string"},
+        "action": {"type": "string"},
+        "risk": {"enum": ["read", "write", "destructive", "external"]},
+        "summary": {"type": "string"},
+        "details": {"type": "object"},
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "label"],
+            "properties": {
+              "id": {"type": "string"},
+              "label": {"type": "string"},
+              "agent_id": {"type": "string"}
+            }
+          }
+        },
+        "expires_at": {"type": "string", "format": "date-time"},
+        "result": {"$ref": "task-result.schema.json"},
+        "error": {"$ref": "task-result.schema.json#/$defs/error"},
+        "partial_output": {"type": "object"},
+        "reason": {"type": "string"},
+        "cancelled_by": {"enum": ["aliya", "cosmos", "agent", "timeout"]}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "task.started"}}},
+      "then": {"required": ["payload"], "properties": {"payload": {"required": ["started_at"]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "task.progress"}}},
+      "then": {"properties": {"payload": {"required": ["progress"]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "task.heartbeat"}}},
+      "then": {"properties": {"payload": {"required": ["elapsed_ms", "health"]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "task.log"}}},
+      "then": {"properties": {"payload": {"required": ["level", "message"]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "task.artifact"}}},
+      "then": {
+        "properties": {
+          "payload": {
+            "anyOf": [
+              {"required": ["artifact"]},
+              {"required": ["artifacts"]}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"type": {"const": "task.needs_input"}}},
+      "then": {
+        "properties": {
+          "payload": {"required": ["input_request_id", "question", "input_schema", "expires_at"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"type": {"const": "task.approval_required"}}},
+      "then": {
+        "properties": {
+          "payload": {"required": ["approval_id", "action", "risk", "summary", "expires_at"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"type": {"const": "task.completed"}}},
+      "then": {"properties": {"payload": {"required": ["result"]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "task.failed"}}},
+      "then": {"properties": {"payload": {"required": ["error"]}}}
+    },
+    {
+      "if": {"properties": {"type": {"const": "task.cancelled"}}},
+      "then": {"properties": {"payload": {"required": ["reason"]}}}
+    }
+  ]
+}

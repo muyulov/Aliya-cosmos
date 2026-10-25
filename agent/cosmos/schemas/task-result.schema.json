@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aliya-cosmos.local/schemas/task-result.schema.json",
+  "title": "TaskResult",
+  "description": "子 agent 完成、失败、取消或超时后的最终结果。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "agent_id",
+    "status",
+    "started_at",
+    "finished_at",
+    "output",
+    "artifacts",
+    "metrics",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task_id": {"type": "string", "minLength": 1},
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{1,31}$"
+    },
+    "status": {"enum": ["succeeded", "failed", "cancelled", "timeout"]},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "output": {"type": "object"},
+    "artifacts": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "elapsed_ms": {"type": "integer", "minimum": 0},
+        "steps": {"type": "integer", "minimum": 0},
+        "tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/error"}
+      ]
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "kind", "name", "mime", "size_bytes", "sha256", "uri"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "mime": {"type": "string", "minLength": 1},
+        "size_bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "uri": {"type": "string", "minLength": 1},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "message": {"type": "string", "minLength": 1},
+        "retryable": {"type": "boolean"},
+        "details": {"type": "object"}
+      }
+    }
+  }
+}
