@@ -262,7 +262,7 @@ async with MCPManager.from_file() as mcp:
 
 | 维度 | 规则 |
 | --- | --- |
-| 名称 | `{server}__{tool}`；非法字符替换为 `_`，超 64 字符截断并 WARNING；撞名由注册表抛 `ToolDefinitionError` |
+| 名称 | `{server}__{tool}`；非 `[A-Za-z0-9_-]` 的字符逐个替换为 `_`（server 名用中文会整段变下划线，建议配置里用英文名），超 64 字符截断并 WARNING；撞名由注册表抛 `ToolDefinitionError` |
 | 描述 | server 给的 `description`，空则回退到工具名 |
 | 参数 schema | `inputSchema` **原样**放进 `Tool.parameters`，不转 pydantic |
 | 参数校验 | 只要求 JSON 可解析且是对象；**不引 `jsonschema`**，schema 校验交给 server |
@@ -411,35 +411,39 @@ async with MCPManager.from_file() as mcp:
 
 ---
 
-## 附：事实查证记录（2026-10-25）
+## 附：事实查证记录（2026-10-25，按 mcp 2.3.0 实测订正）
 
 **MCP Python SDK**
 
-- PyPI 包名 `mcp`，当前 2.3.0（v2 稳定线），要求 Python ≥3.10。
+- PyPI 包名 `mcp`，实际安装 2.3.0（v2 稳定线），要求 Python ≥3.10；`FastMCP` 已改名为
+  `mcp.server.mcpserver.MCPServer`。
 - stdio：`from mcp import ClientSession, StdioServerParameters`、`from mcp.client.stdio import stdio_client`；
   `stdio_client(params)` 是异步上下文管理器，yield `(read, write)` 两个值。
 - Streamable HTTP：`from mcp.client.streamable_http import streamable_http_client`；
-  yield `(read_stream, write_stream, _)` **三个值**；自定义 header/超时先建 `httpx.AsyncClient` 传 `http_client=`。
+  v2 只 yield `(read, write)` **两个值**（v1 的第三个 session id 已去掉）；
+  自定义 header 先建 `httpx2.AsyncClient` 传 `http_client=`（v2 直接用 httpx2）。
 - `ClientSession(read, write)` 是异步上下文管理器，必须先 `await session.initialize()`。
-- `list_tools()` → `.tools`，每项含 `name` / `description` / `inputSchema`。
-- `call_tool(name, arguments={...})` → `CallToolResult`，字段 `content` / `structuredContent` / `isError`。
-- `content` 元素：`TextContent(.text)` / `ImageContent(.data, .mimeType)` /
-  `EmbeddedResource(.resource → TextResourceContents(.uri, .text) | BlobResourceContents(.uri))`。
-- 测试辅助：`mcp.shared.memory.create_connected_server_and_client_session`（进程内内存传输）。
-- 注意：MCP 规范 2026-07-28 修订取消了 initialize 握手，而 SDK 2.x 仍面向 2025-11-25 修订；
-  实际安装版本的行为以实测为准。
+- `list_tools()` → `.tools`，每项字段是 snake_case：`name` / `description` / `input_schema`。
+- `call_tool(name, arguments={...})` → `CallToolResult`，字段 `content` / `structured_content` / `is_error`。
+- `content` 元素：`TextContent(.text)` / `ImageContent(.data, .mime_type)` /
+  `EmbeddedResource(.resource → TextResourceContents | BlobResourceContents)`；另有 `AudioContent`。
+- `stdio_client` 的 env 由 SDK 自己合并：`get_default_environment() | server.env`，因此配置里只写增量变量。
+- v2 没有 `create_connected_server_and_client_session`；进程内测试用
+  `create_client_server_memory_streams` + `MCPServer._lowlevel_server.run(...)` + `ClientSession`，
+  可真跑 `initialize` / `list_tools` / `call_tool`。
 
 **Skill 目录约定**
 
 - `SKILL.md` 用 YAML frontmatter 声明 `name` / `description`，正文为 Markdown；
   渐进式披露即「system 只放索引、正文按需读取」。
+- 仓库里只放 `data/skills/README.md` 说明格式，不塞示例技能，避免示例被真的注入生产提示。
 
 ---
 
-## 附：动工前需实测的点
+## 附：实施期确认的点
 
-1. `mcp` 2.3.0 与现有 `httpx2` 能否共存（包名不同，但传递依赖版本需确认）；
-2. `stdio_client` 的 `env` 是否与父进程环境合并（文档未明确），不合并就自行合并再传入；
-3. 取消持有 `async with` 的 MCP 任务时，`__aexit__` 抛出的 `ExceptionGroup` 形态与处理方式；
-4. `npx` 首次拉起 server 的实际耗时，据此校准默认 `timeout`；
-5. `create_connected_server_and_client_session` 是否已代为 `initialize`（决定测试里是否要显式再调）。
+1. `mcp` 2.3.0 与 `httpx2` 同栈（SDK 自己就用 httpx2），无依赖冲突；
+2. 取消持有 `async with` 的 MCP 任务时可能有 `ExceptionGroup`，`_shutdown` 用
+   `gather(return_exceptions=True)` 一并吞掉；
+3. 配置文件里传输字段叫 `type`（生态通用），代码里字段名是 `transport`，用 pydantic alias 对应；
+4. `MCPConfig.servers` 带 alias `mcpServers`，程序内构造请走 `model_validate` 或字段名 `servers=`。
