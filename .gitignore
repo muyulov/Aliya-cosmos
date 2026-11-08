@@ -17,8 +17,10 @@ venv/
 logs/
 *.log
 
-# 运行时数据（记忆库等本地产物，不入库）
+# 运行时数据（记忆库、桌面布局、统计、推演轨迹等本地产物，不入库）
 data/memory/
+data/state/*
+!data/state/README.md
 
 # 测试与覆盖率
 .pytest_cache/
