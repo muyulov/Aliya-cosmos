@@ -11,6 +11,7 @@
 | `desktop.json` | `DesktopService` | 桌面布局、置顶、分组覆盖 | 可删，重建默认布局 |
 | `terminal_stats.json` | `TerminalService` | 按天聚合的消息数、活跃小时、响应延迟、主动消息发送/回复 | 可删，历史画像归零 |
 | `proactive.json` | `TerminalService` | 当日主动消息计数与未回应降频状态 | 可删，节流状态重置 |
+| `dead_letters.jsonl` | `TerminalService` | 出站投递重试耗尽的消息，按行 JSON 追加 | 可删；删前先确认是否需要补发 |
 | `world_trace.jsonl` | `WorldBridgeService` | 每次世界推演一行：触发、显著性、置信度、信念、行动选择 | 可删，校准样本丢失 |
 | `world_trace.jsonl.1` | `WorldBridgeService` | 轨迹超过 `trace_max_bytes` 后的轮转文件 | 可删 |
 | `world_calibration.json` | 校准 CLI | 温度、阈值、触发统计报告 | 可删，可重新生成 |

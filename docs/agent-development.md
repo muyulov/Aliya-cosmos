@@ -1,4 +1,4 @@
-# Cosmos Agent 开发文档
+# cosmos Agent 开发文档
 
 - 适用版本：`core/agent`（工具 / Skill / MCP）
 - 面向读者：在 aliya-cosmos 上开发 Agent 能力的工程师
@@ -656,3 +656,48 @@ MCP 相关测试优先注入 `connector` 或假会话，避免依赖 `npx` 与�
 - 工具权限、人工审批、危险操作拦截
 
 这些能力的取舍各不相同，放在调用方能保持本层最小且可预测。
+
+---
+
+## 15. 主 agent 装配（agent/cosmos）
+
+`agent/cosmos` 是 Aliya 的主 agent，本身不改 `core` 的任何行为，只在其上叠加 10 个服务：
+
+```text
+core 的 4 个服务（clock / embedding / llm / decision）
+  + BusService
+  + AgentRegistryService / AgentRuntimeService / DesktopService / PresenceService
+  + ConversationService / DispatchService / WorldBridgeService / TerminalService / ControlService
+= 14 个服务
+```
+
+装配入口在 `agent/cosmos/assembly.py`，进程入口在 `agent/cosmos/app.py`：
+
+```bash
+uv run python -m agent.cosmos.app
+```
+
+### 15.1 与 core 的边界
+
+| 约束 | 落地方式 |
+| --- | --- |
+| `core` 不 import `agent` | 装配、配置模型转换（`bootstrap.to_card`）都放在 `agent/cosmos` |
+| 服务由容器统一启停 | 全部是 `core.service.Service` 子类，依赖按类型声明 |
+| 配置只注入 `AgentSettings` | 容器只索引 `Settings` 的顶层节点，嵌套的 `AgentCosmosSettings` 不注入 |
+| 时间统一来源 | 所有服务构造器注入 `ClockService`，不用 `datetime.now()` |
+
+### 15.2 端口与 setter 注入
+
+容器只接受 `Service` 与配置节点两类参数，Protocol 不能注入。因此：
+
+- `BusService` 持有 `MessageBus` / `EventBus` 的进程内实现，其他服务按类型依赖它；
+- `UserChannelPort` / `WorldReasoningPort` 由部署方在 `start()` 前用 `set_user_channel()` / `set_port()` 注入；
+- 链路状态用 `set_link_provider()` 反向注册，避免 `WorldBridgeService ↔ TerminalService` 构造器循环依赖。
+
+### 15.3 新增子 agent
+
+1. 写 `async def handle(request, ctx) -> AgentResult`（参考 `agent/cosmos/registry/echo.py`）；
+2. 在 `data/config/cosmos.yaml` 的 `agent.cosmos.agents[]` 登记 `id / module / handler / card`；
+3. 重启进程，`AgentRegistryService.start()` 会自动导入并注册；卡片非法（id、能力、schema、超时、同步 handler）会在启动期 fail fast。
+
+`agent/aliya` 与真实用户通道不在 cosmos 内实现：Aliya 只依赖 `agent.cosmos.contracts` 与 `ControlService`，用户通道由部署方实现 `UserChannelPort` 后注入。

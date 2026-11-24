@@ -56,5 +56,5 @@ asyncio_mode = "auto"
 addopts = "-q"
 
 [tool.coverage.run]
-source = ["core"]
-omit = ["core/main.py"]
+source = ["core", "agent"]
+omit = ["core/main.py", "agent/cosmos/app.py"]

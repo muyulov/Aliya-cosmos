@@ -1,0 +1,226 @@
+# cosmos agent 配置样例
+#
+# 用法：把 agent: 整段并入 data/config/cosmos.yaml。
+# 注意：本文件只是带注释的样例，不会被进程直接加载；真正生效的是
+#       data/config/cosmos.yaml（缺失字段回退 core/config/settings.py 默认值）。
+# 说明：字段与 core/config/settings.py 的 AgentSettings 一一对应，
+#       加载时由 pydantic 校验；未知键在加载期 WARNING 并忽略。
+# 约定：
+#   - 字段与各章文档一一对应，不存在「写了但代码不认」的隐式键；
+#     未知键在加载期 WARNING 并忽略（Settings 默认 extra=ignore）。
+#   - 密钥类值一律用占位符 ${VAR} / ${VAR:默认}，不写明文。
+#   - 相对路径按当前工作目录解析。
+
+agent:
+  cosmos:
+    # ---------- 契约 ----------
+    contract:
+      api_version: "1.0" # 主版本不一致时拒绝连接，不做兼容猜测
+      contract_version: "1.0.0" # 契约模型版本；Aliya 侧校验主版本
+      state_dir: data/state # 桌面布局等运行数据，不进配置文件
+
+    # ---------- 通讯链路（01-architecture.md 3.1）----------
+    # 人设里「曲率航行期间通讯中断」对应这里的 down：双向消息进队列，恢复后重放。
+    link:
+      heartbeat_seconds: 30 # 超过此时长没有心跳判 unstable
+      down_after_seconds: 90 # 超过此时长判 down
+      queue_limit: 1000 # 中断期积压上限，超出丢弃最旧并告警
+      replay_on_recover: true
+      suppress_proactive_when_down: true
+
+    # ---------- 调度（05-dispatch.md） ----------
+    dispatch:
+      mode: suggest # suggest（默认，交 Aliya 确认）/ auto（高置信度直接执行）
+      auto_threshold: 0.75 # auto 模式的最低置信度
+      min_confidence: 0.6 # 低于此值转 clarify，不硬上
+      high_threshold: 0.9 # 一级检索达到此分数时跳过模型精排
+      max_candidates: 5 # 精排时最多给模型几张卡片
+      max_parallel: 3 # 整批并发上限
+      dedupe_window_seconds: 60 # 幂等去重窗口
+      plan_timeout_seconds: 5 # plan 调用超时
+      match_fallback_on_error: true # 匹配模型失败时回退到检索结果
+
+    # ---------- 桌面（03-desktop.md） ----------
+    desktop:
+      groups:
+        - {key: dev, title: 开发工具, order: 10}
+        - {key: media, title: 内容处理, order: 20}
+        - {key: general, title: 通用, order: 90}
+      progress_throttle_ms: 1000 # 进度事件尾沿节流
+      reconcile_seconds: 30 # 全量对账周期
+      max_content_chars: 2000 # 单条回传文本上限，超出按段落分段
+      history_limit: 5 # 单卡详情里的最近任务数
+
+    # ---------- 用户状态（04-presence.md） ----------
+    presence:
+      enabled: true # 总开关，false 时 get_presence() 返回 unknown 快照
+      ttl_seconds: 30 # 超过此时长的快照标 stale
+      fields:
+        online: true
+        activity: true
+        typing: true
+        mood: true
+        task_context: true
+        env: true
+      idle_after_seconds: 300 # online → away
+      offline_after_seconds: 900 # away → offline
+      mood:
+        provider: decision # decision（core.decision，便宜）/ llm / off
+        backend: laya # decision 后端的端点名，confidence 阈值需按后端单独校准
+        min_confidence: 0.5 # 低于此值不给结论
+        stale_after_seconds: 1800 # 超过此时长回落为 unknown
+        delta_threshold: 0.25 # 变化超过该值才推送
+        window_messages: 5 # 参与打分的最近消息条数
+      push:
+        min_interval_seconds: 5 # 同一字段的最小推送间隔
+        typing_settle_seconds: 3 # 输入停顿时长，视为结束
+        mood_min_interval_seconds: 300
+      panel:
+        show_mood: false # 情绪默认不进常驻面板（对等隐私，见 04 章 3.4）
+        show_device: false
+        aliya_can_hide: true # Aliya 可要求关闭任一字段
+        collapsed_fields: [mood, env.device]
+      privacy:
+        allow_timezone: true
+        allow_device: true
+        retain_raw_hours: 24 # 原始快照保留（内存）
+        retain_aggregate_days: 30 # 聚合指标保留（本地）
+        expose_to_subagents: false # 子 agent 默认不可见
+        never_echo_to_user: true # 状态永不写进给用户的消息
+        address_as: 你 # 对 Aliya 呈现时对端的称呼，禁止「玩家/用户」
+      wording:
+        # 可解读表述的阈值文案，便于按语言/风格调整；为 null 时用内置默认
+        online_idle_template: null
+        offline_night_template: null
+        unknown_summary: 用户状态未知
+
+    # ---------- 通信终端（06-terminal.md） ----------
+    terminal:
+      conversation_turns: 20 # 信封里携带的最近轮次
+      summary_chars: 400 # 更早内容的摘要长度上限
+      context_max_tokens: 4000 # 上下文预算；超限先摘要再裁剪
+      summary_batch_turns: 4 # 每积累几轮旧内容压一次摘要
+      session_ttl_hours: 72 # 空闲会话回收
+      max_sessions: 200 # 会话数上限；超出按最久未活跃回收
+      pinned_fact_ttl_days: 30 # 偏好/约束等固定事实保留天数
+      max_parts: 12 # 单条回复最多分段数
+      segment_hard_max_chars: 4000 # 代码块/URL 的硬上限
+      unanswered_notice: true # 是否向 Aliya 暴露 unanswered_count；false 时传 0
+      delivery:
+        retry: 3 # 出站投递失败后的重试次数
+        retry_backoff_seconds: 2 # 指数退避基数
+        dead_letter: true # 重试耗尽后写 dead_letters.jsonl
+      redaction:
+        mask_agent_ids: true
+        mask_task_ids: true
+        mask_dispatch_ids: true
+        mask_error_types: true
+        mask_stack: true
+        mask_secrets: true
+        mask_pii: true
+        warn_on_hit: true
+      proactive:
+        enabled: true # false 时 Aliya 只能被动回复，不能主动发起
+        min_interval_seconds: 3600 # 两条主动消息的最小间隔
+        daily_limit: 6 # 每日硬上限；urgency 也不能突破
+        # 默认不设免打扰：人设里她会失眠、熬夜刷信息、在睡不着时找人说话。
+        # 需要时再填，例如 ["23:30-07:30"]，按用户时区；被拦的消息进延迟队列，不丢弃。
+        quiet_hours: []
+        unanswered_backoff: true # 连续 2 条无回应后间隔翻倍
+        max_backoff_multiplier: 4 # 退避倍率上限，避免间隔无限增长
+        cancel_window_seconds: 5 # 用户发言后取消待发消息的窗口
+        input_delay_seconds: 10 # 用户正在输入时延迟投递
+        hourly_limit: 2 # 每小时普通打扰预算；urgency>=0.8 可突破，仍受每日上限约束
+        history_window_days: 14 # 历史画像窗口；太短不稳，太长反应慢
+        reply_window_minutes: 30 # 超过这个时间回话不算「有回应」
+
+    # ---------- 世界推理（07-world-reasoning.md） ----------
+    world:
+      enabled: true # 规则基线端口已内置；false 时仍启动但不触发
+      # 世界推理实现由端口注入：模块路径 + 工厂函数名。
+      # enabled=true 且两者都没给时，启动期抛 WorldBridgeError（对齐设计 07 章 8 节）。
+      port_module: agent.cosmos.world.reasoning # 规则基线；可替换成 LLM 端口
+      port_factory: build # 工厂函数：无参调用，返回 WorldReasoningPort
+      infer_timeout_seconds: 10 # 单次推演超时；超时保留旧结果并标 stale
+      ttl_seconds: 600 # 结果缓存与 stale 判定共用这个时长
+      failure_backoff_seconds: 300 # 连续 3 次失败后暂停，避免持续打爆端口
+      max_hypotheses: 3 # 最多保留 3 条；端口多给会被截断并 WARNING
+      history:
+        window_days: 14 # 世界推理历史窗口；装配时传给终端统计
+        min_sample_days: 3 # 少于 3 天不采信 active_hours，防止冷启动误判
+      triggers:
+        presence_change: true # 在线状态翻转：最值得立即推演的事件
+        dispatch_finished: true # 任务结束触发；false 时忽略 dispatch.finished
+        silence_thresholds_minutes: [30, 120, 360] # 静默跨过这些分钟数各触发一次
+        user_message: false # 用户正在对话，推演反而添乱
+        # 显著性门控（借鉴 TGL）：低于阈值的普通事件不触发推演。
+        # 分数只决定「现在推不推」，不决定推什么。
+        min_salience: 0.35
+        high_salience_window_seconds: 30 # 越接近 1 窗口越短，最短 30s
+        low_salience_window_seconds: 300 # 低显著事件最长等待 300s
+        reconcile_seconds: 600 # 定时对账，只兜底不承担主触发
+        # 轻量触发分类器权重（JSON）；null 时用规则打分。
+        # 由 `python -m agent.cosmos.world.calibration --model-out ...` 产出。
+        # 文件缺失、损坏或训练样本单一类别时自动退回规则，不阻断启动。
+        model_path: null
+      belief:
+        enabled: true # false 时每轮从零推断，只保留结果快照
+        observation_weight: 0.6 # 0=完全信旧信念，1=完全信本轮观测
+      policy:
+        horizon: 2 # 两步前瞻；当前实现最多 3 步
+        discount: 0.8 # 前瞻折扣；越小越短视
+      fast_path:
+        enabled: true # 冷启动先给保守结论，深度端口返回后按 revision 覆盖
+        confidence_cap: 0.45 # 快路置信度上限，避免和深路抢结论
+      calibration:
+        temperature: 1.5 # >1 压低高置信，<1 抬高；抑制模型自报偏高
+        model_weight: 0.45 # 与 evidence_weight 一起归一化，不是硬编码相加
+        evidence_weight: 0.55 # 证据接地越好，校准后的置信度越高
+        min_hypothesis_confidence: 0.2 # 低于该值的假设不进入 Aliya 决策
+        report_path: data/state/world_calibration.json # 存在时启动期自动回填
+      trace_enabled: true # 关闭后不写轨迹，离线校准/回放不可用
+      trace_max_bytes: 5000000 # world_trace.jsonl 超过后轮转为 .1
+
+    # ---------- 子 agent 注册（02-registry.md） ----------
+    # module + handler 指向实现；card 是 AgentCard 的 YAML 形态。
+    allow_runtime_registration: false # 运行期注册需显式开启，Aliya 永远无权
+    agents:
+      - id: edit
+        module: agent.cosmos.registry.edit # 目标形态路径，实现落地后生效
+        handler: handle
+        card:
+          name: 编辑台 # 展示名用 Aliya 的语言，工程名只留在 id 与文档正文里
+          icon: "✏️"
+          summary: 编辑代码与文件
+          description: >-
+            按指令修改仓库内文件：新建、改写、局部替换、批量重命名。
+            不负责运行测试与提交，也不做超出仓库根目录的路径操作。
+          capabilities: [code_edit, file_write, file_rename]
+          params_schema:
+            type: object
+            properties:
+              instruction:
+                type: string
+                description: 要做什么改动
+              paths:
+                type: array
+                items: {type: string}
+                description: 要修改的文件路径
+            required: [instruction, paths]
+          examples:
+            - input: 把 core/logger/base.py 里的 log 改成 logger
+            - input: 给 decision 层补一个超时重试
+            - input: 把这个函数拆成两个
+          desktop: {group: dev, order: 10, pinned: true, visible: true}
+          execution:
+            timeout_seconds: 300
+            max_concurrent: 2
+            queue: true
+            cancel_on_supersede: false
+            retryable: true
+            heartbeat_seconds: 30
+          permissions:
+            read_presence: false
+            presence_fields: []
+            notify_user: true
+            read_conversation: false

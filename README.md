@@ -10,8 +10,11 @@ Python + uv 通用脚手架。三层结构：`service` / `logger` / `config`，�
 # 安装依赖
 uv sync
 
-# 启动服务（Ctrl-C 优雅关闭）
+# 启动基础服务（Ctrl-C 优雅关闭）
 uv run python -m core.main
+
+# 启动主 agent（core 4 个服务 + cosmos 10 个服务）
+uv run python -m agent.cosmos.app
 ```
 
 无需任何配置即可启动，所有配置项都有默认值。要自定义时改 `data/config/cosmos.yaml`；密钥类配置写在 `.env`（参考 `.env.example`）。
@@ -23,9 +26,10 @@ uv run python -m core.main
 | 目的 | 命令 |
 | --- | --- |
 | 安装依赖 | `uv sync` |
-| 启动服务 | `uv run python -m core.main` |
+| 启动基础服务 | `uv run python -m core.main` |
+| 启动主 agent | `uv run python -m agent.cosmos.app` |
 | 跑测试 | `uv run pytest` |
-| 覆盖率 | `uv run pytest --cov=core` |
+| 覆盖率 | `uv run pytest --cov=core --cov=agent` |
 | 代码检查 | `uv run ruff check .` |
 | 代码格式化 | `uv run ruff format .` |
 
@@ -41,13 +45,16 @@ core/
   llm/           LLM 层：对话 / 流式 / 结构化 / 工具调用 / 多模态
   decision/      判断层：批量提问与 choice / score / noul 三原语
   agent/         Agent 工具层：工具声明与执行、Skill、MCP、系统提示拼装
+agent/
+  cosmos/        主 agent：契约、9 个常驻服务、进程内总线、装配与进程入口
+  aliya/         上层控制者（设计文档；实现不在本次范围）
 data/           配置与运行数据：config/cosmos.yaml 为配置骨架，可安全提交
   skills/       技能目录：<name>/SKILL.md
   mcp.json      MCP server 清单（标准 mcpServers 结构）
 tests/           测试
 ```
 
-依赖方向单向：`service → (config, logger)`、`embedding / llm / decision → (config, logger, service)`、`agent → (config, llm, logger)`。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm` / `decision`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
+依赖方向单向：`service → (config, logger)`、`embedding / llm / decision → (config, logger, service)`、`agent → (config, llm, logger)`、`agent.cosmos → core`（反向不成立）。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm` / `decision`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
 
 ## 配置
 

@@ -33,7 +33,7 @@ service:
   stop_timeout: 30 # 单个服务 stop() 的超时秒数，必须为正数；同上
 
 clock:
-  tz: UTC # 时钟服务的时区，如 Asia/Shanghai；非法时区在启动期报错
+  tz: Asia/Shanghai # 时钟服务的时区，如 Asia/Shanghai；非法时区在启动期报错
 
 # 文本向量化端点。与 llm 分开配：DeepSeek 没有 embedding 端点，两家通常不是同一个服务。
 # 没配 api_key 时只警告、健康检查 unhealthy，进程照常启动（不 fail fast）。
@@ -90,3 +90,152 @@ decision:
     timeout: 60
     retries: 2
     max_connections: null # 连接池上限；null = httpx2 默认（并发 predict_many 时压住连接数）
+
+# ============================================================================
+# cosmos 主 agent（设计见 agent/cosmos/docs/）
+# 只放常改项，其余字段用 core/config/settings.py 里的默认值。
+# 未知键在加载期 WARNING 并忽略，不会阻断启动；改完建议跑一次配置校验/测试。
+# ============================================================================
+agent:
+  cosmos:
+    # ---------- 契约 ----------
+    contract:
+      api_version: "1.0" # 主版本不一致直接拒绝连接，不做兼容猜测
+      contract_version: "1.0.0" # 契约模型版本；Aliya 侧只校验主版本
+      state_dir: data/state # 桌面布局、统计、轨迹等运行数据；已被 .gitignore 忽略
+    # ---------- 通讯链路 ----------
+    link:
+      heartbeat_seconds: 30 # 超过此时长没有心跳判 unstable
+      down_after_seconds: 90 # 超过此时长判 down；down 期间消息进队列
+      queue_limit: 1000 # 中断期积压上限，超出丢弃最旧并告警
+      replay_on_recover: true # 链路恢复后重放积压消息
+      suppress_proactive_when_down: true # 断链时抑制主动消息，避免恢复后刷屏
+    # ---------- 调度 ----------
+    dispatch:
+      mode: suggest # suggest（默认，交 Aliya 确认）/ auto（高置信度直接执行）
+      auto_threshold: 0.75 # auto 模式的最低置信度
+      min_confidence: 0.6 # 低于此值转 clarify，不硬上
+      high_threshold: 0.9 # 一级检索达到此分数时跳过模型精排
+      max_candidates: 5 # 精排时最多给模型几张卡片
+      max_parallel: 3 # 整批并发上限
+      dedupe_window_seconds: 60 # 幂等去重窗口
+      plan_timeout_seconds: 5 # plan 调用超时
+      match_fallback_on_error: true # 匹配模型失败时回退到检索结果
+    # ---------- 桌面 ----------
+    desktop:
+      groups: # 分组顺序即面板展示顺序
+        - {key: dev, title: 开发工具, order: 10}
+        - {key: media, title: 内容处理, order: 20}
+        - {key: general, title: 通用, order: 90}
+      progress_throttle_ms: 1000 # 进度事件尾沿节流，避免高频刷新
+      reconcile_seconds: 30 # 全量对账周期
+      max_content_chars: 2000 # 单条回传文本上限，超出按段落分段
+      history_limit: 5 # 单卡详情里的最近任务数
+    # ---------- 用户状态 ----------
+    presence:
+      enabled: true # false 时 get_presence() 返回 unknown 快照
+      ttl_seconds: 30 # 超过此时长的快照标 stale
+      idle_after_seconds: 300 # online → away
+      offline_after_seconds: 900 # away → offline
+      panel:
+        show_mood: false # 情绪默认不进常驻面板（对等隐私）
+        show_device: false # 设备信息默认不展示
+        aliya_can_hide: true # Aliya 可要求关闭任一字段
+    # ---------- 通信终端 ----------
+    terminal:
+      conversation_turns: 20 # 信封里携带的最近轮次
+      summary_chars: 400 # 更早内容的摘要长度上限
+      context_max_tokens: 4000 # 上下文预算；超限先摘要再裁剪
+      summary_batch_turns: 4 # 每积累几轮旧内容压一次摘要
+      session_ttl_hours: 72 # 空闲会话回收
+      max_sessions: 200 # 会话数上限；超出按最久未活跃回收
+      pinned_fact_ttl_days: 30 # 偏好/约束等固定事实保留天数
+      max_parts: 12 # 单条回复最多分段数
+      segment_hard_max_chars: 4000 # 代码块/URL 的硬上限
+      unanswered_notice: true # 是否向 Aliya 暴露 unanswered_count；false 时传 0
+      delivery:
+        retry: 3 # 出站投递失败后的重试次数
+        retry_backoff_seconds: 2 # 指数退避基数
+        dead_letter: true # 重试耗尽后写 dead_letters.jsonl
+      redaction: # 出站前的脱敏开关；默认全开
+        mask_agent_ids: true
+        mask_task_ids: true
+        mask_dispatch_ids: true
+        mask_error_types: true
+        mask_stack: true
+        mask_secrets: true
+        mask_pii: true
+        warn_on_hit: true # 命中脱敏规则时告警，便于发现上游泄漏
+      proactive:
+        enabled: true # false 时只能被动回复
+        min_interval_seconds: 3600 # 两条主动消息的最小间隔
+        daily_limit: 6 # 每日硬上限；urgency 也不能突破
+        hourly_limit: 2 # 每小时普通打扰预算；urgency>=0.8 可突破，仍受每日上限约束
+        history_window_days: 14 # 历史画像窗口；太短不稳，太长反应慢
+        reply_window_minutes: 30 # 超过这个时间回话不算「有回应」
+        # 默认不设免打扰：人设里她会失眠、熬夜刷信息、睡不着时找人说话。
+        # 需要时再填，例如 ["23:30-07:30"]，按用户时区；被拦消息进延迟队列，不丢弃。
+        quiet_hours: []
+    # ---------- 世界推理 ----------
+    world:
+      enabled: true # 规则基线端口已内置；false 时仍启动但不触发
+      # 端口 = 模块路径 + 无参工厂；enabled=true 且两者缺失时启动期报错。
+      port_module: agent.cosmos.world.reasoning # 可替换成 LLM 端口
+      port_factory: build # 工厂函数：无参调用，返回 WorldReasoningPort
+      infer_timeout_seconds: 10 # 单次推演超时；超时保留旧结果并标 stale
+      ttl_seconds: 600 # 结果缓存与 stale 判定共用这个时长
+      failure_backoff_seconds: 300 # 连续 3 次失败后暂停，避免持续打爆端口
+      max_hypotheses: 3 # 最多保留 3 条；端口多给会被截断并 WARNING
+      history:
+        window_days: 14 # 世界推理历史窗口；装配时传给终端统计
+        min_sample_days: 3 # 少于 3 天不采信 active_hours，防止冷启动误判
+      triggers:
+        presence_change: true # 在线状态翻转：最值得立即推演的事件
+        dispatch_finished: true # 任务结束触发；false 时忽略 dispatch.finished
+        silence_thresholds_minutes: [30, 120, 360] # 静默跨过这些分钟数各触发一次
+        user_message: false # 用户正在对话，推演反而添乱
+        # 显著性门控：低于阈值的事件直接丢弃，不进合并窗口。
+        min_salience: 0.35
+        high_salience_window_seconds: 30 # 越接近 1 窗口越短，最短 30s
+        low_salience_window_seconds: 300 # 低显著事件最长等待 300s
+        reconcile_seconds: 600 # 定时对账，只兜底不承担主触发
+        model_path: null # 校准后可指向 data/state/world_trigger_model.json；损坏自动退回规则
+      calibration:
+        # 离线校准报告存在时，启动期自动回填 temperature / min_salience
+        report_path: data/state/world_calibration.json
+      policy:
+        horizon: 2 # 两步前瞻；当前实现最多 3 步
+        discount: 0.8 # 前瞻折扣；越小越短视
+      fast_path:
+        enabled: true # 冷启动/深路超时时先给保守结论，随后按 revision 覆盖
+        confidence_cap: 0.45 # 快路置信度上限，避免和深路抢结论
+      belief:
+        enabled: true # false 时每轮从零推断，只保留结果快照
+        observation_weight: 0.6 # 0=完全信旧信念，1=完全信本轮观测
+      trace_enabled: true # 关闭后不写轨迹，离线校准/回放不可用
+      trace_max_bytes: 5000000 # world_trace.jsonl 超过后轮转为 .1
+    # 运行期注册默认关闭；Aliya 无权开启，只能读已注册工具。
+    allow_runtime_registration: false
+    # 子 agent 注册示例：module/handler 指向实现，card 是 AgentCard 的 YAML 形态。
+    agents:
+      - id: echo
+        module: agent.cosmos.registry.echo
+        handler: handle
+        card:
+          name: 回声台
+          icon: "🔁"
+          summary: 原样返回收到的指令
+          description: >-
+            联调用的最小工具：把收到的文本原样返回，用来验证调度、进度与结果链路。
+            不做任何文件操作，也不承担真实业务。
+          capabilities: [echo]
+          params_schema:
+            type: object
+            properties:
+              text: {type: string}
+            required: [text]
+          examples:
+            - input: 帮我回显一句话
+          desktop: {group: general, order: 100, pinned: false, visible: true}
+          execution: {timeout_seconds: 30, max_concurrent: 1, queue: true}
+          permissions: {read_presence: false, notify_user: false, read_conversation: false}

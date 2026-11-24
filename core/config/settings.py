@@ -11,9 +11,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from core.config.loader import CONFIG_FILE, ENV_FILE, interpolate, read_env, read_yaml
 
@@ -166,6 +167,404 @@ class DecisionSettings(BaseModel):
     )
 
 
+def _warn_unknown_keys(model: type[BaseModel], data: dict[str, object]) -> None:
+    """把输入里模型不认识的键打成 WARNING。
+
+    只在 schema 层对账：值本身交给 pydantic 校验。
+    刻意用 loguru 而不是 `core.logger` 的门面：后者依赖本模块，走它成环。
+    """
+    known: set[str] = set(model.model_fields)
+    unknown: list[str] = sorted(key for key in data if key not in known)
+    if not unknown:
+        return
+    logger.warning(
+        "配置含未知键，已忽略 | 配置节点={} 未知键={}",
+        model.__name__,
+        "、".join(unknown),
+    )
+
+
+class _AgentConfigNode(BaseModel):
+    """agent 配置节点基类：未知键 WARNING 后忽略，不阻断加载。"""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_unknown(cls, data: object) -> object:
+        if isinstance(data, dict):
+            _warn_unknown_keys(cls, cast("dict[str, object]", data))
+        # 显式 cast：`isinstance` 收窄后剩余分支的类型对检查器不透明
+        return cast("object", data)
+
+
+class AgentContractSettings(_AgentConfigNode):
+    """契约版本与运行数据目录。"""
+
+    api_version: str = "1.0"
+    contract_version: str = "1.0.0"
+    state_dir: str = "data/state"
+
+
+class AgentLinkSettings(_AgentConfigNode):
+    """通讯链路（01 章 3.1）：心跳、断链判定与中断期队列。"""
+
+    heartbeat_seconds: int = Field(default=30, gt=0)
+    down_after_seconds: int = Field(default=90, gt=0)
+    queue_limit: int = Field(default=1000, ge=1)
+    replay_on_recover: bool = True
+    suppress_proactive_when_down: bool = True
+
+
+class AgentDispatchSettings(_AgentConfigNode):
+    """调度（05 章）：检索阈值、精排、并发与幂等窗口。"""
+
+    mode: Literal["suggest", "auto"] = "suggest"
+    auto_threshold: float = Field(default=0.75, ge=0, le=1)
+    min_confidence: float = Field(default=0.6, ge=0, le=1)
+    high_threshold: float = Field(default=0.9, ge=0, le=1)
+    max_candidates: int = Field(default=5, ge=1)
+    max_parallel: int = Field(default=3, ge=1)
+    dedupe_window_seconds: int = Field(default=60, ge=0)
+    plan_timeout_seconds: float = Field(default=5.0, gt=0)
+    match_fallback_on_error: bool = True
+
+
+class AgentDesktopGroupSettings(_AgentConfigNode):
+    """桌面分组声明。"""
+
+    key: str
+    title: str
+    order: int = 100
+
+
+class AgentDesktopSettings(_AgentConfigNode):
+    """桌面（03 章）：分组、节流、对账与文本上限。"""
+
+    groups: list[AgentDesktopGroupSettings] = Field(
+        default_factory=lambda: [
+            AgentDesktopGroupSettings(key="dev", title="开发工具", order=10),
+            AgentDesktopGroupSettings(key="media", title="内容处理", order=20),
+            AgentDesktopGroupSettings(key="general", title="通用", order=90),
+        ]
+    )
+    progress_throttle_ms: int = Field(default=1000, ge=0)
+    reconcile_seconds: int = Field(default=30, gt=0)
+    max_content_chars: int = Field(default=2000, gt=0)
+    history_limit: int = Field(default=5, ge=1)
+
+
+class AgentPresenceFieldSettings(_AgentConfigNode):
+    """六类用户状态字段的采集开关。"""
+
+    online: bool = True
+    activity: bool = True
+    typing: bool = True
+    mood: bool = True
+    task_context: bool = True
+    env: bool = True
+
+
+class AgentMoodSettings(_AgentConfigNode):
+    """情绪信号（04 章 2.4）。"""
+
+    provider: Literal["decision", "llm", "off"] = "decision"
+    backend: Backend = "laya"
+    min_confidence: float = Field(default=0.5, ge=0, le=1)
+    stale_after_seconds: int = Field(default=1800, gt=0)
+    delta_threshold: float = Field(default=0.25, ge=0, le=1)
+    window_messages: int = Field(default=5, ge=1)
+
+
+class AgentPresencePushSettings(_AgentConfigNode):
+    """状态变化推送的去抖间隔。"""
+
+    min_interval_seconds: float = Field(default=5.0, ge=0)
+    typing_settle_seconds: float = Field(default=3.0, ge=0)
+    mood_min_interval_seconds: float = Field(default=300.0, ge=0)
+
+
+class AgentPresencePanelSettings(_AgentConfigNode):
+    """常驻面板的展示边界（04 章 3.4）。"""
+
+    show_mood: bool = False
+    show_device: bool = False
+    aliya_can_hide: bool = True
+    collapsed_fields: list[str] = Field(default_factory=lambda: ["mood", "env.device"])
+
+
+class AgentPresencePrivacySettings(_AgentConfigNode):
+    """隐私边界（04 章 5）。"""
+
+    allow_timezone: bool = True
+    allow_device: bool = True
+    retain_raw_hours: int = Field(default=24, ge=0)
+    retain_aggregate_days: int = Field(default=30, ge=0)
+    expose_to_subagents: bool = False
+    never_echo_to_user: bool = True
+    address_as: str = "你"
+
+    @field_validator("address_as")
+    @classmethod
+    def _only_you(cls, value: str) -> str:
+        """对 Aliya 的呈现里对端只能叫「你」，写别的值回落并告警。"""
+        if value == "你":
+            return value
+        logger.warning("对端称呼只允许「你」，已回落 | 配置值={}", value)
+        return "你"
+
+
+class AgentPresenceWordingSettings(_AgentConfigNode):
+    """可解读表述的文案覆盖；None 用内置默认。"""
+
+    online_idle_template: str | None = None
+    offline_night_template: str | None = None
+    unknown_summary: str = "用户状态未知"
+
+
+class AgentPresenceSettings(_AgentConfigNode):
+    """用户状态线索（04 章）。"""
+
+    enabled: bool = True
+    ttl_seconds: int = Field(default=30, ge=0)
+    fields: AgentPresenceFieldSettings = AgentPresenceFieldSettings()
+    idle_after_seconds: int = Field(default=300, gt=0)
+    offline_after_seconds: int = Field(default=900, gt=0)
+    mood: AgentMoodSettings = AgentMoodSettings()
+    push: AgentPresencePushSettings = AgentPresencePushSettings()
+    panel: AgentPresencePanelSettings = AgentPresencePanelSettings()
+    privacy: AgentPresencePrivacySettings = AgentPresencePrivacySettings()
+    wording: AgentPresenceWordingSettings = AgentPresenceWordingSettings()
+
+
+class AgentRedactionSettings(_AgentConfigNode):
+    """脱敏清单（06 章 6.3）。"""
+
+    mask_agent_ids: bool = True
+    mask_task_ids: bool = True
+    mask_dispatch_ids: bool = True
+    mask_error_types: bool = True
+    mask_stack: bool = True
+    mask_secrets: bool = True
+    mask_pii: bool = True
+    warn_on_hit: bool = True
+
+
+class AgentProactiveSettings(_AgentConfigNode):
+    """主动消息节流（06 章 7.3）。"""
+
+    enabled: bool = True
+    min_interval_seconds: int = Field(default=3600, ge=0)
+    daily_limit: int = Field(default=6, ge=0)
+    quiet_hours: list[str] = Field(default_factory=list)
+    unanswered_backoff: bool = True
+    max_backoff_multiplier: int = Field(default=4, ge=1)
+    cancel_window_seconds: float = Field(default=5.0, ge=0)
+    input_delay_seconds: float = Field(default=10.0, ge=0)
+    #: 每小时打扰预算；urgency 高时仍受每日上限约束
+    hourly_limit: int = Field(default=2, ge=0)
+    #: 历史画像窗口与主动消息回复判定
+    history_window_days: int = Field(default=14, ge=1)
+    reply_window_minutes: int = Field(default=30, ge=1)
+
+
+class AgentDeliverySettings(_AgentConfigNode):
+    """出站投递失败的重试与死信。"""
+
+    retry: int = Field(default=3, ge=0)
+    retry_backoff_seconds: float = Field(default=2.0, ge=0)
+    dead_letter: bool = True
+
+
+class AgentTerminalSettings(_AgentConfigNode):
+    """通信终端（06 章）。"""
+
+    conversation_turns: int = Field(default=20, ge=1)
+    summary_chars: int = Field(default=400, ge=0)
+    #: 上下文预算与压缩策略
+    context_max_tokens: int = Field(default=4000, ge=256)
+    summary_batch_turns: int = Field(default=4, ge=1)
+    session_ttl_hours: int = Field(default=72, ge=1)
+    max_sessions: int = Field(default=200, ge=1)
+    pinned_fact_ttl_days: int = Field(default=30, ge=1)
+    #: 单条回复最多切成几段，防止消息风暴
+    max_parts: int = Field(default=12, ge=1)
+    #: 代码块/URL 的硬上限；超过才允许继续切
+    segment_hard_max_chars: int = Field(default=4000, ge=100)
+    #: 是否向 Aliya 暴露 unanswered_count；关闭时传 0
+    unanswered_notice: bool = True
+    delivery: AgentDeliverySettings = AgentDeliverySettings()
+    redaction: AgentRedactionSettings = AgentRedactionSettings()
+    proactive: AgentProactiveSettings = AgentProactiveSettings()
+
+
+class AgentWorldHistorySettings(_AgentConfigNode):
+    """历史模式统计窗口（07 章 3.5）。"""
+
+    window_days: int = Field(default=14, ge=1)
+    min_sample_days: int = Field(default=3, ge=0)
+
+
+class AgentWorldTriggerSettings(_AgentConfigNode):
+    """世界推理的触发条件（07 章 5）。"""
+
+    presence_change: bool = True
+    dispatch_finished: bool = True
+    silence_thresholds_minutes: list[int] = Field(default_factory=lambda: [30, 120, 360])
+    user_message: bool = False
+    #: 显著性门控：低于阈值的普通事件不触发推演
+    min_salience: float = Field(default=0.35, ge=0, le=1)
+    #: 高显著事件用短窗口，低显著事件用长窗口
+    high_salience_window_seconds: float = Field(default=30.0, ge=0)
+    low_salience_window_seconds: float = Field(default=300.0, ge=0)
+    #: 定时对账周期：只兜底，不承担主触发
+    reconcile_seconds: int = Field(default=600, gt=0)
+    #: 轻量触发分类器权重（JSON）；为空时用规则打分
+    model_path: str | None = None
+
+
+class AgentWorldBeliefSettings(_AgentConfigNode):
+    """信念状态更新（07 章 6）。"""
+
+    enabled: bool = True
+    #: 新观测与旧信念的混合权重：越大越相信本轮观测
+    observation_weight: float = Field(default=0.6, ge=0, le=1)
+
+
+class AgentWorldFastPathSettings(_AgentConfigNode):
+    """冷启动快路：先给保守结论，深度结果到达后覆盖。"""
+
+    enabled: bool = True
+    #: 快路结论的置信度上限
+    confidence_cap: float = Field(default=0.45, ge=0, le=1)
+
+
+class AgentWorldPolicySettings(_AgentConfigNode):
+    """有限时域 EFE 的前瞻深度与折扣。"""
+
+    horizon: int = Field(default=2, ge=1, le=3)
+    discount: float = Field(default=0.8, ge=0, le=1)
+
+
+class AgentWorldCalibrationSettings(_AgentConfigNode):
+    """置信度校准与证据接地（07 章 6.2）。"""
+
+    temperature: float = Field(default=1.5, gt=0)
+    model_weight: float = Field(default=0.45, ge=0, le=1)
+    evidence_weight: float = Field(default=0.55, ge=0, le=1)
+    #: 低于该值的假设不进入 Aliya 的决策输入
+    min_hypothesis_confidence: float = Field(default=0.2, ge=0, le=1)
+    #: 校准报告路径；设置后启动时自动回填 temperature / min_salience
+    report_path: str | None = None
+
+
+class AgentWorldSettings(_AgentConfigNode):
+    """世界推理桥（07 章）。"""
+
+    enabled: bool = False
+    port_module: str | None = None
+    port_factory: str = "build"
+    infer_timeout_seconds: float = Field(default=10.0, gt=0)
+    ttl_seconds: int = Field(default=600, ge=0)
+    failure_backoff_seconds: int = Field(default=300, ge=0)
+    max_hypotheses: int = Field(default=3, ge=1, le=3)
+    history: AgentWorldHistorySettings = AgentWorldHistorySettings()
+    triggers: AgentWorldTriggerSettings = AgentWorldTriggerSettings()
+    belief: AgentWorldBeliefSettings = AgentWorldBeliefSettings()
+    fast_path: AgentWorldFastPathSettings = AgentWorldFastPathSettings()
+    policy: AgentWorldPolicySettings = AgentWorldPolicySettings()
+    calibration: AgentWorldCalibrationSettings = AgentWorldCalibrationSettings()
+    #: 推演轨迹：输入指纹、触发原因、结论与置信度，供离线回放/调参
+    trace_enabled: bool = True
+    trace_max_bytes: int = Field(default=5_000_000, ge=0)
+
+
+class AgentExampleConfig(_AgentConfigNode):
+    """卡片示例请求的 YAML 形态。"""
+
+    input: str
+    note: str | None = None
+
+
+class AgentDesktopMetaConfig(_AgentConfigNode):
+    """卡片桌面元数据的 YAML 形态。"""
+
+    group: str = "general"
+    order: int = 100
+    visible: bool = True
+    pinned: bool = False
+    badge: str | None = None
+
+
+class AgentExecutionConfig(_AgentConfigNode):
+    """卡片执行策略的 YAML 形态。"""
+
+    timeout_seconds: float = Field(default=120.0, gt=0)
+    max_concurrent: int = Field(default=1, ge=1)
+    queue: bool = False
+    cancel_on_supersede: bool = False
+    retryable: bool = False
+    heartbeat_seconds: float = Field(default=30.0, gt=0)
+
+
+class AgentPermissionsConfig(_AgentConfigNode):
+    """卡片权限的 YAML 形态。"""
+
+    read_presence: bool = False
+    presence_fields: list[str] = Field(default_factory=list)
+    notify_user: bool = False
+    read_conversation: bool = False
+
+
+class AgentCardConfig(_AgentConfigNode):
+    """`AgentCard` 的 YAML 形态。
+
+    刻意不引用 `agent.cosmos.contracts`：`core` 不能反向依赖 `agent`。
+    字段与契约模型一一对应，由 `agent.cosmos.registry.bootstrap` 转成 `AgentCard`。
+    """
+
+    name: str = ""
+    version: str = "0.1.0"
+    icon: str = "🔧"
+    summary: str = ""
+    description: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    params_schema: dict[str, object] = Field(default_factory=lambda: {"type": "object"})
+    examples: list[AgentExampleConfig] = Field(default_factory=list)
+    desktop: AgentDesktopMetaConfig = AgentDesktopMetaConfig()
+    execution: AgentExecutionConfig = AgentExecutionConfig()
+    permissions: AgentPermissionsConfig = AgentPermissionsConfig()
+
+
+class AgentRegistrationSettings(_AgentConfigNode):
+    """一个待注册子 agent：模块路径 + handler 名 + 卡片。"""
+
+    id: str
+    module: str
+    handler: str = "handle"
+    card: AgentCardConfig = AgentCardConfig()
+
+
+class AgentCosmosSettings(_AgentConfigNode):
+    """cosmos 主 agent 的完整配置。"""
+
+    contract: AgentContractSettings = AgentContractSettings()
+    link: AgentLinkSettings = AgentLinkSettings()
+    dispatch: AgentDispatchSettings = AgentDispatchSettings()
+    desktop: AgentDesktopSettings = AgentDesktopSettings()
+    presence: AgentPresenceSettings = AgentPresenceSettings()
+    terminal: AgentTerminalSettings = AgentTerminalSettings()
+    world: AgentWorldSettings = AgentWorldSettings()
+    allow_runtime_registration: bool = False
+    agents: list[AgentRegistrationSettings] = Field(default_factory=list)
+
+
+class AgentSettings(_AgentConfigNode):
+    """agent 层配置的顶层节点（挂在 Settings.agent 上）。"""
+
+    cosmos: AgentCosmosSettings = AgentCosmosSettings()
+
+
 class Settings(BaseModel):
     """顶层配置，按子模块分组，避免一个扁平大类。"""
 
@@ -178,6 +577,7 @@ class Settings(BaseModel):
     embedding: EmbeddingSettings = EmbeddingSettings()
     llm: LLMSettings = LLMSettings()
     decision: DecisionSettings = DecisionSettings()
+    agent: AgentSettings = AgentSettings()
 
     #: 本次配置的来源；由 load_settings() 写入，直接构造实例时保持 None
     _source: str | None = PrivateAttr(default=None)

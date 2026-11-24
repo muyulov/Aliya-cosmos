@@ -23,8 +23,11 @@ from core.service.registry import build_manager
 HEALTH_LOG_RESERVED_KEYS: frozenset[str] = frozenset({"服务", "健康", "状态", "详情"})
 
 
-async def _run(manager: ServiceManager) -> None:
-    """启动全部服务并常驻，直到收到退出信号。"""
+async def run(manager: ServiceManager) -> None:
+    """启动全部服务并常驻，直到收到退出信号。
+
+    公开给其他入口复用（如 `agent.cosmos.app`）：启停与信号处理只此一份。
+    """
     async with manager.lifespan():
         await _report_health(manager)
         await _wait_for_shutdown()
@@ -101,7 +104,7 @@ def main() -> None:
         配置源=settings.config_source,
     )
     try:
-        asyncio.run(_run(build_manager(settings)))
+        asyncio.run(run(build_manager(settings)))
     except Exception as exc:
         # 装配 / 启动失败是 fail fast：日志要收口（含堆栈）再以非零码退出。
         # 不捕获的话只剩一段裸 traceback，日志文件里也没有「这次是整体失败」的结论。
