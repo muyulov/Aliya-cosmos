@@ -25,3 +25,19 @@ def test_context_and_history_are_included() -> None:
     assert "夜里" in messages[0]["content"]
     assert messages[1]["content"] == "上一句"
     assert messages[-1]["content"] == "在吗"
+
+
+def test_budget_keeps_persona_and_charter() -> None:
+    builder = PromptBuilder(persona="人格" * 1000, charter="准则" * 1000, tools=[])
+    messages = builder.build(turn=TurnContext(user_text="在吗", history=[]))
+    assert "人格" in messages[0]["content"]
+    assert "准则" in messages[0]["content"]
+
+
+def test_budget_trims_old_history() -> None:
+    builder = PromptBuilder(persona="人格", charter="准则", tools=[])
+    history = [{"role": "user", "content": f"旧{i}"} for i in range(30)]
+    messages = builder.build(turn=TurnContext(user_text="在吗", history=history))
+    assert len(messages) <= 14
+    assert messages[-2]["content"] == "旧29"
+    assert messages[-1]["content"] == "在吗"
