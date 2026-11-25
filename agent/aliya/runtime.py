@@ -83,6 +83,7 @@ class AliyaRuntime:
         self._runner: TurnRunner | None = None
         self._started = False
         self._pending_inbound = 0
+        self._closed = asyncio.Event()
 
     async def start(self) -> None:
         if self._started:
@@ -120,6 +121,10 @@ class AliyaRuntime:
         self._ticker = None
         self._consumers = []
         self._started = False
+        self._closed.set()
+
+    async def wait_closed(self) -> None:
+        await self._closed.wait()
 
     async def wait_idle(self) -> None:
         """等待当前入站与队列中的回合处理完。"""
