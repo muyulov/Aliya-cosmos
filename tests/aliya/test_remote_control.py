@@ -11,6 +11,8 @@ from agent.cosmos.contracts import (
     ConversationContext,
     CosmosEvent,
     InboundEnvelope,
+    PresenceSnapshot,
+    ReadablePresence,
     TerminalMessage,
 )
 from agent.cosmos.contracts.rpc import (
@@ -111,6 +113,15 @@ class FakeServer:
                     result={"server_time": datetime.now(UTC).isoformat()},
                 ),
             )
+        elif message.method == "get_presence":
+            snapshot = PresenceSnapshot(
+                captured_at=datetime.now(UTC),
+                readable=ReadablePresence(summary="在电脑前"),
+            )
+            await self._send(
+                writer,
+                RpcResponse(id=message.id, result=snapshot.model_dump(mode="json")),
+            )
         elif message.method == "list_tasks":
             await self._send(writer, RpcResponse(id=message.id, result=[]))
         else:
@@ -151,6 +162,16 @@ async def test_call_round_trip(fake_server: FakeServer) -> None:
     result = await client.call("now", {})
     assert isinstance(result, dict)
     assert "server_time" in result
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_presence_uses_rpc(fake_server: FakeServer) -> None:
+    client = RemoteControl(str(fake_server.socket_path), token="t")
+    await client.connect()
+    snapshot = await client.fetch_presence()
+    assert snapshot.readable.summary == "在电脑前"
+    assert client.get_presence().readable.summary == "在电脑前"
     await client.close()
 
 

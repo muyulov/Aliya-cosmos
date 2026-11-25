@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Literal
+from uuid import uuid4
 
-from agent.aliya.initiative import Initiative
+from agent.aliya.initiative import Initiative, PreferenceGate, TimeSignals
 from agent.aliya.memory.store import MemoryStore
 from agent.aliya.ports import ControlPort
 from agent.aliya.prompt.builder import PromptBuilder
@@ -17,10 +20,14 @@ from agent.aliya.turn.postcheck import check
 from agent.aliya.turn.runner import TurnRunner
 from agent.aliya.turn.tools import build_tools
 from agent.cosmos.contracts import (
+    AgentProgress,
+    AgentRuntimeState,
     AliyaContext,
     CosmosEvent,
+    DesktopSnapshot,
     DispatchIntent,
     ReadablePresence,
+    WorldInference,
 )
 from core.config.settings import AgentAliyaSettings
 from core.llm import LLMService
@@ -55,6 +62,99 @@ def phase_for(*, now: datetime, tasks: int, crisis: bool) -> Phase:
     return "daily"
 
 
+_STATUS_LABELS = {
+    "ok": "完成",
+    "partial": "部分完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+}
+_ABNORMAL_LABELS = {
+    "timeout": "超时",
+    "stalled": "卡住",
+    "error": "出错",
+    "internal": "内部错误",
+}
+#: 只做保守的显式表达匹配，避免把普通抱怨误判成危机。
+_CRISIS_WORDS = ("不想活", "活不下去", "自杀", "结束生命", "伤害自己")
+
+
+def _is_crisis(text: str) -> bool:
+    return any(word in text for word in _CRISIS_WORDS)
+
+
+def _text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _gap_text(now: datetime, last_user_at: datetime | None) -> str:
+    if last_user_at is None:
+        return "很久"
+    seconds = max(0.0, (now - last_user_at).total_seconds())
+    if seconds < 3600:
+        return f"{max(1, int(seconds // 60))} 分钟"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f} 小时".replace(".0", "")
+    return f"{seconds / 86400:.1f} 天".replace(".0", "")
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def event_brief(event: CosmosEvent) -> str:
+    """把真实事件载荷转成模型可读的一段话。
+
+    cosmos 的 `agent.result` / `dispatch.finished` 都把摘要放在嵌套字段里，
+    不能只读顶层 `summary`；否则汇报回合永远只能看到占位文本。
+    """
+    payload = event.payload
+    if event.topic == "agent.result":
+        result = _mapping(payload.get("result"))
+        summary = _text(result.get("summary")) or "任务有结果了"
+        status = _STATUS_LABELS.get(_text(result.get("status")), "有结果")
+        lines = [f"任务{status}：{summary}"]
+        error = _mapping(result.get("error"))
+        message = _text(error.get("message"))
+        if message:
+            lines.append(f"原因：{message}")
+        hint = _text(error.get("user_hint"))
+        if hint:
+            lines.append(f"提示：{hint}")
+        if result.get("truncated") is True:
+            lines.append("（结果已截断）")
+        return "\n".join(lines)
+    if event.topic == "dispatch.finished":
+        outcome = _mapping(payload.get("outcome"))
+        summary = _text(outcome.get("summary")) or "这一批做完了"
+        status = _STATUS_LABELS.get(_text(outcome.get("status")), "有结果")
+        lines = [f"这一批{status}：{summary}"]
+        results = outcome.get("results")
+        if isinstance(results, list):
+            for item in results[:3]:
+                item_summary = _text(_mapping(item).get("summary"))
+                if item_summary:
+                    lines.append(f"- {item_summary}")
+        return "\n".join(lines)
+    if event.topic == "agent.progress":
+        label = _text(payload.get("label")) or "任务"
+        step = _text(payload.get("step")) or _text(payload.get("message"))
+        progress = payload.get("progress")
+        percent = ""
+        if isinstance(progress, int | float):
+            percent = f"（{int(progress * 100)}%）"
+        return f"{label}{percent}：{step}" if step else f"{label}{percent}有进展"
+    if event.topic == "agent.abnormal":
+        reason = _ABNORMAL_LABELS.get(_text(payload.get("reason")), "出了点问题")
+        error = _mapping(payload.get("error"))
+        message = _text(error.get("message"))
+        lines = [f"任务{reason}" + (f"：{message}" if message else "")]
+        hint = _text(error.get("user_hint"))
+        if hint:
+            lines.append(f"提示：{hint}")
+        return "\n".join(lines)
+    return "（收到一条进度）"
+
+
 class AliyaRuntime:
     def __init__(
         self,
@@ -75,11 +175,18 @@ class AliyaRuntime:
         self._seen: set[str] = set()
         self._current_turn: TurnContext | None = None
         self._presence: ReadablePresence | None = None
+        self._desktop: DesktopSnapshot | None = None
+        self._world: WorldInference | None = None
+        self._agent_states: dict[str, AgentRuntimeState] = {}
+        self._progress: dict[str, AgentProgress] = {}
+        self._pending_proactive: list[TurnContext] = []
         self._link = "up"
         self._last_user_at: datetime | None = None
         self._last_session_id = ""
         self._task_count = 0
+        self._crisis = False
         self._initiative = Initiative(config.initiative)
+        self._preference_gate = PreferenceGate(config.initiative.prefer_when)
         self._runner: TurnRunner | None = None
         self._proactive_runner: TurnRunner | None = None
         self._started = False
@@ -90,7 +197,14 @@ class AliyaRuntime:
         if self._started:
             return
         await self._control.handshake()
+        await self._prime_state()
+        if self._config.memory.enabled:
+            self._memory.prune_turns(self._config.memory.max_turns)
+            if self._config.memory.anchors and not self._memory.load_anchors():
+                self._memory.save_anchors(self._config.memory.anchors)
         persona = load_persona(self._config.persona.source)
+        for include in self._config.persona.includes:
+            persona += "\n\n" + load_persona(include)
         charter = load_charter(self._config.persona.charter)
         tools = build_tools(self)
         proactive_tools = build_tools(self, proactive=True)
@@ -119,8 +233,41 @@ class AliyaRuntime:
         ]
         self._started = True
 
+    async def _prime_state(self) -> None:
+        """启动时拉一次状态，避免主动回合在首个事件到达前没有任何上下文。"""
+        try:
+            self._desktop = await self._control.describe_desktop()
+            self._task_count = sum(
+                1
+                for entry in self._desktop.entries
+                if entry.status in {"running", "queued"}
+            )
+        except Exception:
+            _LOG.debug("启动拉取桌面失败", exc_info=True)
+        try:
+            view = await self._control.get_world_view()
+        except Exception:
+            _LOG.debug("启动拉取世界推理失败", exc_info=True)
+        else:
+            if view is not None:
+                self._accept_world(view)
+        try:
+            self._link = await self._control.get_link_state()
+        except Exception:
+            _LOG.debug("启动拉取链路状态失败", exc_info=True)
+        try:
+            fetch = getattr(self._control, "fetch_presence", None)
+            snapshot = (
+                await fetch() if callable(fetch) else self._control.get_presence()
+            )
+            self._presence = snapshot.readable
+        except Exception:
+            _LOG.debug("启动拉取状态失败", exc_info=True)
+
     async def _recover_unanswered(self) -> None:
         """启动时补跑已落盘但未回复的回合；幂等键为 message_id。"""
+        if not self._config.memory.enabled:
+            return
         for stored in self._memory.unanswered_turns():
             if not stored.message_id or stored.message_id in self._seen:
                 continue
@@ -128,10 +275,14 @@ class AliyaRuntime:
                 user_text=stored.text,
                 session_id=stored.session_id,
                 message_id=stored.message_id,
+                presence=self._presence.summary if self._presence else None,
+                tasks=self._tasks_text(),
+                desktop=self._desktop_text(),
+                world=self._world_text(),
             )
             turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
             self._seen.add(stored.message_id)
-            await self._queue.put(turn)
+            await self._enqueue(turn)
 
     async def stop(self) -> None:
         tasks = [self._worker, self._ticker, *self._consumers]
@@ -164,17 +315,26 @@ class AliyaRuntime:
 
     async def send(self, text: str) -> None:
         turn = self._current_turn
-        session_id = turn.session_id if turn is not None else self._last_session_id
-        await self._deliver(text, session_id)
-        if turn is not None:
-            if turn.proactive and not turn.sent:
-                self._initiative.record_proactive(datetime.now(UTC))
-            turn.sent = True
-            turn.replies.append(text)
+        if turn is None:
+            await self._deliver(text, self._last_session_id)
+            return
+        was_sent = turn.sent
+        accepted = await turn.send(text)
+        if not accepted:
+            raise RuntimeError("现在发不出去")
+        if turn.proactive and not was_sent:
+            self._initiative.record_proactive(self._now())
 
     async def describe_desktop(self) -> str:
         snapshot = await self._control.describe_desktop()
-        return snapshot.summary
+        lines = [snapshot.summary]
+        for entry in snapshot.entries[:12]:
+            capabilities = "、".join(entry.card.capabilities[:3])
+            line = f"{entry.card.name}（{entry.status}）：{entry.readable.summary}"
+            if capabilities:
+                line += f"；能做：{capabilities}"
+            lines.append(line)
+        return "\n".join(lines)
 
     async def dispatch(
         self,
@@ -184,6 +344,11 @@ class AliyaRuntime:
         params: dict[str, object] | None = None,
         hint: str | None = None,
     ) -> str:
+        hint_parts = [hint] if hint else []
+        if agent_id is None and self._config.tools.prefer_agents:
+            hint_parts.append("优先使用：" + "、".join(self._config.tools.prefer_agents))
+        if self._config.tools.max_parallel_dispatch:
+            hint_parts.append(f"最多并行 {self._config.tools.max_parallel_dispatch} 个")
         plan = await self._control.plan(
             DispatchIntent(
                 source="natural_language",
@@ -191,7 +356,7 @@ class AliyaRuntime:
                 user_text=task_text,
                 agent_id=agent_id,
                 params=params,
-                hint=hint,
+                hint="；".join(hint_parts) or None,
             )
         )
         if plan.decision == "clarify":
@@ -202,6 +367,9 @@ class AliyaRuntime:
         handle = await self._control.execute_plan(plan)
         if not handle.task_ids:
             return "没派成"
+        if handle.status == "partial" and handle.rejected:
+            reasons = "；".join(item.reason for item in handle.rejected[:3])
+            return f"已经派人去做了：{plan.tasks[0].label}（有些没派成：{reasons}）"
         return f"已经派人去做了：{plan.tasks[0].label}"
 
     async def task_status(self, task_id: str | None = None) -> str:
@@ -226,9 +394,14 @@ class AliyaRuntime:
 
     async def refresh_world(self) -> str:
         view = await self._control.refresh_world()
-        return view.snapshot if view is not None else "现在看不出什么"
+        if view is None:
+            return "现在看不出什么"
+        self._accept_world(view)
+        return self._world_text() or view.snapshot
 
     async def remember(self, note: str, kind: str) -> str:
+        if not self._config.memory.enabled:
+            return "这件事先不记"
         return "记住了" if self._memory.remember(note, kind) else "这件事先不记"
 
     # ---------- 消费循环 ----------
@@ -241,28 +414,38 @@ class AliyaRuntime:
                 await self._ack(message_id)
                 continue
             at = envelope.message.at.isoformat() if envelope.message.at else ""
-            try:
-                self._memory.record_inbound(
-                    message_id,
-                    envelope.message.text,
-                    session_id=envelope.message.session_id,
-                    at=at,
-                )
-            except OSError:
-                _LOG.exception("入站消息落盘失败，暂不回执")
-                continue
+            if self._config.memory.enabled:
+                try:
+                    self._memory.record_inbound(
+                        message_id,
+                        envelope.message.text,
+                        session_id=envelope.message.session_id,
+                        at=at,
+                    )
+                except OSError:
+                    _LOG.exception("入站消息落盘失败，暂不回执")
+                    continue
             self._seen.add(message_id)
             await self._ack(message_id)
             self._last_session_id = envelope.message.session_id
-            self._last_user_at = envelope.message.at or datetime.now(UTC)
+            self._last_user_at = envelope.message.at or self._now()
             self._initiative.record_user_reply()
+            self._cancel_pending_proactive()
             self._task_count = len(envelope.tasks)
-            self._presence = envelope.presence
+            self._crisis = _is_crisis(envelope.message.text)
+            if envelope.presence is not None:
+                self._presence = envelope.presence
             turn = TurnContext.from_envelope(envelope)
+            turn.presence = turn.presence or (
+                self._presence.summary if self._presence else None
+            )
+            turn.tasks = turn.tasks or self._tasks_text()
+            turn.desktop = self._desktop_text()
+            turn.world = self._world_text()
             turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
             self._pending_inbound += 1
             try:
-                await self._queue.put(turn)
+                await self._enqueue(turn)
             finally:
                 self._pending_inbound -= 1
 
@@ -273,17 +456,36 @@ class AliyaRuntime:
             _EVENT_TOPICS, since_sequence=since, cursors=cursors
         ):
             self._cache_event(event)
-            if event.topic in _REPORT_TOPICS:
+            if self._should_report(event):
                 turn = TurnContext(
-                    user_text=str(event.payload.get("summary", "")) or "（收到一条进度）",
+                    user_text=event_brief(event),
                     session_id=self._last_session_id,
+                    presence=self._presence.summary if self._presence else None,
+                    tasks=self._tasks_text(),
+                    desktop=self._desktop_text(),
+                    world=self._world_text(),
+                    origin="event",
+                    droppable=event.topic == "agent.progress",
                 )
                 turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
-                await self._queue.put(turn)
+                await self._enqueue(turn)
             try:
                 self._memory.save_cursor(event.sequence, topic=event.topic)
             except OSError:
                 _LOG.warning("事件游标落盘失败", exc_info=True)
+
+    def _should_report(self, event: CosmosEvent) -> bool:
+        if event.topic in _REPORT_TOPICS:
+            return True
+        if event.topic != "agent.progress":
+            return False
+        mode = self._config.reply.progress_forwarding
+        if mode == "always":
+            return True
+        if mode == "never":
+            return False
+        turn = self._current_turn
+        return turn is not None and turn.origin == "user"
 
     def _cache_event(self, event: CosmosEvent) -> None:
         if event.topic == "presence.changed":
@@ -295,10 +497,73 @@ class AliyaRuntime:
             state = event.payload.get("state")
             if state in {"up", "unstable", "down"}:
                 self._link = state
+        elif event.topic == "world.inference":
+            if not self._config.world.consume:
+                return
+            try:
+                view = WorldInference.model_validate(event.payload.get("inference"))
+            except (TypeError, ValueError):
+                return
+            self._accept_world(view)
+        elif event.topic == "desktop.layout.changed":
+            try:
+                self._desktop = DesktopSnapshot.model_validate(event.payload)
+            except (TypeError, ValueError):
+                return
+        elif event.topic == "agent.state.changed":
+            try:
+                state = AgentRuntimeState.model_validate(event.payload)
+            except (TypeError, ValueError):
+                return
+            self._agent_states[state.agent_id] = state
+        elif event.topic == "agent.progress":
+            try:
+                progress = AgentProgress.model_validate(event.payload)
+            except (TypeError, ValueError):
+                return
+            self._progress[progress.task_id] = progress
+        elif event.topic == "user.active":
+            at = event.payload.get("at")
+            if isinstance(at, str):
+                with contextlib.suppress(ValueError):
+                    self._last_user_at = datetime.fromisoformat(at)
+            self._initiative.record_user_reply()
+            self._cancel_pending_proactive()
+
+    async def _enqueue(self, turn: TurnContext) -> bool:
+        """只丢可丢弃的进度汇报；用户消息、主动回合与唤醒事件继续排队。"""
+        if turn.droppable:
+            try:
+                self._queue.put_nowait(turn)
+            except asyncio.QueueFull:
+                _LOG.warning("回合队列已满，丢弃进度汇报")
+                return False
+            return True
+        await self._queue.put(turn)
+        return True
+
+    def _cancel_pending_proactive(self) -> None:
+        """用户刚有动作：取消尚未开始的主动回合，不打断进行中的回合。"""
+        for pending in self._pending_proactive:
+            pending.canceled = True
+        self._pending_proactive.clear()
+
+    def _accept_world(self, view: WorldInference) -> bool:
+        """世界推理按 revision 单调更新，旧版本直接丢弃。"""
+        if self._world is not None and view.revision < self._world.revision:
+            return False
+        self._world = view
+        return True
 
     async def _run_worker(self) -> None:
         while True:
             turn = await self._queue.get()
+            if turn.origin == "proactive":
+                with contextlib.suppress(ValueError):
+                    self._pending_proactive.remove(turn)
+                if turn.canceled:
+                    self._queue.task_done()
+                    continue
             self._current_turn = turn
             turn.memory = self._compose_memory(turn.memory)
             try:
@@ -311,9 +576,20 @@ class AliyaRuntime:
                 _LOG.exception("回合执行失败")
                 await self._fallback(turn)
             finally:
-                if turn.message_id:
+                if self._config.memory.enabled and turn.replies:
+                    prefix = (
+                        f"{turn.message_id}:reply"
+                        if turn.message_id
+                        else f"{turn.origin}:{uuid4().hex}:reply"
+                    )
                     for reply in turn.replies:
-                        self._memory.append_turn(f"{turn.message_id}:reply", "aliya", reply)
+                        self._memory.append_turn(
+                            prefix,
+                            "aliya",
+                            reply,
+                            session_id=turn.session_id or self._last_session_id,
+                        )
+                await self._maybe_compress_memory()
                 self._current_turn = None
                 self._queue.task_done()
                 await self._publish_context()
@@ -329,26 +605,111 @@ class AliyaRuntime:
     async def _run_ticker(self) -> None:
         while True:
             await asyncio.sleep(self._config.initiative.tick_seconds)
-            if not self._config.initiative.enabled:
+            if not self._config.initiative.enabled or self._pending_proactive:
                 continue
+            now = self._now()
             decision = self._initiative.should_speak(
-                now=datetime.now(UTC),
+                now=now,
                 presence=self._presence,
                 link=self._link,  # type: ignore[arg-type]
                 last_user_at=self._last_user_at,
             )
             if not decision.should_speak:
                 continue
+            preference = self._preference_gate.match(self._time_signals(now))
+            if not preference.matched:
+                _LOG.debug("主动时间门控未命中：%s", preference.reason)
+                continue
+            user_text = (
+                f"现在是 {now:%H:%M}，距上次对话 {_gap_text(now, self._last_user_at)}。"
+                "\n（现在没有人说话。）"
+            )
+            if preference.condition:
+                user_text += f"\n可以考虑：{preference.condition}"
             turn = TurnContext(
-                user_text="（现在没有人说话。）",
+                user_text=user_text,
                 session_id=self._last_session_id,
+                presence=self._presence.summary if self._presence else None,
+                tasks=self._tasks_text(),
+                desktop=self._desktop_text(),
+                world=self._world_text(),
                 proactive=True,
+                origin="proactive",
             )
             turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
-            await self._queue.put(turn)
+            self._pending_proactive.append(turn)
+            await self._enqueue(turn)
+
+    def _time_signals(self, now: datetime | None = None) -> TimeSignals:
+        """收集时间层可用的语义信号；只读缓存，不触发额外拉取。"""
+        topics = (
+            tuple(self._memory.load_open_topics())
+            if self._config.memory.enabled
+            else ()
+        )
+        return TimeSignals(
+            now=now or self._now(),
+            last_user_at=self._last_user_at,
+            open_topics=topics,
+            world=self._world_text() or "",
+            desktop=self._desktop_text() or "",
+            presence=self._presence.summary if self._presence else "",
+            world_at=self._world.generated_at if self._world is not None else None,
+            desktop_at=self._desktop.generated_at if self._desktop is not None else None,
+        )
+
+    async def _maybe_compress_memory(self) -> None:
+        """本地轮次超过上限时生成滚动摘要，再裁掉旧轮次。"""
+        if not self._config.memory.enabled:
+            return
+        max_turns = self._config.memory.max_turns
+        turns = self._memory.recent_turns(max_turns + 1)
+        if len(turns) <= max_turns:
+            return
+        transcript = "\n".join(
+            f"{'她' if turn.role == 'user' else '我'}：{turn.text}"
+            for turn in turns
+            if turn.text.strip()
+        )[-8000:]
+        previous = self._memory.load_summary().strip()
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    f"把对话压成不超过 {self._config.memory.summary_chars} 字的中文摘要。"
+                    "只保留稳定事实、关系和未完成的事，不写情绪数值与内部标识。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (f"已有摘要：{previous}\n\n" if previous else "") + transcript,
+            },
+        ]
+        try:
+            chat = getattr(self._llm, "chat", None)
+            if not callable(chat):
+                raise AttributeError("LLM 不支持 chat")
+            timeout = min(20, self._config.reply.turn_timeout_seconds)
+            summary = str(await asyncio.wait_for(chat(prompt), timeout=timeout))
+        except Exception:
+            _LOG.warning("记忆压缩失败，改用截断摘要", exc_info=True)
+            summary = transcript
+        summary = summary.strip()[: self._config.memory.summary_chars]
+        if not summary:
+            summary = transcript[: self._config.memory.summary_chars]
+        try:
+            self._memory.save_summary(summary)
+            # 留出一半余量，避免之后每回合都触发压缩。
+            self._memory.prune_turns(max(1, max_turns // 2))
+        except OSError:
+            _LOG.exception("记忆摘要落盘失败")
+        else:
+            _LOG.info("记忆已压缩：保留 %d 条，摘要 %d 字", max(1, max_turns // 2), len(summary))
 
     def _compose_memory(self, base: str | None) -> str | None:
         """cosmos 摘要 + 长期记忆；锚点与私密线不参与摘要。"""
+        if not self._config.memory.enabled:
+            return base.strip() if base and base.strip() else None
         parts: list[str] = []
         if base and base.strip():
             parts.append(base.strip())
@@ -367,38 +728,167 @@ class AliyaRuntime:
                 parts.append("只对你说过：" + "；".join(unspoken))
         return "\n".join(parts) or None
 
+    def _desktop_text(self) -> str | None:
+        if self._desktop is None or not self._desktop.summary.strip():
+            return None
+        return f"平板：{self._desktop.summary}"
+
+    def _tasks_text(self) -> str | None:
+        """把运行态与最近进度压成一段；只给展示名，不暴露 agent_id。"""
+        lines: list[str] = []
+        running = sum(1 for state in self._agent_states.values() if state.status == "running")
+        queued = sum(1 for state in self._agent_states.values() if state.status == "queued")
+        if running or queued:
+            lines.append(f"正在运行 {running} 个，排队 {queued} 个")
+        for progress in self._progress.values():
+            detail = progress.step or progress.message
+            if not detail:
+                continue
+            percent = (
+                f"（{int(progress.progress * 100)}%）"
+                if progress.progress is not None
+                else ""
+            )
+            lines.append(f"{progress.label}{percent}：{detail}")
+        return "\n".join(lines[:8]) or None
+
+    def _world_text(self) -> str | None:
+        """把世界推理压成提示词可用的一段，不暴露内部标识。"""
+        if not self._config.world.provide_context:
+            return None
+        view = self._world
+        if view is None:
+            return None
+        parts = [view.snapshot]
+        limit = self._config.world.max_hypotheses_used
+        if limit > 0:
+            hypotheses = [
+                item
+                for item in view.hypotheses
+                if item.confidence >= self._config.world.trust_threshold
+            ][:limit]
+            if hypotheses:
+                parts.append(
+                    "可能："
+                    + "；".join(
+                        f"{item.statement}（{item.confidence:.0%}）" for item in hypotheses
+                    )
+                )
+        if view.action_windows:
+            parts.append(
+                "时机："
+                + "；".join(
+                    f"{item.window} {item.suggestion}" for item in view.action_windows[:2]
+                )
+            )
+        return "\n".join(parts)
+
+    def _now(self) -> datetime:
+        """优先用控制面校准过的时间；测试桩没有 `now` 时退回本地时间。"""
+        provider = getattr(self._control, "now", None)
+        if callable(provider):
+            try:
+                value = provider()
+            except Exception:
+                _LOG.debug("读取服务端时间失败，退回本地时间", exc_info=True)
+            else:
+                if isinstance(value, datetime):
+                    return value
+        return datetime.now(UTC)
+
     async def _ack(self, message_id: str) -> None:
         try:
             await self._control.ack_inbound(message_id)
         except Exception:
             _LOG.warning("入站确认失败，等待重连重放", exc_info=True)
 
-    async def _send_for_turn(self, turn: TurnContext, text: str) -> None:
-        await self._deliver(text, turn.session_id)
-        if turn.proactive and not turn.sent:
-            self._initiative.record_proactive(datetime.now(UTC))
-        turn.sent = True
+    async def _send_for_turn(self, turn: TurnContext, text: str) -> bool:
+        accepted = await self._send(turn, text)
+        if accepted and turn.proactive and not turn.sent:
+            self._initiative.record_proactive(self._now())
+        return accepted
+
+    async def _send(self, turn: TurnContext, text: str) -> bool:
+        """按回合来源选择通道：用户回复 / 主动消息 / 事件汇报。"""
+        prepared = await self._prepare_outbound(text)
+        if not prepared:
+            return False
+        if turn.origin == "proactive":
+            receipt = await self._control.send_proactive(prepared)
+        elif turn.origin == "event":
+            receipt = await self._control.notify(prepared)
+        else:
+            await self._control.deliver(prepared, session_id=turn.session_id)
+            return True
+        if not receipt.accepted and receipt.deliver_after is None:
+            _LOG.info("主动消息被拒：%s", receipt.reason)
+            return False
+        return True
 
     async def _deliver(self, text: str, session_id: str) -> None:
-        checked = check(text)
-        if not checked.text:
+        prepared = await self._prepare_outbound(text)
+        if not prepared:
             return
+        await self._control.deliver(prepared, session_id=session_id)
+
+    async def _prepare_outbound(self, text: str) -> str:
+        """按配置跑出站检查；命中先让模型重写一次，仍不通过则降级删除。"""
+        checked = check(text, self._config.reply.post_checks)
+        if not checked.text:
+            return ""
         if checked.rules:
             _LOG.warning("出站检查命中：%s", checked.rules)
-        await self._control.deliver(checked.text, session_id=session_id)
+            rewritten = await self._rewrite_outbound(text, checked.rules)
+            if rewritten:
+                checked = check(rewritten, self._config.reply.post_checks)
+                if not checked.text:
+                    return ""
+        limit = self._config.reply.max_chars_per_message
+        if len(checked.text) > limit:
+            return checked.text[: max(0, limit - 1)].rstrip() + "…"
+        return checked.text
+
+    async def _rewrite_outbound(self, text: str, rules: tuple[str, ...]) -> str | None:
+        """模型可用时重写一次；不可用或失败返回 None，走降级删除。"""
+        chat = getattr(self._llm, "chat", None)
+        if not callable(chat):
+            return None
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "把这句话改写成自然口语，保留原意；不要括号旁白、不要工程词、"
+                    "不要内部标识、不要说破状态。只输出改写后的句子。"
+                ),
+            },
+            {"role": "user", "content": f"原句：{text}\n命中：{'、'.join(rules)}"},
+        ]
+        try:
+            rewritten = str(await asyncio.wait_for(chat(prompt), timeout=10))
+        except Exception:
+            _LOG.warning("出站重写失败，走降级删除", exc_info=True)
+            return None
+        return rewritten.strip() or None
 
     async def _publish_context(self) -> None:
+        enabled = self._config.memory.enabled
         try:
             await self._control.set_aliya_context(
                 AliyaContext(
-                    open_topics=self._memory.load_open_topics()[
-                        : self._config.memory.open_topics_limit
-                    ],
-                    unspoken=self._memory.load_unspoken(),
+                    open_topics=(
+                        self._memory.load_open_topics()[: self._config.memory.open_topics_limit]
+                        if enabled
+                        else []
+                    ),
+                    unspoken=(
+                        self._memory.load_unspoken()
+                        if enabled and self._config.memory.private_threads
+                        else []
+                    ),
                     phase=phase_for(
-                        now=datetime.now(UTC),
+                        now=self._now(),
                         tasks=self._task_count,
-                        crisis=False,
+                        crisis=self._crisis,
                     ),
                 )
             )

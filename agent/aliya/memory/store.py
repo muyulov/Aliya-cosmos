@@ -95,6 +95,37 @@ class MemoryStore:
             return []
         return self._read_turns()[-limit:]
 
+    def prune_turns(self, max_turns: int) -> int:
+        """只保留最近 `max_turns` 条；返回删除条数。"""
+        if max_turns <= 0:
+            return 0
+        turns = self._read_turns()
+        if len(turns) <= max_turns:
+            return 0
+        kept = turns[-max_turns:]
+        path = self._dir / "turns.jsonl"
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "message_id": turn.message_id,
+                        "role": turn.role,
+                        "text": turn.text,
+                        "session_id": turn.session_id,
+                        "at": turn.at,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+                for turn in kept
+            ),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+        self._user_ids = None
+        return len(turns) - len(kept)
+
     def _read_turns(self) -> list[Turn]:
         path = self._dir / "turns.jsonl"
         if not path.exists():

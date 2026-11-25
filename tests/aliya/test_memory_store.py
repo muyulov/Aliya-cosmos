@@ -61,3 +61,11 @@ def test_cursor_is_per_topic(tmp_path) -> None:
     store.save_cursor(1, topic="presence.changed")
     assert store.load_cursor(topic="agent.result") == 3
     assert store.load_cursors() == {"agent.result": 3, "presence.changed": 1}
+
+
+def test_prune_turns_keeps_latest(tmp_path) -> None:
+    store = MemoryStore(tmp_path)
+    for index in range(5):
+        store.append_turn(f"m{index}", "user", str(index))
+    assert store.prune_turns(2) == 3
+    assert [turn.text for turn in store.recent_turns()] == ["3", "4"]

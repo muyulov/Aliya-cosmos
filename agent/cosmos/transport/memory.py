@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import cast
 
@@ -159,16 +159,22 @@ class MemoryEventBus:
         return event
 
     def subscribe(
-        self, topics: Sequence[str], *, since_sequence: int | None = None
+        self,
+        topics: Sequence[str],
+        *,
+        since_sequence: int | None = None,
+        cursors: Mapping[str, int] | None = None,
     ) -> AsyncGenerator[CosmosEvent, None]:
         """订阅若干主题：先补发缺口，再接收实时事件。
 
-        注册与补发都在调用时完成：缺口过大直接在订阅点抛出，不必等到第一次
-        迭代才暴露；两个订阅者也不会互相偷走积压。
+        `cursors` 优先于 `since_sequence`：每个主题按自己的断点补发，避免
+        一个落后主题把其他主题的游标一起拉回。注册与补发都在调用时完成：
+        缺口过大直接在订阅点抛出，不必等到第一次迭代才暴露；两个订阅者也
+        不会互相偷走积压。
         """
         topic_list = list(topics)
         queue: asyncio.Queue[object] = asyncio.Queue(maxsize=self._subscriber_limit)
-        for event in self._collect_replay(topic_list, since_sequence):
+        for event in self._collect_replay(topic_list, since_sequence, cursors):
             queue.put_nowait(event)
         for topic in topic_list:
             self._subscribers.setdefault(topic, []).append(queue)
@@ -201,22 +207,32 @@ class MemoryEventBus:
                     if not queues:
                         _ = self._subscribers.pop(topic, None)
 
-    def _collect_replay(self, topics: list[str], since_sequence: int | None) -> list[CosmosEvent]:
+    def _collect_replay(
+        self,
+        topics: list[str],
+        since_sequence: int | None,
+        cursors: Mapping[str, int] | None,
+    ) -> list[CosmosEvent]:
         """按主题取缺口；缺口过大直接抛错，不做静默截断。"""
-        if since_sequence is None:
+        if since_sequence is None and not cursors:
             return []
         replay: list[CosmosEvent] = []
         for topic in topics:
+            cursor = since_sequence
+            if cursors is not None and topic in cursors:
+                cursor = cursors[topic]
+            if cursor is None:
+                continue
             head = self._sequences.get(topic, 0)
-            if head - since_sequence > MAX_REPLAY:
+            if head - cursor > MAX_REPLAY:
                 raise MessageDeliveryError(
-                    f"事件缺口过大：{topic} 缺少 {head - since_sequence} 条",
+                    f"事件缺口过大：{topic} 缺少 {head - cursor} 条",
                     code="gap_too_large",
                 )
             replay.extend(
                 event
                 for event in self._buffers.get(topic, deque())
-                if event.sequence > since_sequence
+                if event.sequence > cursor
             )
         return replay
 

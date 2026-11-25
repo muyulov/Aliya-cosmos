@@ -26,3 +26,9 @@ def test_empty_message_is_dropped() -> None:
     result = check("   ")
     assert result.text == ""
     assert "empty" in result.rules
+
+
+def test_can_limit_checked_rules() -> None:
+    result = check("（笑）tsk_abc", rules=["narration"])
+    assert result.rules == ("narration",)
+    assert "tsk_abc" in result.text

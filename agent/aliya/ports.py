@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Protocol
 
 from agent.cosmos.contracts import (
@@ -33,6 +34,8 @@ class ControlPort(Protocol):
     """Aliya 依赖的全部控制面能力；方法名与 ControlService 对齐。"""
 
     async def handshake(self) -> CosmosCapabilities: ...
+
+    def now(self) -> datetime: ...
 
     def inbound(self) -> AsyncIterator[InboundEnvelope]: ...
 
@@ -72,6 +75,8 @@ class ControlPort(Protocol):
 
     def get_presence(self) -> PresenceSnapshot: ...
 
+    async def fetch_presence(self) -> PresenceSnapshot: ...
+
     async def set_presence_visibility(self, fields: Sequence[PresenceField]) -> None: ...
 
     async def get_link_state(self) -> LinkState: ...
@@ -100,6 +105,9 @@ class InProcessControl:
     async def handshake(self) -> CosmosCapabilities:
         return await self._control.handshake()
 
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
     def inbound(self) -> AsyncIterator[InboundEnvelope]:
         return self._control.inbound()
 
@@ -113,9 +121,9 @@ class InProcessControl:
         since_sequence: int | None = None,
         cursors: Mapping[str, int] | None = None,
     ) -> AsyncIterator[CosmosEvent]:
-        if since_sequence is None and cursors:
-            since_sequence = min(cursors.values())
-        return self._control.subscribe(topics, since_sequence=since_sequence)
+        return self._control.subscribe(
+            topics, since_sequence=since_sequence, cursors=cursors
+        )
 
     async def describe_desktop(self) -> DesktopSnapshot:
         return await self._control.describe_desktop()
@@ -153,6 +161,9 @@ class InProcessControl:
         return await self._control.list_tasks(agent_id, limit)
 
     def get_presence(self) -> PresenceSnapshot:
+        return self._control.get_presence()
+
+    async def fetch_presence(self) -> PresenceSnapshot:
         return self._control.get_presence()
 
     async def set_presence_visibility(self, fields: Sequence[PresenceField]) -> None:

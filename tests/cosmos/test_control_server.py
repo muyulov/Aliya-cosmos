@@ -10,11 +10,15 @@ from agent.cosmos.contracts import (
     CosmosCapabilities,
     CosmosEvent,
     InboundEnvelope,
+    PresenceSnapshot,
+    ReadablePresence,
+    TaskHandle,
     TerminalMessage,
 )
 from agent.cosmos.contracts.rpc import (
     AckInbound,
     Hello,
+    Ping,
     RpcRequest,
     Subscribe,
     parse_rpc_line,
@@ -29,6 +33,8 @@ class FakeControl:
         self.inbound_queue: asyncio.Queue[InboundEnvelope] = asyncio.Queue()
         self.event_queue: asyncio.Queue[CosmosEvent] = asyncio.Queue()
         self.delivered: list[str] = []
+        self.invoked: tuple[str, dict[str, object], str] | None = None
+        self.subscription: dict[str, object] | None = None
 
     async def deliver(self, text: str, *, session_id: str, kind: str = "chat") -> None:
         self.delivered.append(text)
@@ -36,13 +42,39 @@ class FakeControl:
     async def handshake(self) -> CosmosCapabilities:
         return CosmosCapabilities(api_version="1.0", contract_version="1.0.0")
 
+    def get_presence(self) -> PresenceSnapshot:
+        return PresenceSnapshot(
+            captured_at=datetime.now(UTC),
+            readable=ReadablePresence(summary="在电脑前"),
+        )
+
+    async def invoke_agent(
+        self, agent_id: str, params: dict[str, object], *, session_id: str
+    ) -> TaskHandle:
+        self.invoked = (agent_id, params, session_id)
+        return TaskHandle(
+            task_id="t1",
+            agent_id=agent_id,
+            label="测试任务",
+            accepted_at=datetime.now(UTC),
+        )
+
     async def inbound(self) -> AsyncIterator[InboundEnvelope]:
         while True:
             yield await self.inbound_queue.get()
 
     async def subscribe(
-        self, topics: list[str], *, since_sequence: int | None = None
+        self,
+        topics: list[str],
+        *,
+        since_sequence: int | None = None,
+        cursors: dict[str, int] | None = None,
     ) -> AsyncIterator[CosmosEvent]:
+        self.subscription = {
+            "topics": topics,
+            "since": since_sequence,
+            "cursors": cursors,
+        }
         while True:
             yield await self.event_queue.get()
 
@@ -220,6 +252,103 @@ async def test_deliver_is_deduplicated(
         await writer.drain()
         assert parse_rpc_line((await reader.readline()).decode()).type == "result"
         assert fake_control.delivered == ["在吗"]
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_passes_per_topic_cursors(
+    control_server: ControlServerService,
+    socket_path: Path,
+    fake_control: FakeControl,
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        await hello(reader, writer)
+        writer.write(
+            Subscribe(topics={"agent.result": 3, "presence.changed": 1})
+            .model_dump_json()
+            .encode()
+            + b"\n"
+        )
+        await writer.drain()
+        assert parse_rpc_line((await reader.readline()).decode()).type == "subscribed"
+        for _ in range(50):
+            if fake_control.subscription is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert fake_control.subscription == {
+            "topics": ["agent.result", "presence.changed"],
+            "since": 1,
+            "cursors": {"agent.result": 3, "presence.changed": 1},
+        }
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_get_presence_rpc_handles_sync_method(
+    control_server: ControlServerService,
+    socket_path: Path,
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        await hello(reader, writer)
+        writer.write(RpcRequest(id="1", method="get_presence").model_dump_json().encode() + b"\n")
+        await writer.drain()
+        response = parse_rpc_line((await reader.readline()).decode())
+        assert response.type == "result"
+        assert response.result["readable"]["summary"] == "在电脑前"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_invoke_agent_rpc_forwards_session_id(
+    control_server: ControlServerService,
+    socket_path: Path,
+    fake_control: FakeControl,
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        await hello(reader, writer)
+        request = RpcRequest(
+            id="1",
+            method="invoke_agent",
+            params={
+                "agent_id": "echo",
+                "params": {"text": "hi"},
+                "session_id": "s1",
+            },
+        )
+        writer.write(request.model_dump_json().encode() + b"\n")
+        await writer.drain()
+        response = parse_rpc_line((await reader.readline()).decode())
+        assert response.type == "result"
+        assert response.result["task_id"] == "t1"
+        assert fake_control.invoked == ("echo", {"text": "hi"}, "s1")
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_ping_gets_pong(
+    control_server: ControlServerService,
+    socket_path: Path,
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        await hello(reader, writer)
+        now = datetime.now(UTC)
+        writer.write(Ping(at=now).model_dump_json().encode() + b"\n")
+        await writer.drain()
+        response = parse_rpc_line((await reader.readline()).decode())
+        assert response.type == "pong"
+        assert response.at == now
     finally:
         writer.close()
         await writer.wait_closed()

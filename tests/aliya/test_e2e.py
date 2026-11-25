@@ -19,6 +19,7 @@ from agent.cosmos.contracts import (
     DispatchPlan,
     InboundEnvelope,
     PlannedTask,
+    ProactiveReceipt,
     TerminalMessage,
 )
 from agent.cosmos.services.control_server import ControlServerService
@@ -32,6 +33,8 @@ class FakeControl:
         self.inbound_queue: asyncio.Queue[InboundEnvelope] = asyncio.Queue()
         self.event_queue: asyncio.Queue[CosmosEvent] = asyncio.Queue()
         self.delivered: list[str] = []
+        self.notified: list[str] = []
+        self.proactive: list[str] = []
         self.dispatched: list[str] = []
         self.contexts: list[AliyaContext] = []
 
@@ -54,6 +57,16 @@ class FakeControl:
 
     async def deliver(self, text: str, *, session_id: str, kind: str = "chat") -> None:
         self.delivered.append(text)
+
+    async def notify(self, text: str, *, dispatch_id: str | None = None) -> ProactiveReceipt:
+        self.notified.append(text)
+        self.delivered.append(text)
+        return ProactiveReceipt(accepted=True, reason="ok")
+
+    async def send_proactive(self, text: str, *, urgency: float = 0.5) -> ProactiveReceipt:
+        self.proactive.append(text)
+        self.delivered.append(text)
+        return ProactiveReceipt(accepted=True, reason="ok")
 
     async def set_aliya_context(self, ctx: AliyaContext) -> None:
         self.contexts.append(ctx)
@@ -96,13 +109,22 @@ class FakeControl:
         return None
 
     async def push_event(self, topic: str, summary: str) -> None:
+        if topic == "agent.result":
+            payload: dict[str, object] = {
+                "agent_id": "echo",
+                "task_id": "t1",
+                "dispatch_id": "d1",
+                "result": {"status": "ok", "summary": summary},
+            }
+        else:
+            payload = {"summary": summary}
         self.event_queue.put_nowait(
             CosmosEvent(
                 event_id=f"e-{topic}",
                 topic=topic,
                 sequence=1,
                 at=datetime.now(UTC),
-                payload={"summary": summary},
+                payload=payload,
             )
         )
 

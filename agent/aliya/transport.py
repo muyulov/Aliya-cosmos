@@ -7,7 +7,7 @@ import contextlib
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel
 
@@ -86,6 +86,8 @@ class RemoteControl:
         self._connected = False
         self._closed = False
         self._backoff_seconds = 1.0
+        self._clock_offset = timedelta(0)
+        self._server_timezone = "UTC"
         self._read_task: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
 
@@ -143,6 +145,10 @@ class RemoteControl:
             raise ConnectionError("控制面尚未握手")
         return self._capabilities
 
+    def now(self) -> datetime:
+        """按握手时校准的偏移返回服务端时间。"""
+        return datetime.now(UTC) + self._clock_offset
+
     async def call(self, method: str, params: dict[str, object]) -> object:
         if not self._connected:
             await self.connect()
@@ -181,6 +187,11 @@ class RemoteControl:
             )
         if not isinstance(message, HelloOk):
             raise ConnectionError("控制面握手响应非法")
+        server_time = message.server_time
+        if server_time.tzinfo is None:
+            server_time = server_time.replace(tzinfo=UTC)
+        self._clock_offset = server_time.astimezone(UTC) - datetime.now(UTC)
+        self._server_timezone = message.timezone
         return CosmosCapabilities.model_validate(message.capabilities)
 
     async def _read_loop(self) -> None:
@@ -382,6 +393,11 @@ class RemoteControl:
             captured_at=datetime.now(UTC),
             readable=ReadablePresence(summary="暂时看不到状态", tone="unknown"),
         )
+
+    async def fetch_presence(self) -> PresenceSnapshot:
+        snapshot = PresenceSnapshot.model_validate(await self.call("get_presence", {}))
+        self._presence = snapshot
+        return snapshot
 
     async def set_presence_visibility(self, fields: Sequence[PresenceField]) -> None:
         await self.call("set_presence_visibility", {"fields": list(fields)})

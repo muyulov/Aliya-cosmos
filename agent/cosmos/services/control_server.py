@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import os
 from collections import OrderedDict
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 from pydantic import BaseModel
 
@@ -25,6 +26,8 @@ from agent.cosmos.contracts.rpc import (
     Hello,
     HelloOk,
     Inbound,
+    Ping,
+    Pong,
     RpcError,
     RpcRequest,
     RpcResponse,
@@ -202,6 +205,9 @@ class ControlServerService(Service):
             session.pending.discard(message.message_id)
             self._pending_inbound.pop(message.message_id, None)
             return
+        if isinstance(message, Ping):
+            await self._send(session.writer, Pong(at=message.at))
+            return
         if isinstance(message, RpcRequest):
             await self._handle_request(session, message)
 
@@ -293,13 +299,16 @@ class ControlServerService(Service):
             raw_params = params.get("params", {})
             return await control.invoke_agent(
                 str(params["agent_id"]),
-                dict(raw_params),  # type: ignore[arg-type]
+                cast("dict[str, object]", raw_params),
+                session_id=str(params["session_id"]),
             )
         if method == "patch_layout":
             return await control.patch_layout(DesktopLayoutPatch.model_validate(params["patch"]))
         if method == "set_aliya_context":
             return await control.set_aliya_context(AliyaContext.model_validate(params["context"]))
-        return await getattr(control, method)(**params)
+        result = getattr(control, method)(**params)
+        # ControlService 里存在同步方法（如 get_presence），统一在这里兼容。
+        return await result if inspect.isawaitable(result) else result
 
     def _trim_dedupe(self) -> None:
         while len(self._dedupe) > 500:
@@ -325,8 +334,11 @@ class ControlServerService(Service):
     async def _pump_events(self, session: ControlSession) -> None:
         await session.subscribed.wait()
         topics = list(session.topics) or list(EVENT_TOPICS)
-        since = min(session.topics.values()) if session.topics else None
-        async for event in self._control.subscribe(topics, since_sequence=since):
+        cursors = dict(session.topics) if session.topics else None
+        since = min(cursors.values()) if cursors else None
+        async for event in self._control.subscribe(
+            topics, since_sequence=since, cursors=cursors
+        ):
             try:
                 session.events.put_nowait(event)
             except asyncio.QueueFull:

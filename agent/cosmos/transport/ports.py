@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from typing import Protocol
 
 from agent.cosmos.contracts import (
@@ -32,7 +32,11 @@ class EventBusPort(Protocol):
     async def publish(self, topic: str, payload: object) -> CosmosEvent: ...
 
     def subscribe(
-        self, topics: Sequence[str], *, since_sequence: int | None = None
+        self,
+        topics: Sequence[str],
+        *,
+        since_sequence: int | None = None,
+        cursors: Mapping[str, int] | None = None,
     ) -> AsyncGenerator[CosmosEvent, None]: ...
 
 

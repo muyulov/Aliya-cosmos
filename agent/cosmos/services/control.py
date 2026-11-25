@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
 from typing import ClassVar
 
 from agent.cosmos.contracts import (
@@ -169,18 +169,24 @@ class ControlService(Service):
         return self._bus.messages.subscribe("aliya")
 
     def subscribe(
-        self, topics: Sequence[str], *, since_sequence: int | None = None
+        self,
+        topics: Sequence[str],
+        *,
+        since_sequence: int | None = None,
+        cursors: Mapping[str, int] | None = None,
     ) -> AsyncGenerator[CosmosEvent, None]:
         """事件订阅：先校验白名单，非法主题直接拒绝。
 
-        补发缺口过大时退回「当前快照 + 实时事件」，避免调用方拿到一个无法
-        恢复的 MessageDeliveryError。
+        `cursors` 用于逐主题断点续订；补发缺口过大时退回「当前快照 + 实时
+        事件」，避免调用方拿到一个无法恢复的 MessageDeliveryError。
         """
         unknown = [topic for topic in topics if topic not in EVENT_TOPICS]
         if unknown:
             raise ValueError(f"未知事件主题：{'、'.join(unknown)}")
         try:
-            return self._bus.events.subscribe(list(topics), since_sequence=since_sequence)
+            return self._bus.events.subscribe(
+                list(topics), since_sequence=since_sequence, cursors=cursors
+            )
         except MessageDeliveryError as exc:
             self.log.warning("事件缺口过大，改推全量快照", 原因=str(exc))
             return self._snapshot_stream(list(topics))

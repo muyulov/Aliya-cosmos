@@ -104,6 +104,28 @@ async def test_按序列补发缺口() -> None:
         await iterator.aclose()
 
 
+async def test_逐主题游标各自补发() -> None:
+    bus = MemoryEventBus(now=lambda: datetime.now(UTC))
+    for index in range(3):
+        _ = await bus.publish("agent.progress", {"progress": index})
+    for index in range(2):
+        _ = await bus.publish("presence.changed", {"revision": index})
+
+    iterator = bus.subscribe(
+        ["agent.progress", "presence.changed"],
+        cursors={"agent.progress": 1, "presence.changed": 0},
+    )
+    try:
+        events = await take(iterator, 3)
+        assert [(event.topic, event.sequence) for event in events] == [
+            ("agent.progress", 2),
+            ("agent.progress", 3),
+            ("presence.changed", 1),
+        ]
+    finally:
+        await iterator.aclose()
+
+
 async def test_缺口过大时报错() -> None:
     bus = MemoryEventBus(now=lambda: datetime.now(UTC), buffer_limit=MAX_REPLAY + 10)
     for _ in range(MAX_REPLAY + 1):
