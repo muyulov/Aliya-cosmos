@@ -12,7 +12,13 @@ from agent.cosmos.contracts import (
     InboundEnvelope,
     TerminalMessage,
 )
-from agent.cosmos.contracts.rpc import AckInbound, Hello, RpcRequest, parse_rpc_line
+from agent.cosmos.contracts.rpc import (
+    AckInbound,
+    Hello,
+    RpcRequest,
+    Subscribe,
+    parse_rpc_line,
+)
 from agent.cosmos.services.control_server import ControlServerService
 from core.config import ClockSettings, Settings
 from core.service import ClockService
@@ -173,6 +179,11 @@ async def test_event_is_pushed(
     reader, writer = await asyncio.open_unix_connection(socket_path)
     try:
         await hello(reader, writer)
+        writer.write(
+            Subscribe(topics={"agent.result": 0}).model_dump_json().encode() + b"\n"
+        )
+        await writer.drain()
+        assert parse_rpc_line((await reader.readline()).decode()).type == "subscribed"
 
         fake_control.event_queue.put_nowait(
             CosmosEvent(

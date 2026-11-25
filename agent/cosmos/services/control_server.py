@@ -80,6 +80,8 @@ class ControlSession:
         self.writer = writer
         self.pending: set[str] = set()
         self.events: asyncio.Queue[CosmosEvent] = asyncio.Queue(maxsize=outbox_limit)
+        self.subscribed = asyncio.Event()
+        self.topics: dict[str, int] = {}
         self.tasks: list[asyncio.Task[None]] = []
         self.closed = False
 
@@ -190,6 +192,8 @@ class ControlServerService(Service):
     async def _dispatch(self, session: ControlSession, line: str) -> None:
         message = parse_rpc_line(line)
         if isinstance(message, Subscribe):
+            session.topics = dict(message.topics)
+            session.subscribed.set()
             await self._send(session.writer, Subscribed(topics=message.topics))
             return
         if isinstance(message, AckInbound):
@@ -309,7 +313,10 @@ class ControlServerService(Service):
             )
 
     async def _pump_events(self, session: ControlSession) -> None:
-        async for event in self._control.subscribe(list(EVENT_TOPICS)):
+        await session.subscribed.wait()
+        topics = list(session.topics) or list(EVENT_TOPICS)
+        since = min(session.topics.values()) if session.topics else None
+        async for event in self._control.subscribe(topics, since_sequence=since):
             try:
                 session.events.put_nowait(event)
             except asyncio.QueueFull:
