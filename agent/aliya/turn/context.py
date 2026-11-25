@@ -6,6 +6,7 @@ presence / tasks / world / memory 由 runtime 填好后交给 `context_text()`�
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from openai.types.chat import ChatCompletionMessageParam
@@ -22,6 +23,14 @@ class TurnContext:
     session_id: str = ""
     message_id: str = ""
     sent: bool = False
+    sender: Callable[[str], Awaitable[None]] | None = field(default=None, repr=False)
+
+    async def send(self, text: str) -> None:
+        """经出站检查后投递；`sent` 用于避免正文重复发送。"""
+        if self.sender is None:
+            raise RuntimeError("回合没有配置发送器")
+        await self.sender(text)
+        self.sent = True
 
     def context_text(self) -> str:
         """把可选上下文拼成一段；空段直接跳过。"""
