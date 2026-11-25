@@ -193,8 +193,9 @@ WorldBridgeService 组装 WorldInput
 | `WorldBridgeService` | 输入组装、结果转发、缓存 | `ClockService`、`PresenceService`、`AgentRuntimeService` |
 | `TerminalService` | 双向消息、推送、主动消息节流 | `ConversationService`、`PresenceService` |
 | `ControlService` | Aliya 控制面 | 以上全部 |
+| `ControlServerService` | 控制面 UDS/NDJSON 端点：握手、RPC、入站与事件推送 | `ControlService`、`ClockService`、`AgentSettings` |
 
-依赖成链：`ControlService → TerminalService → DispatchService → RuntimeService → RegistryService`。启动顺序由 `ServiceManager` 按类型自动分层，不要手工排序。
+依赖成链：`ControlServerService → ControlService → TerminalService → DispatchService → RuntimeService → RegistryService`。启动顺序由 `ServiceManager` 按类型自动分层，不要手工排序。
 
 `AgentRegistryService` 不依赖任何 LLM 服务：注册与查询是纯数据操作，测试时可脱离模型单独跑。
 
@@ -202,13 +203,13 @@ WorldBridgeService 组装 WorldInput
 
 ## 6. 与 `agent/aliya` 的代码边界
 
-`agent/aliya` 的实现不在本文档范围内，但接口边界必须明确：
+`agent/aliya` 已实现为独立进程，通过 UDS 控制面连接 cosmos；接口边界必须明确：
 
 | 由 cosmos 提供 | 由 Aliya 自己实现 |
 | --- | --- |
 | `TerminalService.ingest()` 接收用户消息 | 怎么理解、怎么回应 |
 | `ConversationContext`（历史摘要、用户状态摘要） | 怎么使用这些上下文 |
-| `ControlService` 全部方法（桌面、调度、订阅） | 何时调用、调用哪个 |
+| `ControlService` / `ControlPort` 全部方法（桌面、调度、订阅） | 何时调用、调用哪个 |
 | `WorldInference`（状态摘要、假设、行动窗口） | 采纳还是忽略 |
 | `TerminalService.send_to_user()` / `notify()` | 说什么、什么时候说 |
 
@@ -216,7 +217,7 @@ WorldBridgeService 组装 WorldInput
 
 | 约束 | 理由 |
 | --- | --- |
-| Aliya 不 import `agent.cosmos.services.*` 的具体实现，只依赖 `agent.cosmos.contracts` 与 `ControlService` 的协议 | 换实现不破坏 Aliya |
+| Aliya 的生产路径不 import `agent.cosmos.services.*`，只依赖 `agent.cosmos.contracts` 与 `ControlPort`；`InProcessControl` 仅用于测试 | 换实现不破坏 Aliya |
 | Aliya 不直接持有子 agent handler 引用 | 否则绕过调度与状态监控 |
 | Aliya 不直接写 `ConversationContext` 的存储，只通过 `TerminalService` 提交 | 避免两份历史打架 |
 | cosmos 不 import `agent.aliya.*` | 依赖方向必须是 Aliya → cosmos → core |
@@ -224,10 +225,10 @@ WorldBridgeService 组装 WorldInput
 依赖方向：
 
 ```text
-agent.aliya  ──►  agent.cosmos.contracts / ControlService  ──►  core.*
+agent.aliya  ──►  agent.cosmos.contracts / ControlPort  ──►  core.*
 ```
 
-反向依赖只允许一种：cosmos 通过 `MessageBus` 端点名称（`"aliya"`）投递消息，这是运行期解耦，不是代码依赖。
+生产环境 Aliya 通过 `ControlServerService` 的 UDS/NDJSON 端点调用 `ControlService`；测试可用 `InProcessControl` 直接委托。反向依赖只允许一种：cosmos 通过 `MessageBus` 端点名称（`"aliya"`）投递消息，这是运行期解耦，不是代码依赖。
 
 ---
 
@@ -236,7 +237,8 @@ agent.aliya  ──►  agent.cosmos.contracts / ControlService  ──►  core
 | 形态 | 适用 | 差异点 |
 | --- | --- | --- |
 | 同进程（默认） | 单机部署、开发调试 | `MessageBus` / `EventBus` 用 asyncio 队列；时间戳统一 `ClockService`；无序列化开销 |
-| 分进程 / 跨机 | Aliya 独立迭代、多客户端 | 换成 IPC / WebSocket 适配器；所有契约必须可 JSON 序列化；事件需要重连与补偿 |
+| 独立进程（Aliya） | Aliya 独立迭代、崩溃隔离 | 控制面走 Unix 域套接字 + NDJSON；首行握手，之后请求-响应、入站与事件共用一条连接 |
+| 分进程 / 跨机 | 多客户端、远程部署 | 换成 IPC / WebSocket 适配器；所有契约必须可 JSON 序列化；事件需要重连与补偿 |
 
 设计要求：**契约模型一律可 JSON 序列化**，不使用只有同进程能传的对象（future、生成器、闭包）。这样换传输层时不用改契约。
 

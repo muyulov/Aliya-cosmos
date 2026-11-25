@@ -13,8 +13,11 @@ uv sync
 # 启动基础服务（Ctrl-C 优雅关闭）
 uv run python -m core.main
 
-# 启动主 agent（core 4 个服务 + cosmos 10 个服务）
+# 启动主 agent（core 4 个服务 + cosmos 11 个服务）
 uv run python -m agent.cosmos.app
+
+# 另开终端，启动 Aliya（先 cosmos 后 Aliya）
+ALIYA_CONTROL_TOKEN=dev uv run python -m agent.aliya.app
 ```
 
 无需任何配置即可启动，所有配置项都有默认值。要自定义时改 `data/config/cosmos.yaml`；密钥类配置写在 `.env`（参考 `.env.example`）。
@@ -28,6 +31,7 @@ uv run python -m agent.cosmos.app
 | 安装依赖 | `uv sync` |
 | 启动基础服务 | `uv run python -m core.main` |
 | 启动主 agent | `uv run python -m agent.cosmos.app` |
+| 启动 Aliya | `ALIYA_CONTROL_TOKEN=dev uv run python -m agent.aliya.app` |
 | 跑测试 | `uv run pytest` |
 | 覆盖率 | `uv run pytest --cov=core --cov=agent` |
 | 代码检查 | `uv run ruff check .` |
@@ -46,8 +50,8 @@ core/
   decision/      判断层：批量提问与 choice / score / noul 三原语
   agent/         Agent 工具层：工具声明与执行、Skill、MCP、系统提示拼装
 agent/
-  cosmos/        主 agent：契约、9 个常驻服务、进程内总线、装配与进程入口
-  aliya/         上层控制者（设计文档；实现不在本次范围）
+  cosmos/        主 agent：契约、11 个常驻服务、进程内总线、装配与进程入口
+  aliya/         上层控制者：独立进程、UDS 客户端、回合循环、记忆与自主行动
 data/           配置与运行数据：config/cosmos.yaml 为配置骨架，可安全提交
   skills/       技能目录：<name>/SKILL.md
   mcp.json      MCP server 清单（标准 mcpServers 结构）

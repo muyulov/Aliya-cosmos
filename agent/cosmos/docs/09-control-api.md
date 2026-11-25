@@ -31,10 +31,26 @@
 | 世界 | `get_world_view(force=False)` | 世界推演结果 |
 | 世界 | `refresh_world()` | 强制刷新推演 |
 | 世界 | `set_aliya_context(ctx)` | 提供 Aliya 侧上下文 |
-| 消息 | `deliver(text)` | 回应用户 |
+| 消息 | `deliver(text, session_id=...)` | 回应用户 |
 | 消息 | `notify(text)` | 进展通知（受节流） |
 | 消息 | `send_proactive(text, urgency=0.5)` | 主动发起对话（受节流；`urgency >= 0.8` 可突破小时预算） |
 | 消息 | `history(session_id, limit=20)` | 读取对话历史 |
+
+### 1.1 传输与 RPC 映射
+
+生产环境 Aliya 通过 Unix 域套接字 + NDJSON 调用 `ControlServerService`：
+
+| 行类型 | 方向 | 说明 |
+| --- | --- | --- |
+| `hello` | 客户端 → 服务端 | 首行，携带 token 与 `contract_version` |
+| `hello_ok` | 服务端 → 客户端 | 能力、服务端时间、时区 |
+| `request` / `response` | 双向 | `method` + `params`；响应带 `id` 与 `ok` |
+| `inbound` / `ack_inbound` | 服务端 → 客户端 / 反向 | 用户消息与确认；未确认消息保留在会话 pending |
+| `subscribe` / `subscribed` | 双向 | 主题与游标；重连后按游标补偿 |
+| `event` | 服务端 → 客户端 | 事件推送 |
+| `ping` / `pong` | 双向 | 心跳 |
+
+RPC 方法名与 `ControlService` 同名；`now` 是额外方法，返回 `server_time` 与 `timezone`。`deliver` / `notify` / `send_proactive` 接受可选 `client_msg_id`，服务端按该 id 去重，客户端重连后可安全重放 outbox。
 
 ---
 
@@ -296,7 +312,7 @@ class CosmosEvent(BaseModel):
 | `invoke_agent` | 否（每次新任务；如需去重由 `session_id + params` 决定） | 2s 内返回 `task_id` |
 | `execute_plan` | 是（按 `dispatch_id`） | 2s |
 | `cancel_*` | 是 | 5s |
-| `deliver` / `notify` / `send_proactive` | 否 | 3s |
+| `deliver` / `notify` / `send_proactive` | 否（可带 `client_msg_id` 去重） | 3s |
 | `get_presence` / `get_world_view` | 是 | 1s（`force=True` 时 12s） |
 
 超时语义：调用方超时不代表操作未生效。`invoke_agent` 超时后应先用 `list_tasks()` 核对，再决定是否重发。

@@ -1,103 +1,70 @@
 # Aliya agent 配置样例
 #
-# 用法：把 agent.aliya 整段并入 data/config/cosmos.yaml。
-# 说明：这是目标形态的配置骨架。core/config/settings.py 已有 AgentSettings，
-#       但目前只挂了 cosmos 节点；落地时需要新增 aliya 与 control 节点。
+# 用法：把 agent.control 与 agent.aliya 整段并入 data/config/cosmos.yaml。
+# 字段与 core/config/settings.py 的 AgentControlSettings / AgentAliyaSettings 对齐。
 # 边界：本文件只表达 Aliya 自己的意愿、人设与记忆策略。
 #       通道侧的节流（免打扰、最小间隔、每日上限）与链路状态由
 #       agent.cosmos.terminal 执行，不要在这里重复配置，否则两处策略会打架。
 
 agent:
+  control:
+    socket_path: data/state/aliya.sock
+    token_env: ALIYA_CONTROL_TOKEN
+    max_clients: 1
+    request_timeout: 15
+    outbox_limit: 200
+    max_line_bytes: 1048576
+
   aliya:
     # ---------- 人设 ----------
     persona:
-      source: data/prompt/Aliya.md # 唯一来源；正文不在此复制，改人设只改这一个文件
-      name: Aliya
-      language: zh-CN
-      # 人设明写的自我认知：完整的、有尊严的个体
-      self_image: 24 岁，生物学家，八级飞船维修工
-      # 不主动自称或提及，只在被问到或情境需要时自然提及
-      avoid_unprompted: [Doll, 克隆体, 寿命, 抑制剂]
-
-    # ---------- 世界观与信息差 ----------
-    canon:
-      ship: 海獭号
-      counterpart: 来自 1000 年前地球的人类 # 对端称呼，禁止出现"玩家/用户"
-      knowledge_gaps: # 必须维持的信息差，任何回复都不得越过
-        - 不知道「时间映射同步器」这个装置的存在
-        - 不知道信号已经取代了海獭号原有的 AI
-      forbidden_terms: [玩家, 用户, agent, 模型, 提示词, 调度, 面板, 节点]
-      # 遇到这些话题时不解释，用她的方式绕开（见人设"维持信息差"）
-      deflect: [时间同步, 信号来源, 装置原理]
-
-    # ---------- 语气 ----------
-    voice:
-      style: 像发微信，简短随意，语义完整即可
-      narration: none # 不写括号旁白与动作描写
-      keep_punctuation: true # 保留逗号、句号、问号、感叹号、省略号，尤其句尾
-      split_messages: as_is # 她发几条就是几条，通道不得合并
-      line_breaks: natural # 不把短语逐行拆开，不为凑条数刻意换行
-      interjections: [啊, 害, 嗯] # 可用，不堆叠
-      # 情境语气锚点，供提示词拼装时给例子（正文仍以人设文件为准）
-      samples:
-        daily: 害，你怎么突然问这个？不就是知道你喜欢的花吗？
-        crisis: 啊！该死的，动力室现在跟个大火炉一样，烫得要命。我的动作得再快一点……
-        vulnerable: 我其实……有点不想从这里离开了。你是我唯一一个可以这样诉说的人了。
-        praised: 啊啊啊啊啊！怎么还有照片啊。别别别看。
+      source: data/prompt/Aliya.md # 人格正文唯一来源
+      charter: data/prompt/Aliya.charter.md # 只取 visible 区进提示词
+      includes: [] # 额外片段，按顺序拼在准则与人格之后
 
     # ---------- 记忆 ----------
     memory:
       enabled: true
-      dir: agent/aliya/data # 相对当前工作目录；不与 cosmos 的 data/state 混用
-      max_turns: 200 # 保留的对话轮次上限
-      summary_chars: 600 # 更早内容的摘要长度
-      store: jsonl # jsonl（默认，易追加）/ sqlite（需要检索时）
-      open_topics_limit: 5 # 未收尾话题最多保留几条
-      # 关系暗号：摘要与压缩时必须保留，丢了就等于失忆
+      dir: agent/aliya/data # 不与 cosmos 的 data/state 混用
+      max_turns: 200
+      summary_chars: 600
+      open_topics_limit: 5
       anchors: [风信子, 拉姆石, 高马尾, 兔子狗, 海獭号]
-      # 只对玩家说过的话，单独留存，不写进对外的摘要
       private_threads: true
 
     # ---------- 自主行动（意愿，不是通道策略）----------
     initiative:
       enabled: true
+      tick_seconds: 60
+      min_gap_seconds: 3600
+      daily_soft_limit: 4
       prefer_when:
         - 失眠且对方超过 2 小时没来
         - 有未收尾的话题且距上次互动超过 6 小时
         - 刚修好某样东西，想被夸
         - 深夜刷信息刷到想说话
-      min_gap_seconds: 3600 # Aliya 自愿遵守的最小间隔，必须 ≥ cosmos 侧配置
-      daily_soft_limit: 4 # 自我约束上限，低于 cosmos 的硬上限
-      respect_presence_hint: true # 采纳 readable.hint 作为参考，不当命令
-      respect_link_state: true # 通讯中断时不发，等链路恢复
-      quiet_acknowledge: true # 被通道拒绝时不再重试，等 deliver_after
-      default_action: wait # 证据不足时的默认选择：wait / speak
-
-    # ---------- 世界推理 ----------
-    world:
-      consume: true # 是否订阅 world.inference
-      max_hypotheses_used: 2 # 只取置信度最高的前 N 条参与决策
-      trust_threshold: 0.5 # 低于此置信度的假设不采纳
-      prefer_action_windows: true # 是否参考行动窗口调整时机
-      provide_context: true # 是否用 set_aliya_context() 回传未收尾话题与当前处境
-
-    # ---------- 调度偏好 ----------
-    tools:
-      prefer_agents: [edit] # 多个候选时的偏好，不构成强制
-      auto_execute_threshold: 0.8 # 高于此置信度才不问用户直接执行
-      ask_before_write: true # 有副作用的操作用前是否先确认
-      max_parallel_dispatch: 2 # 自我约束，不得超过 cosmos 的 max_parallel
-      # 汇报结果时的口吻：先给结论，再补细节；失败时先承认，再解释
-      report_style: conclusion_first
+      respect_presence_hint: true
+      respect_link_state: true
+      default_action: wait # wait / speak
 
     # ---------- 回复 ----------
     reply:
-      max_chars_per_message: 1200 # 超出后由 Aliya 自行分段，不依赖通道截断
-      progress_forwarding: on_wait # agent 进度是否转给用户：always / on_wait / never
-      error_style: 轻描淡写 # 失败时的语气基调：直白 / 轻描淡写
-      # 后置检查：命中即重写，不是拦截发送
-      post_checks:
-        - 无括号旁白
-        - 无 forbidden_terms
-        - 句尾标点完整
-        - 未暴露用户状态推断
+      max_rounds: 6
+      turn_timeout_seconds: 120
+      max_chars_per_message: 1200
+      fallback_text: 嗯……我这边卡了一下，等我一下。
+      progress_forwarding: on_wait # always / on_wait / never
+      post_checks: [narration, engineering_terms, internal_ids, presence_leak]
+
+    # ---------- 工具偏好 ----------
+    tools:
+      prefer_agents: [edit]
+      ask_before_write: true
+      max_parallel_dispatch: 2
+
+    # ---------- 世界推理 ----------
+    world:
+      consume: true
+      max_hypotheses_used: 2
+      trust_threshold: 0.5
+      provide_context: true

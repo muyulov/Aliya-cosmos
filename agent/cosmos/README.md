@@ -4,9 +4,9 @@
 - 关联目录：`agent/aliya`（Aliya 的实现，本文档描述协作接口与边界）
 - 角色设定：`data/prompt/Aliya.md`（人设唯一来源，本文档的表述需与它一致）
 - 底层依赖：`core/`（service / config / logger / llm / decision / agent）
-- 状态：**已实现**。10 个常驻服务（`BusService` + 9 个 cosmos 服务）与契约模型已落地，
+- 状态：**已实现**。15 个常驻服务（core 4 个 + cosmos 11 个，含 `ControlServerService`）与契约模型已落地，
   启动命令 `uv run python -m agent.cosmos.app`；链路心跳、通道状态上报、调度并发/supersede、
-  世界推理定时兜底与事件缺口快照补偿已接入。`agent/aliya` 与真实用户通道仍属扩展
+  世界推理定时兜底与事件缺口快照补偿已接入。Aliya 以独立进程通过 UDS 控制面连接
 
 ---
 
@@ -81,7 +81,7 @@ agent/cosmos/
   services/      core.service.Service 子类：Registry / Runtime / Desktop / Presence / ...
   registry/      子 agent 配置加载（bootstrap）与内置示例 agent（echo）
   transport/     MessageBus / EventBus 端口、进程内实现与 BusService
-  assembly.py    装配入口：core 4 个服务 + cosmos 10 个服务
+  assembly.py    装配入口：core 4 个服务 + cosmos 11 个服务
   app.py         进程入口：uv run python -m agent.cosmos.app
   errors.py      错误树（CosmosError 及其子类）
   __init__.py    对外只导出 CosmosError 与 build_cosmos_manager（延迟导入）
@@ -107,6 +107,7 @@ agent/cosmos/
 | `WorldBridgeService` | 组装世界推理输入、接收推理结果、转发给 Aliya | `ClockService` / `PresenceService` / `AgentRuntimeService` |
 | `TerminalService` | 双向消息通道、路由、异步推送、主动消息投递 | `ConversationService` / `DispatchService` / `PresenceService` |
 | `ControlService` | 向 Aliya 暴露的控制面（桌面操作、订阅、发消息） | 以上全部 |
+| `ControlServerService` | 把 `ControlService` 暴露为 UDS/NDJSON 控制面：握手、RPC、入站与事件推送 | `ControlService` / `ClockService` / 配置 |
 
 依赖方向单向：`agent.cosmos → core`，且 `core` 不知道 `agent` 的存在。
 
