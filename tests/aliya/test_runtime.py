@@ -78,8 +78,10 @@ class FakeLLM:
     def __init__(self, content: str = "在。", delay: float = 0.0) -> None:
         self.content = content
         self.delay = delay
+        self.messages: object = None
 
     async def chat_tools(self, messages: object, tools: object) -> AssistantReply:
+        self.messages = messages
         if self.delay:
             await asyncio.sleep(self.delay)
         return AssistantReply(content=self.content, tool_calls=())
@@ -140,6 +142,34 @@ async def test_turn_timeout_falls_back(tmp_path: Path) -> None:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=3)
         assert control.delivered == [AgentAliyaSettings().reply.fallback_text]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_long_term_memory_is_injected(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    store.save_summary("她最近在整理旧照片")
+    store.save_anchors(["风信子"])
+    store.save_open_topics(["海边的约定"])
+    store.save_unspoken(["只对你说的话"])
+
+    control = FakeControl()
+    llm = FakeLLM()
+    runtime = AliyaRuntime(
+        control=control,  # type: ignore[arg-type]
+        llm=llm,  # type: ignore[arg-type]
+        config=make_config(tmp_path),
+    )
+    await runtime.start()
+    try:
+        control.inbound_queue.put_nowait(make_envelope("m1"))
+        await asyncio.wait_for(runtime.wait_idle(), timeout=2)
+        system = llm.messages[0]["content"]  # type: ignore[index]
+        assert "她最近在整理旧照片" in system
+        assert "风信子" in system
+        assert "海边的约定" in system
+        assert "只对你说的话" in system
     finally:
         await runtime.stop()
 

@@ -289,6 +289,7 @@ class AliyaRuntime:
         while True:
             turn = await self._queue.get()
             self._current_turn = turn
+            turn.memory = self._compose_memory(turn.memory)
             try:
                 runner = self._proactive_runner if turn.proactive else self._runner
                 assert runner is not None
@@ -334,6 +335,26 @@ class AliyaRuntime:
             )
             turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
             await self._queue.put(turn)
+
+    def _compose_memory(self, base: str | None) -> str | None:
+        """cosmos 摘要 + 长期记忆；锚点与私密线不参与摘要。"""
+        parts: list[str] = []
+        if base and base.strip():
+            parts.append(base.strip())
+        summary = self._memory.load_summary().strip()
+        if summary:
+            parts.append("长期摘要：" + summary[: self._config.memory.summary_chars])
+        anchors = self._memory.load_anchors()
+        if anchors:
+            parts.append("锚点：" + "、".join(anchors))
+        topics = self._memory.load_open_topics()[: self._config.memory.open_topics_limit]
+        if topics:
+            parts.append("未收尾：" + "、".join(topics))
+        if self._config.memory.private_threads:
+            unspoken = self._memory.load_unspoken()[:3]
+            if unspoken:
+                parts.append("只对你说过：" + "；".join(unspoken))
+        return "\n".join(parts) or None
 
     async def _ack(self, message_id: str) -> None:
         try:
