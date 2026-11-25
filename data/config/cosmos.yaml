@@ -97,6 +97,35 @@ decision:
 # 未知键在加载期 WARNING 并忽略，不会阻断启动；改完建议跑一次配置校验/测试。
 # ============================================================================
 agent:
+  # 控制面：cosmos 的 UDS 服务端与 Aliya 客户端读同一份。
+  control:
+    socket_path: data/state/aliya.sock
+    token_env: ALIYA_CONTROL_TOKEN
+    max_clients: 1
+    request_timeout: 15
+    outbox_limit: 200
+    max_line_bytes: 1048576
+  # Aliya 自己的意愿、记忆与回复策略；通道侧的节流仍由 cosmos.terminal 执行。
+  aliya:
+    persona:
+      source: data/prompt/Aliya.md
+      charter: data/prompt/Aliya.charter.md
+    memory:
+      anchors: [风信子, 拉姆石, 高马尾, 兔子狗, 海獭号]
+      open_topics_limit: 5
+      private_threads: true
+    initiative:
+      enabled: true
+      tick_seconds: 60
+      min_gap_seconds: 3600
+      daily_soft_limit: 4
+    reply:
+      max_rounds: 6
+      turn_timeout_seconds: 120
+    world:
+      consume: true
+      max_hypotheses_used: 2
+      trust_threshold: 0.5
   cosmos:
     # ---------- 契约 ----------
     contract:

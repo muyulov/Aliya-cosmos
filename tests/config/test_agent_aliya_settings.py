@@ -1,4 +1,4 @@
-from core.config.settings import AgentAliyaSettings, AgentControlSettings
+from core.config.settings import AgentAliyaSettings, AgentControlSettings, load_settings
 
 
 def test_defaults() -> None:
@@ -22,3 +22,10 @@ def test_parse_nested() -> None:
     assert aliya.persona.source == "p.md"
     assert aliya.memory.max_turns == 50
     assert aliya.reply.post_checks == ["narration"]
+
+
+def test_repo_yaml_has_control_and_aliya() -> None:
+    settings = load_settings()
+    assert settings.agent.control.socket_path == "data/state/aliya.sock"
+    assert settings.agent.aliya.persona.source == "data/prompt/Aliya.md"
+    assert settings.agent.aliya.memory.anchors == ["风信子", "拉姆石", "高马尾", "兔子狗", "海獭号"]
