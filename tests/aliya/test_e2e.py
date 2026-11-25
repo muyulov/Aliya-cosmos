@@ -43,7 +43,11 @@ class FakeControl:
             yield await self.inbound_queue.get()
 
     async def subscribe(
-        self, topics: list[str], *, since_sequence: int | None = None
+        self,
+        topics: list[str],
+        *,
+        since_sequence: int | None = None,
+        cursors: dict[str, int] | None = None,
     ) -> AsyncIterator[CosmosEvent]:
         while True:
             yield await self.event_queue.get()

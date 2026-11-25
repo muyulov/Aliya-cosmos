@@ -31,6 +31,7 @@ class FakeControl:
         self.acked: list[str] = []
         self.contexts: list[AliyaContext] = []
         self.since: int | None = None
+        self.cursors: dict[str, int] | None = None
 
     async def handshake(self) -> CosmosCapabilities:
         return CosmosCapabilities(api_version="1.0", contract_version="1.0.0")
@@ -43,9 +44,14 @@ class FakeControl:
         self.acked.append(message_id)
 
     async def subscribe(
-        self, topics: list[str], *, since_sequence: int | None = None
+        self,
+        topics: list[str],
+        *,
+        since_sequence: int | None = None,
+        cursors: dict[str, int] | None = None,
     ) -> AsyncIterator[CosmosEvent]:
         self.since = since_sequence
+        self.cursors = cursors
         if False:
             yield CosmosEvent(
                 event_id="e0",
@@ -167,6 +173,7 @@ async def test_event_subscription_resumes_from_min_cursor(tmp_path: Path) -> Non
                 break
             await asyncio.sleep(0.01)
         assert control.since == 1
+        assert control.cursors == {"agent.result": 3, "presence.changed": 1}
     finally:
         await runtime.stop()
 

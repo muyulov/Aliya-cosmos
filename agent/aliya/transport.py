@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import uuid
 from collections import OrderedDict, deque
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime
 
 from pydantic import BaseModel
@@ -297,9 +297,17 @@ class RemoteControl:
             await self._send(AckInbound(message_id=message_id))
 
     async def subscribe(
-        self, topics: Sequence[str], *, since_sequence: int | None = None
+        self,
+        topics: Sequence[str],
+        *,
+        since_sequence: int | None = None,
+        cursors: Mapping[str, int] | None = None,
     ) -> AsyncIterator[CosmosEvent]:
         self._topics = set(topics)
+        if cursors:
+            for topic, sequence in cursors.items():
+                if topic in self._topics:
+                    self._cursors[topic] = max(self._cursors.get(topic, 0), sequence)
         if since_sequence is not None:
             for topic in topics:
                 self._cursors.setdefault(topic, since_sequence)

@@ -266,11 +266,9 @@ class AliyaRuntime:
     async def _consume_events(self) -> None:
         cursors = self._memory.load_cursors()
         since = min(cursors.values()) if cursors else None
-        async for event in self._control.subscribe(_EVENT_TOPICS, since_sequence=since):
-            try:
-                self._memory.save_cursor(event.sequence, topic=event.topic)
-            except OSError:
-                _LOG.warning("事件游标落盘失败", exc_info=True)
+        async for event in self._control.subscribe(
+            _EVENT_TOPICS, since_sequence=since, cursors=cursors
+        ):
             self._cache_event(event)
             if event.topic in _REPORT_TOPICS:
                 turn = TurnContext(
@@ -279,6 +277,10 @@ class AliyaRuntime:
                 )
                 turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
                 await self._queue.put(turn)
+            try:
+                self._memory.save_cursor(event.sequence, topic=event.topic)
+            except OSError:
+                _LOG.warning("事件游标落盘失败", exc_info=True)
 
     def _cache_event(self, event: CosmosEvent) -> None:
         if event.topic == "presence.changed":

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Protocol
 
 from agent.cosmos.contracts import (
@@ -39,7 +39,11 @@ class ControlPort(Protocol):
     async def ack_inbound(self, message_id: str) -> None: ...
 
     def subscribe(
-        self, topics: Sequence[str], *, since_sequence: int | None = None
+        self,
+        topics: Sequence[str],
+        *,
+        since_sequence: int | None = None,
+        cursors: Mapping[str, int] | None = None,
     ) -> AsyncIterator[CosmosEvent]: ...
 
     async def describe_desktop(self) -> DesktopSnapshot: ...
@@ -103,8 +107,14 @@ class InProcessControl:
         """同进程没有待确认队列，确认是空操作。"""
 
     def subscribe(
-        self, topics: Sequence[str], *, since_sequence: int | None = None
+        self,
+        topics: Sequence[str],
+        *,
+        since_sequence: int | None = None,
+        cursors: Mapping[str, int] | None = None,
     ) -> AsyncIterator[CosmosEvent]:
+        if since_sequence is None and cursors:
+            since_sequence = min(cursors.values())
         return self._control.subscribe(topics, since_sequence=since_sequence)
 
     async def describe_desktop(self) -> DesktopSnapshot:
