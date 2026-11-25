@@ -145,6 +145,8 @@ class TerminalService(Service):
         self._link_since: datetime = clock.now()
         #: 最近一次链路心跳；None 表示还没有任何通道上报，不主动判 down
         self._link_heartbeat_at: datetime | None = None
+        #: 区分巡检推断的 down（可由用户发言恢复）与显式 down（需显式恢复）
+        self._link_inferred_down: bool = False
         self._link_observer: Callable[[LinkState], None] | None = None
         self._pending: deque[TerminalMessage] = deque(maxlen=config.cosmos.link.queue_limit)
         self._pending_inbound: deque[InboundEnvelope] = deque(maxlen=config.cosmos.link.queue_limit)
@@ -250,12 +252,16 @@ class TerminalService(Service):
             else:
                 target = "up"
             if target != self._link:
-                await self.set_link_state(target)
+                await self.set_link_state(target, inferred=True)
 
-    async def set_link_state(self, state: LinkState) -> None:
-        """更新链路；`down` 时停止投递，恢复时按序重放。"""
+    async def set_link_state(self, state: LinkState, *, inferred: bool = False) -> None:
+        """更新链路；`down` 时停止投递，恢复时按序重放。
+
+        巡检推断的 down 可由用户发言自动恢复；显式 down 保持排队语义直到显式恢复。
+        """
         if state == "up":
             self._link_heartbeat_at = self._clock.now()
+        self._link_inferred_down = inferred and state == "down"
         if state == self._link:
             return
         self._link = state
@@ -295,8 +301,11 @@ class TerminalService(Service):
         )
         self._last_session_id = normalized.session_id
         self._last_user_speech = now
-        if self._link != "down":
-            # 收到入站消息说明链路有活动；但显式 down 时不自动恢复，保留排队语义。
+        if self._link == "down" and self._link_inferred_down:
+            # 用户还能发言说明链路是通的：先恢复并重放积压，本条随后按序发布。
+            await self.set_link_state("up")
+        else:
+            # 显式 down 保留排队语义，不因入站消息自动恢复。
             self._link_heartbeat_at = now
         self._mark_proactive_reply(now)
         self._record_user_stats(now)

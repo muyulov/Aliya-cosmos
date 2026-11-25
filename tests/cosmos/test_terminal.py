@@ -405,6 +405,36 @@ async def test_链路心跳恢复(env: Env) -> None:
     assert env.terminal.link_state() == "up"
 
 
+async def test_心跳超时判断链后用户发言自动恢复并重放(
+    env: Env, settings: Settings, bus: BusService
+) -> None:
+    settings.agent.cosmos.link.heartbeat_seconds = 1
+    settings.agent.cosmos.link.down_after_seconds = 1
+    await env.terminal.stop()
+    await env.terminal.start()
+
+    iterator = bus.messages.subscribe("aliya")
+    try:
+        _ = await env.terminal.ingest(user_message("第一句"))
+        assert (await asyncio.wait_for(anext(iterator), 1.0)).message.text == "第一句"
+
+        await asyncio.sleep(2.2)
+        assert env.terminal.link_state() == "down"
+
+        await env.terminal.deliver("断链期的回复", session_id="ses_1", kind="chat")
+        assert env.channel.drain() == []
+        assert env.terminal.queue_depth() == (0, 1)
+
+        _ = await env.terminal.ingest(user_message("恢复后的一句"))
+
+        assert [message.text for message in env.channel.drain()] == ["断链期的回复"]
+        assert (await asyncio.wait_for(anext(iterator), 1.0)).message.text == "恢复后的一句"
+        assert env.terminal.link_state() == "up"
+        assert env.terminal.queue_depth() == (0, 0)
+    finally:
+        await iterator.aclose()
+
+
 async def test_终端可接收通道状态上报(env: Env) -> None:
     snapshot = await env.terminal.report_presence(
         PresenceInput(online="online", is_typing=True, device="mobile")
