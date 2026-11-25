@@ -151,17 +151,27 @@ class MemoryStore:
         data = self._read_json("summary.json", {})
         return str(data.get("summary", "")) if isinstance(data, dict) else ""
 
-    def save_cursor(self, sequence: int) -> None:
-        self._write_json("cursor.json", {"sequence": sequence})
+    def save_cursor(self, sequence: int, *, topic: str = "") -> None:
+        cursors = self.load_cursors()
+        cursors[topic or "*"] = sequence
+        self._write_json("cursor.json", cursors)
 
-    def load_cursor(self) -> int:
+    def load_cursor(self, *, topic: str = "") -> int:
+        return self.load_cursors().get(topic or "*", 0)
+
+    def load_cursors(self) -> dict[str, int]:
         data = self._read_json("cursor.json", {})
+        if isinstance(data, int):
+            return {"*": data}
         if not isinstance(data, dict):
-            return 0
-        try:
-            return int(data.get("sequence", 0))
-        except (TypeError, ValueError):
-            return 0
+            return {}
+        cursors: dict[str, int] = {}
+        for topic, sequence in data.items():
+            try:
+                cursors[str(topic)] = int(sequence)
+            except (TypeError, ValueError):
+                continue
+        return cursors
 
     def remember(self, note: str, kind: str) -> bool:
         """按 kind 落盘；疑似敏感信息直接拒绝。"""

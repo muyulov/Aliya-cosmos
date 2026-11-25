@@ -264,7 +264,13 @@ class AliyaRuntime:
                 self._pending_inbound -= 1
 
     async def _consume_events(self) -> None:
-        async for event in self._control.subscribe(_EVENT_TOPICS):
+        cursors = self._memory.load_cursors()
+        since = min(cursors.values()) if cursors else None
+        async for event in self._control.subscribe(_EVENT_TOPICS, since_sequence=since):
+            try:
+                self._memory.save_cursor(event.sequence, topic=event.topic)
+            except OSError:
+                _LOG.warning("事件游标落盘失败", exc_info=True)
             self._cache_event(event)
             if event.topic in _REPORT_TOPICS:
                 turn = TurnContext(

@@ -30,6 +30,7 @@ class FakeControl:
         self.delivered: list[str] = []
         self.acked: list[str] = []
         self.contexts: list[AliyaContext] = []
+        self.since: int | None = None
 
     async def handshake(self) -> CosmosCapabilities:
         return CosmosCapabilities(api_version="1.0", contract_version="1.0.0")
@@ -44,6 +45,7 @@ class FakeControl:
     async def subscribe(
         self, topics: list[str], *, since_sequence: int | None = None
     ) -> AsyncIterator[CosmosEvent]:
+        self.since = since_sequence
         if False:
             yield CosmosEvent(
                 event_id="e0",
@@ -142,6 +144,29 @@ async def test_turn_timeout_falls_back(tmp_path: Path) -> None:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=3)
         assert control.delivered == [AgentAliyaSettings().reply.fallback_text]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_event_subscription_resumes_from_min_cursor(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    store.save_cursor(3, topic="agent.result")
+    store.save_cursor(1, topic="presence.changed")
+
+    control = FakeControl()
+    runtime = AliyaRuntime(
+        control=control,  # type: ignore[arg-type]
+        llm=FakeLLM(),  # type: ignore[arg-type]
+        config=make_config(tmp_path),
+    )
+    await runtime.start()
+    try:
+        for _ in range(50):
+            if control.since is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert control.since == 1
     finally:
         await runtime.stop()
 

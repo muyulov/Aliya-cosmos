@@ -53,3 +53,11 @@ def test_unanswered_turns_only_returns_unreplied(tmp_path) -> None:
     store.append_turn("u1:reply", "aliya", "回复")
     store.record_inbound("u2", "第二句")
     assert [turn.message_id for turn in store.unanswered_turns()] == ["u2"]
+
+
+def test_cursor_is_per_topic(tmp_path) -> None:
+    store = MemoryStore(tmp_path)
+    store.save_cursor(3, topic="agent.result")
+    store.save_cursor(1, topic="presence.changed")
+    assert store.load_cursor(topic="agent.result") == 3
+    assert store.load_cursors() == {"agent.result": 3, "presence.changed": 1}
