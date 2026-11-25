@@ -559,9 +559,87 @@ class AgentCosmosSettings(_AgentConfigNode):
     agents: list[AgentRegistrationSettings] = Field(default_factory=list)
 
 
+class AgentControlSettings(_AgentConfigNode):
+    """控制面共享配置：服务端与客户端读同一份。"""
+
+    socket_path: str = "data/state/aliya.sock"
+    token_env: str = "ALIYA_CONTROL_TOKEN"
+    max_clients: int = Field(default=1, ge=1)
+    request_timeout: float = Field(default=15, gt=0)
+    outbox_limit: int = Field(default=200, ge=1)
+    max_line_bytes: int = Field(default=1_048_576, ge=1024)
+
+
+class AgentAliyaPersonaSettings(_AgentConfigNode):
+    source: str = "data/prompt/Aliya.md"
+    charter: str = "data/prompt/Aliya.charter.md"
+    includes: list[str] = Field(default_factory=list)
+
+
+class AgentAliyaMemorySettings(_AgentConfigNode):
+    enabled: bool = True
+    dir: str = "agent/aliya/data"
+    max_turns: int = Field(default=200, ge=1)
+    summary_chars: int = Field(default=600, ge=100)
+    open_topics_limit: int = Field(default=5, ge=1)
+    anchors: list[str] = Field(default_factory=list)
+    private_threads: bool = True
+
+
+class AgentAliyaInitiativeSettings(_AgentConfigNode):
+    enabled: bool = True
+    tick_seconds: float = Field(default=60, gt=0)
+    min_gap_seconds: float = Field(default=3600, ge=0)
+    daily_soft_limit: int = Field(default=4, ge=0)
+    prefer_when: list[str] = Field(default_factory=list)
+    respect_presence_hint: bool = True
+    respect_link_state: bool = True
+    default_action: Literal["wait", "speak"] = "wait"
+
+
+class AgentAliyaReplySettings(_AgentConfigNode):
+    max_rounds: int = Field(default=6, ge=1)
+    turn_timeout_seconds: float = Field(default=120, gt=0)
+    max_chars_per_message: int = Field(default=1200, ge=1)
+    fallback_text: str = "嗯……我这边卡了一下，等我一下。"
+    progress_forwarding: Literal["always", "on_wait", "never"] = "on_wait"
+    post_checks: list[str] = Field(
+        default_factory=lambda: [
+            "narration",
+            "engineering_terms",
+            "internal_ids",
+            "presence_leak",
+        ]
+    )
+
+
+class AgentAliyaToolsSettings(_AgentConfigNode):
+    prefer_agents: list[str] = Field(default_factory=list)
+    ask_before_write: bool = True
+    max_parallel_dispatch: int = Field(default=2, ge=1)
+
+
+class AgentAliyaWorldSettings(_AgentConfigNode):
+    consume: bool = True
+    max_hypotheses_used: int = Field(default=2, ge=0)
+    trust_threshold: float = Field(default=0.5, ge=0, le=1)
+    provide_context: bool = True
+
+
+class AgentAliyaSettings(_AgentConfigNode):
+    persona: AgentAliyaPersonaSettings = AgentAliyaPersonaSettings()
+    memory: AgentAliyaMemorySettings = AgentAliyaMemorySettings()
+    initiative: AgentAliyaInitiativeSettings = AgentAliyaInitiativeSettings()
+    reply: AgentAliyaReplySettings = AgentAliyaReplySettings()
+    tools: AgentAliyaToolsSettings = AgentAliyaToolsSettings()
+    world: AgentAliyaWorldSettings = AgentAliyaWorldSettings()
+
+
 class AgentSettings(_AgentConfigNode):
     """agent 层配置的顶层节点（挂在 Settings.agent 上）。"""
 
+    control: AgentControlSettings = AgentControlSettings()
+    aliya: AgentAliyaSettings = AgentAliyaSettings()
     cosmos: AgentCosmosSettings = AgentCosmosSettings()
 
 
