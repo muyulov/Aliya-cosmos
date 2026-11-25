@@ -109,11 +109,26 @@ class AliyaRuntime:
         )
         self._worker = asyncio.create_task(self._run_worker())
         self._ticker = asyncio.create_task(self._run_ticker())
+        await self._recover_unanswered()
         self._consumers = [
             asyncio.create_task(self._consume_inbound()),
             asyncio.create_task(self._consume_events()),
         ]
         self._started = True
+
+    async def _recover_unanswered(self) -> None:
+        """启动时补跑已落盘但未回复的回合；幂等键为 message_id。"""
+        for stored in self._memory.unanswered_turns():
+            if not stored.message_id or stored.message_id in self._seen:
+                continue
+            turn = TurnContext(
+                user_text=stored.text,
+                session_id=stored.session_id,
+                message_id=stored.message_id,
+            )
+            turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+            self._seen.add(stored.message_id)
+            await self._queue.put(turn)
 
     async def stop(self) -> None:
         tasks = [self._worker, self._ticker, *self._consumers]
@@ -219,8 +234,22 @@ class AliyaRuntime:
         async for envelope in self._control.inbound():
             message_id = envelope.message.message_id
             if message_id in self._seen:
+                # 已落盘但上次确认失败：重放时补确认，不重复入队。
+                await self._ack(message_id)
+                continue
+            at = envelope.message.at.isoformat() if envelope.message.at else ""
+            try:
+                self._memory.record_inbound(
+                    message_id,
+                    envelope.message.text,
+                    session_id=envelope.message.session_id,
+                    at=at,
+                )
+            except OSError:
+                _LOG.exception("入站消息落盘失败，暂不回执")
                 continue
             self._seen.add(message_id)
+            await self._ack(message_id)
             self._last_session_id = envelope.message.session_id
             self._last_user_at = envelope.message.at or datetime.now(UTC)
             self._initiative.record_user_reply()
@@ -265,20 +294,25 @@ class AliyaRuntime:
                 assert runner is not None
                 await runner.run(turn=turn)
             except TimeoutError:
-                if not turn.sent:
-                    await turn.send(self._config.reply.fallback_text)
+                await self._fallback(turn)
             except Exception:
                 _LOG.exception("回合执行失败")
-                if not turn.sent:
-                    await turn.send(self._config.reply.fallback_text)
-            else:
-                self._memory.append_turn(turn.message_id or "-", "user", turn.user_text)
-                for reply in turn.replies:
-                    self._memory.append_turn(f"{turn.message_id}:reply", "aliya", reply)
+                await self._fallback(turn)
             finally:
+                if turn.message_id:
+                    for reply in turn.replies:
+                        self._memory.append_turn(f"{turn.message_id}:reply", "aliya", reply)
                 self._current_turn = None
                 self._queue.task_done()
                 await self._publish_context()
+
+    async def _fallback(self, turn: TurnContext) -> None:
+        if turn.sent:
+            return
+        try:
+            await turn.send(self._config.reply.fallback_text)
+        except Exception:
+            _LOG.exception("发送兜底回复失败")
 
     async def _run_ticker(self) -> None:
         while True:
@@ -300,6 +334,12 @@ class AliyaRuntime:
             )
             turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
             await self._queue.put(turn)
+
+    async def _ack(self, message_id: str) -> None:
+        try:
+            await self._control.ack_inbound(message_id)
+        except Exception:
+            _LOG.warning("入站确认失败，等待重连重放", exc_info=True)
 
     async def _send_for_turn(self, turn: TurnContext, text: str) -> None:
         await self._deliver(text, turn.session_id)

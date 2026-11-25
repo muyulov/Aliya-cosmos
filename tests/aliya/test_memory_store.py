@@ -38,3 +38,18 @@ def test_remember_routes_by_kind(tmp_path) -> None:
     store = MemoryStore(tmp_path)
     assert store.remember("她喜欢风信子", "anchor") is True
     assert store.load_anchors() == ["她喜欢风信子"]
+
+
+def test_record_inbound_is_idempotent(tmp_path) -> None:
+    store = MemoryStore(tmp_path)
+    assert store.record_inbound("u1", "在吗", session_id="s1") is True
+    assert store.record_inbound("u1", "在吗", session_id="s1") is False
+    assert [turn.text for turn in store.recent_turns()] == ["在吗"]
+
+
+def test_unanswered_turns_only_returns_unreplied(tmp_path) -> None:
+    store = MemoryStore(tmp_path)
+    store.record_inbound("u1", "第一句")
+    store.append_turn("u1:reply", "aliya", "回复")
+    store.record_inbound("u2", "第二句")
+    assert [turn.message_id for turn in store.unanswered_turns()] == ["u2"]

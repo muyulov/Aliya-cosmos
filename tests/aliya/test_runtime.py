@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.aliya.memory.store import MemoryStore
 from agent.aliya.runtime import AliyaRuntime
 from agent.cosmos.contracts import (
     AliyaContext,
@@ -27,6 +28,7 @@ class FakeControl:
     def __init__(self) -> None:
         self.inbound_queue: asyncio.Queue[InboundEnvelope] = asyncio.Queue()
         self.delivered: list[str] = []
+        self.acked: list[str] = []
         self.contexts: list[AliyaContext] = []
 
     async def handshake(self) -> CosmosCapabilities:
@@ -35,6 +37,9 @@ class FakeControl:
     async def inbound(self) -> AsyncIterator[InboundEnvelope]:
         while True:
             yield await self.inbound_queue.get()
+
+    async def ack_inbound(self, message_id: str) -> None:
+        self.acked.append(message_id)
 
     async def subscribe(
         self, topics: list[str], *, since_sequence: int | None = None
@@ -113,6 +118,11 @@ async def test_inbound_turn_is_serial(tmp_path: Path) -> None:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
         assert control.delivered == ["在。"]
+        assert control.acked == ["m1"]
+        turns = MemoryStore(tmp_path).recent_turns()
+        assert [turn.role for turn in turns] == ["user", "aliya"]
+        assert turns[0].message_id == "m1"
+        assert turns[1].message_id == "m1:reply"
     finally:
         await runtime.stop()
 
@@ -130,5 +140,54 @@ async def test_turn_timeout_falls_back(tmp_path: Path) -> None:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=3)
         assert control.delivered == [AgentAliyaSettings().reply.fallback_text]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovers_unanswered_turn(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    store.record_inbound("m0", "在吗", session_id="s1")
+
+    control = FakeControl()
+    runtime = AliyaRuntime(
+        control=control,  # type: ignore[arg-type]
+        llm=FakeLLM(),  # type: ignore[arg-type]
+        config=make_config(tmp_path),
+    )
+    await runtime.start()
+    try:
+        await asyncio.wait_for(runtime.wait_idle(), timeout=2)
+        assert control.delivered == ["在。"]
+        assert control.acked == []
+        turns = store.recent_turns()
+        assert [turn.role for turn in turns] == ["user", "aliya"]
+        assert turns[1].message_id == "m0:reply"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_replayed_persisted_turn_is_acked_once(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    store.record_inbound("m0", "在吗", session_id="s1")
+
+    control = FakeControl()
+    runtime = AliyaRuntime(
+        control=control,  # type: ignore[arg-type]
+        llm=FakeLLM(),  # type: ignore[arg-type]
+        config=make_config(tmp_path),
+    )
+    await runtime.start()
+    try:
+        await asyncio.wait_for(runtime.wait_idle(), timeout=2)
+        control.inbound_queue.put_nowait(make_envelope("m0"))
+        for _ in range(50):
+            if control.acked == ["m0"]:
+                break
+            await asyncio.sleep(0.01)
+        assert control.acked == ["m0"]
+        turns = store.recent_turns()
+        assert len([turn for turn in turns if turn.role == "user"]) == 1
     finally:
         await runtime.stop()

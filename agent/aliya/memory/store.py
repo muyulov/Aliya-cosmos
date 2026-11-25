@@ -28,33 +28,79 @@ class Turn:
     role: str
     text: str
     at: str = ""
+    session_id: str = ""
 
 
 class MemoryStore:
     def __init__(self, root: str | Path) -> None:
         self._dir = Path(root)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._user_ids: set[str] | None = None
 
     # ---------- 回合 ----------
 
-    def append_turn(self, message_id: str, role: str, text: str) -> None:
+    def append_turn(
+        self,
+        message_id: str,
+        role: str,
+        text: str,
+        *,
+        session_id: str = "",
+        at: str = "",
+    ) -> None:
         record = {
             "message_id": message_id,
             "role": role,
             "text": text,
-            "at": datetime.now(UTC).isoformat(),
+            "session_id": session_id,
+            "at": at or datetime.now(UTC).isoformat(),
         }
         with (self._dir / "turns.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if role == "user" and self._user_ids is not None:
+            self._user_ids.add(message_id)
+
+    def record_inbound(
+        self,
+        message_id: str,
+        text: str,
+        *,
+        session_id: str = "",
+        at: str = "",
+    ) -> bool:
+        """回执前幂等落盘；重复重放返回 False。"""
+        if self._user_ids is None:
+            self._user_ids = {turn.message_id for turn in self._read_turns() if turn.role == "user"}
+        if message_id in self._user_ids:
+            return False
+        self.append_turn(message_id, "user", text, session_id=session_id, at=at)
+        self._user_ids.add(message_id)
+        return True
+
+    def unanswered_turns(self, limit: int = 5) -> list[Turn]:
+        """找出没有对应回复的用户回合，用于启动恢复。"""
+        if limit <= 0:
+            return []
+        turns = self._read_turns()
+        replied = {
+            turn.message_id.removesuffix(":reply")
+            for turn in turns
+            if turn.role == "aliya" and turn.message_id.endswith(":reply")
+        }
+        pending = [turn for turn in turns if turn.role == "user" and turn.message_id not in replied]
+        return pending[-limit:]
 
     def recent_turns(self, limit: int = 20) -> list[Turn]:
         if limit <= 0:
             return []
+        return self._read_turns()[-limit:]
+
+    def _read_turns(self) -> list[Turn]:
         path = self._dir / "turns.jsonl"
         if not path.exists():
             return []
         turns: list[Turn] = []
-        for line in path.read_text(encoding="utf-8").splitlines()[-limit:]:
+        for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
@@ -67,6 +113,7 @@ class MemoryStore:
                     role=str(data.get("role", "")),
                     text=str(data.get("text", "")),
                     at=str(data.get("at", "")),
+                    session_id=str(data.get("session_id", "")),
                 )
             )
         return turns
