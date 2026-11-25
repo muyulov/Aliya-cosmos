@@ -25,6 +25,7 @@ class TurnContext:
     session_id: str = ""
     message_id: str = ""
     sent: bool = False
+    proactive: bool = False
     replies: list[str] = field(default_factory=list)
     sender: Callable[[str], Awaitable[None]] | None = field(default=None, repr=False)
 

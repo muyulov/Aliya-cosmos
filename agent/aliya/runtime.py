@@ -81,6 +81,7 @@ class AliyaRuntime:
         self._task_count = 0
         self._initiative = Initiative(config.initiative)
         self._runner: TurnRunner | None = None
+        self._proactive_runner: TurnRunner | None = None
         self._started = False
         self._pending_inbound = 0
         self._closed = asyncio.Event()
@@ -89,15 +90,21 @@ class AliyaRuntime:
         if self._started:
             return
         await self._control.handshake()
-        tools = build_tools(self)
+        builder = PromptBuilder(
+            persona=load_persona(self._config.persona.source),
+            charter=load_charter(self._config.persona.charter),
+            tools=[],
+        )
         self._runner = TurnRunner(
             llm=self._llm,
-            tools=tools,
-            builder=PromptBuilder(
-                persona=load_persona(self._config.persona.source),
-                charter=load_charter(self._config.persona.charter),
-                tools=[],
-            ),
+            tools=build_tools(self),
+            builder=builder,
+            config=self._config,
+        )
+        self._proactive_runner = TurnRunner(
+            llm=self._llm,
+            tools=build_tools(self, proactive=True),
+            builder=builder,
             config=self._config,
         )
         self._worker = asyncio.create_task(self._run_worker())
@@ -142,6 +149,8 @@ class AliyaRuntime:
         session_id = turn.session_id if turn is not None else self._last_session_id
         await self._deliver(text, session_id)
         if turn is not None:
+            if turn.proactive and not turn.sent:
+                self._initiative.record_proactive(datetime.now(UTC))
             turn.sent = True
             turn.replies.append(text)
 
@@ -214,6 +223,7 @@ class AliyaRuntime:
             self._seen.add(message_id)
             self._last_session_id = envelope.message.session_id
             self._last_user_at = envelope.message.at or datetime.now(UTC)
+            self._initiative.record_user_reply()
             self._task_count = len(envelope.tasks)
             self._presence = envelope.presence
             turn = TurnContext.from_envelope(envelope)
@@ -251,8 +261,9 @@ class AliyaRuntime:
             turn = await self._queue.get()
             self._current_turn = turn
             try:
-                assert self._runner is not None
-                await self._runner.run(turn=turn)
+                runner = self._proactive_runner if turn.proactive else self._runner
+                assert runner is not None
+                await runner.run(turn=turn)
             except TimeoutError:
                 if not turn.sent:
                     await turn.send(self._config.reply.fallback_text)
@@ -282,12 +293,18 @@ class AliyaRuntime:
             )
             if not decision.should_speak:
                 continue
-            turn = TurnContext(user_text="", session_id=self._last_session_id)
+            turn = TurnContext(
+                user_text="（现在没有人说话。）",
+                session_id=self._last_session_id,
+                proactive=True,
+            )
             turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
             await self._queue.put(turn)
 
     async def _send_for_turn(self, turn: TurnContext, text: str) -> None:
         await self._deliver(text, turn.session_id)
+        if turn.proactive and not turn.sent:
+            self._initiative.record_proactive(datetime.now(UTC))
         turn.sent = True
 
     async def _deliver(self, text: str, session_id: str) -> None:
