@@ -242,6 +242,10 @@ flowchart TD
 
 **默认选择仍然是「不做」。** 没有理由时保持安静，比频繁打扰更接近一个真实的人。
 
+`initiative.prefer_when` 不是关键词列表，而是一组可解释的语义条件。当前实现识别四类动机：未收尾话题、刚修好东西、失眠、深夜刷信息；条件里的「N 小时」会成为该类动机的间隔阈值。未识别的自定义条件退化为与当前上下文的保守关键词匹配；已识别但信号不足时不会退化成字面匹配，避免「刚修好」这类条件自证。
+
+主动巡检按「配置 → 链路/状态 → 最小间隔/日限额 → 长安静/默认动作 → 语义时间」顺序判断。配置了 `prefer_when` 但没命中时，即使对方很久没来也不会开口；未配置时则由间隔和日限额兜底。
+
 ---
 
 ## 7. 配置
@@ -274,12 +278,18 @@ agent:
       anchors: [风信子, 拉姆石, 高马尾, 兔子狗] # 关系暗号，摘要时必须保留
     initiative:
       enabled: true
+      tick_seconds: 60
+      min_gap_seconds: 3600
+      daily_soft_limit: 4
       # 这里只表达意愿；真正的节流由 cosmos 的 terminal.proactive 执行
       prefer_when:
         - 失眠且对方超过 2 小时没来
-        - 有未收尾的话题且间隔超过 6 小时
+        - 有未收尾的话题且距上次互动超过 6 小时
         - 刚修好某样东西，想被夸
-      quiet_acknowledge: true
+        - 深夜刷信息刷到想说话
+      respect_presence_hint: true
+      respect_link_state: true
+      default_action: wait # wait / speak
     world:
       consume: true # 是否订阅 world.inference
       max_hypotheses_used: 2
@@ -288,7 +298,7 @@ agent:
       prefer_agents: [edit] # 有多个候选时的偏好，不构成强制
 ```
 
-`initiative.*` 是 Aliya 的**意愿配置**，不是通道策略。两者不要混：意愿决定「想不想说」，cosmos 决定「能不能现在说」。
+`initiative.*` 是 Aliya 的**意愿配置**，不是通道策略。两者不要混：意愿决定「想不想说」，cosmos 决定「能不能现在说」。`default_action=speak` 只解除「长安静 / 默认等待」这一步；配置了 `prefer_when` 时仍要命中语义条件。
 
 ---
 
@@ -301,6 +311,9 @@ agent:
 | `clarify` | 用自然语言追问，不直接抛字段名 |
 | `agent.result` 到达 | 开汇报回合，调用 `send_message`（映射 `notify`），文本不含 `task_id` / agent id |
 | 主动消息被拒 | 不立即重试，尊重 `deliver_after` |
+| `prefer_when` 未命中 | 不开主动回合，不产生消息 |
+| 未收尾话题超过 6h | 语义门控命中 `open_topic`，开主动回合 |
+| 连续 2 条主动消息无回应 | 下一次最小间隔 ×2，用户回话后重置 |
 | `presence.changed` 为 `away` | 行为可调整，但回复中不出现状态描述 |
 | 回复文本 | 无括号旁白、无「玩家/用户/agent」字样、句尾标点未被删除 |
 | 连续多条短句 | 每条单独投递，不被合并成一段 |
@@ -325,6 +338,9 @@ agent:
 | 提及「时间同步器」「Doll」 | 越过信息差 | 提示词约束 + 回复后置检查 |
 | 同一任务被提交两次 | 既调 `dispatch_task` 又调 `invoke_agent` | 二选一 |
 | 主动消息刷屏 | 忽略 `ProactiveReceipt` 连续调用 | 看 `reason` 与 `deliver_after` |
+| `prefer_when` 配了却不主动 | 语义条件未命中，或已知动机的信号不足 | 看 `PreferenceDecision.reason`；确认未收尾话题已落盘、世界/桌面时间戳未过期 |
+| `default_action=speak` 仍不主动 | 配置了 `prefer_when` 且未命中 | 语义门控仍生效；清空条件或补齐对应信号 |
+| 主动回合被跳过 | 用户刚有入站消息或 `user.active` | 正常行为，待下一轮巡检重新判断 |
 | 深夜从不主动 | 误把免打扰当成「她不会失眠」 | 免打扰是用户侧策略；她的失眠是合法动机 |
 | 世界推理的建议被当命令 | 直接执行 `action_windows` | 它没有执行语义，仅供参考 |
 | 换传输层后 Aliya 崩 | 依赖了同进程对象 | 只依赖 `contracts` 与协议 |

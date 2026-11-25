@@ -38,6 +38,8 @@ agent:
       tick_seconds: 60
       min_gap_seconds: 3600
       daily_soft_limit: 4
+      # prefer_when 是自由文本，识别失眠、未收尾话题、修好、深夜刷信息四类动机。
+      # 条件中的“N 小时”作为该类动机的间隔阈值；未识别条件退化为保守关键词匹配。
       prefer_when:
         - 失眠且对方超过 2 小时没来
         - 有未收尾的话题且距上次互动超过 6 小时
@@ -45,6 +47,7 @@ agent:
         - 深夜刷信息刷到想说话
       respect_presence_hint: true
       respect_link_state: true
+      # speak 只解除长安静/默认等待；配置了 prefer_when 时仍要命中语义条件。
       default_action: wait # wait / speak
 
     # ---------- 回复 ----------

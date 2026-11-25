@@ -1,6 +1,6 @@
 # Aliya Agent 设计
 
-> 状态：设计定稿，待实现
+> 状态：设计定稿，已实现（2026-11-25 同步）
 > 日期：2026-11-25
 > 关联文档：`agent/aliya/README.md`、`agent/cosmos/docs/09-control-api.md`、`agent/cosmos/docs/06-terminal.md`、`data/prompt/Aliya.md`
 
@@ -32,7 +32,7 @@ Aliya 是独立进程中的对话主体与决策者；cosmos 是唯一终端与�
 | D4 | 每回合「单 LLM + 工具调用」，最多 6 轮 | 聊天与任务由工具选择体现，不再造一层意图分类 |
 | D5 | 工具面 8 个 | 覆盖回话、派活、查进度、改主意、看推演、记忆，数量不至于让模型选错 |
 | D6 | 长期记忆用 JSONL + 派生 JSON | 追加简单、可恢复、不引依赖；注入时只用摘要与锚点 |
-| D7 | 自主行动 = 60s 巡检 + 事件，三层门控 | 纯事件会在世界推理关闭时永不主动；固定日程会变成机械打卡 |
+| D7 | 自主行动 = 60s 巡检 + 事件，配置/状态/预算/语义时间四道门控 | 纯事件会在世界推理关闭时永不主动；固定日程会变成机械打卡；只按间隔放行会让主动消息缺少人设动机 |
 | D8 | 只有终态事件开汇报回合 | `agent.result` / `dispatch.finished` / `agent.abnormal` 才值得打断；进度只更新上下文 |
 | D9 | 出站检查「重写一次 → 遮蔽降级」 | 拦截不发会让用户收不到回复；直接替换容易把句子改坏 |
 | D10 | 共享传输配置放 `agent.control` | socket 路径、令牌、超时只写一处，服务端与客户端读同一份 |
@@ -93,7 +93,7 @@ agent/aliya/
   turn/tools.py                # 8 个工具
   turn/postcheck.py            # 出站检查与重写
   memory/store.py              # JSONL + 派生 JSON
-  initiative.py                # 巡检与三层门控
+  initiative.py                # 巡检、语义时间匹配与门控
 ```
 
 ### 4.3 依赖方向
@@ -388,33 +388,56 @@ agent/aliya/data/
 
 ## 10. 自主行动
 
-### 10.1 三层门控
+### 10.1 门控顺序
 
-| 层 | 条件 | 默认 |
+巡检每 `tick_seconds`（默认 60s）执行一次，按以下顺序判断；任一道拒绝即保持安静：
+
+| 顺序 | 层 | 条件 | 默认 |
+| --- | --- | --- | --- |
+| 1 | 配置 | `initiative.enabled` | true |
+| 2 | 链路/状态 | `respect_link_state` 时链路必须 `up`；`respect_presence_hint` 时 `readable.tone` 不能是 `away` / `waiting` | 两项均开启 |
+| 3 | 间隔 | 距上次主动消息不足 `min_gap_seconds`；连续 2 条主动消息无回应后阈值 ×2 | 3600s |
+| 4 | 日限额 | 当日主动消息数达到 `daily_soft_limit` | 4 条 |
+| 5 | 长安静/默认动作 | 距上次用户消息 ≥2h（或从未收到用户消息）；或 `default_action=speak` | 长安静放行，否则 `wait` |
+| 6 | 语义时间 | 命中 `prefer_when` 之一；未配置 `prefer_when` 时直接放行 | 命中才开回合 |
+
+语义时间门控是最后一道否决：配置了 `prefer_when` 但没有命中，即使已满足长安静条件也不会开回合。未配置 `prefer_when` 时视为不限制，由间隔与日限额兜底。
+
+`prefer_when` 是自由文本，`PreferenceGate` 按四类动机解析；同一条件命中任意一类即可：
+
+| 动机 | 识别方式 | 信号来源 |
 | --- | --- | --- |
-| 时间 | 命中 `prefer_when` 之一 | 失眠且 >2h 没来；未收尾话题 >6h；刚修好东西；深夜刷信息 |
-| 预算 | `min_gap_seconds` 与 `daily_soft_limit` 未超 | 3600s / 4 条 |
-| 状态 | 链路 `up`；`readable` 不是「正在输入 / 暂时离开 / 离线深夜」；用户 5s 内没说话 | 按 `respect_presence_hint` |
+| 未收尾话题 | 条件含「未收尾 / 没说完 / 没说出口 / 话题」；存在未收尾话题，且距上次用户消息达到条件中的小时数（默认 0） | `open_topics.json` + `last_user_at` |
+| 修好东西想被夸 | 条件含「修好 / 修完 / 刚修 / 被夸 / 搞定」；世界或桌面上下文在 2h 内，且出现「修好 / 完成 / 成功 / 恢复」等信号 | `world.inference` / 桌面缓存 |
+| 失眠 | 条件含「失眠 / 睡不着 / 熬夜」；距上次用户消息达到条件中的小时数，且处于 23:00–05:00 或上下文出现失眠词 | 本地时间 + 世界/桌面/状态 |
+| 深夜刷信息 | 条件含「深夜 / 刷信息 / 刷手机 / 刷到」；处于 23:00–05:00，且上下文出现浏览类信号（条件本身含「刷信息」也算） | 本地时间 + 上下文 |
 
-连续两条主动消息没有回应时，间隔 ×2；用户回话后重置。
+- 条件里写「2 小时」「6 小时」会覆盖该类动机的默认阈值；未写时按 0h 处理。
+- 修好类条件会检查世界/桌面缓存的时间戳：带时间戳时只认 2h 内，没有时间戳时按当前上下文处理。
+- 未识别的自定义条件退化为与当前上下文的保守关键词匹配（2–4 字中文片段或 3 字母以上英文词），避免配置了却永远不生效。
+- 已识别为上述四类动机但信号不满足时，不再退化成字面匹配，防止「刚修好」这类条件自证。
+- `default_action=speak` 只解除「长安静 / 默认等待」这一步；若配置了 `prefer_when`，仍要通过语义时间门控。
+
+连续两条主动消息没有回应时，最小间隔 ×2；用户回话或 `user.active` 会重置间隔与未回应计数，并取消尚未开始的主动回合。
 
 ### 10.2 主动回合的提示词
 
-在 L4 里加一段「现在没有人跟你说话」的上下文：
+主动回合的 `user_text` 只给时间、间隔与命中的动机，不给「必须说点什么」：
 
 ```text
-现在是 {time}，距上次对话 {gap}。
-你手头没有必须马上做的事。
-{world_hypotheses}
-{open_topics}
-如果你想说话，就调用 send_message；如果不想，就什么都别做。
+现在是 {HH:MM}，距上次对话 {gap}。
+（现在没有人说话。）
+可以考虑：{命中的 prefer_when 条件}
 ```
 
-不给「必须说点什么」的指令。默认选择是沉默。
+- 只有命中语义条件时才追加「可以考虑」这一行；它是动机提示，不是命令。
+- L4 上下文仍包含 `presence`、任务、桌面与世界推理；长期记忆注入摘要、锚点、未收尾话题与至多 3 条 `unspoken`。
+- 主动回合使用缩小工具集，只保留 `send_message`、`see_desktop`、`task_status`、`refresh_world`、`remember`。
+- 不要求模型必须调用 `send_message`；默认选择是沉默。
 
 ### 10.3 无动作
 
-主动回合里没有调用 `send_message`：视为「今天不想说」，不产生消息，不消耗配额，只记 DEBUG。
+主动回合里没有调用 `send_message`：视为「今天不想说」，不产生消息、不消耗配额，也不进入未回应统计。只有消息被通道接受后，才调用 `record_proactive()` 计数。
 
 ### 10.4 phase
 
@@ -484,7 +507,11 @@ agent:
       tick_seconds: 60
       min_gap_seconds: 3600
       daily_soft_limit: 4
-      prefer_when: [失眠, 未收尾话题, 想被夸, 深夜]
+      prefer_when:
+        - 失眠且对方超过 2 小时没来
+        - 有未收尾的话题且距上次互动超过 6 小时
+        - 刚修好某样东西，想被夸
+        - 深夜刷信息刷到想说话
       respect_presence_hint: true
       respect_link_state: true
       default_action: wait
@@ -567,7 +594,7 @@ class AgentSettings(_AgentConfigNode):
 | MemoryStore | 追加、压缩、锚点不丢、`unspoken` 不进摘要、损坏恢复 |
 | TurnRunner | 6 轮上限；无 `send_message` 正文兜底；工具错误转可读结果；会话串行 |
 | PostChecker | 六条规则；重写一次；遮蔽降级；不记正文 |
-| Initiative | 三层门控；连续未回应 ×2；每日上限；无消息不占配额 |
+| Initiative | 配置/状态/预算/语义时间门控；四类动机与自定义关键词兜底；连续未回应 ×2；每日上限；无消息不占配额 |
 | RemoteControl | 分帧；重连；outbox 重放；`client_msg_id` 去重；版本不一致退出 |
 
 ### 14.2 集成测试
@@ -599,7 +626,7 @@ class AgentSettings(_AgentConfigNode):
 | M4 Prompt | 人格第二人称化、准则双区、loader、builder | `data/prompt/Aliya.md`、`Aliya.charter.md`、`agent/aliya/prompt/` | 四层拼装正确；预算裁剪可测 |
 | M5 回合与工具 | `TurnRunner`、8 个工具、`PostChecker` | `agent/aliya/turn/` | 假 LLM 下聊天/派活/汇报三条路径通过 |
 | M6 记忆 | `MemoryStore`、压缩、恢复 | `agent/aliya/memory/` | 200 轮后摘要生成；锚点不丢 |
-| M7 自主行动 | 巡检、三层门控、主动提示词、phase | `agent/aliya/initiative.py`、`runtime.py` | 门控逐条测试；无消息不占配额 |
+| M7 自主行动 | 巡检、四道门控、语义时间匹配、主动提示词、phase | `agent/aliya/initiative.py`、`runtime.py` | 门控逐条测试；语义条件命中/未命中可测；无消息不占配额 |
 | M8 装配与验收 | `app.py`、端到端、文档同步 | `agent/aliya/app.py`、`README.md` | 五条流程通过；静态检查全绿 |
 
 每个阶段独立提交；M2 是唯一会改 cosmos 行为的阶段，失败可单独回退。
