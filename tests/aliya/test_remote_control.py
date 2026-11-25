@@ -9,10 +9,12 @@ import pytest
 from agent.aliya.transport import RemoteControl
 from agent.cosmos.contracts import (
     ConversationContext,
+    CosmosEvent,
     InboundEnvelope,
     TerminalMessage,
 )
 from agent.cosmos.contracts.rpc import (
+    Event,
     Hello,
     HelloOk,
     Inbound,
@@ -28,6 +30,7 @@ class FakeServer:
     def __init__(self, socket_path: Path) -> None:
         self.socket_path = socket_path
         self.delivered: list[str] = []
+        self.subscriptions: list[dict[str, int]] = []
         self._seen: set[str] = set()
         self._server: asyncio.AbstractServer | None = None
         self._writers: set[asyncio.StreamWriter] = set()
@@ -57,6 +60,10 @@ class FakeServer:
                 Inbound(envelope=envelope.model_dump(mode="json")),
             )
 
+    async def push_event(self, event: CosmosEvent) -> None:
+        for writer in list(self._writers):
+            await self._send(writer, Event(event=event.model_dump(mode="json")))
+
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._writers.add(writer)
         try:
@@ -76,6 +83,7 @@ class FakeServer:
                     return
                 message = parse_rpc_line(line.decode())
                 if isinstance(message, Subscribe):
+                    self.subscriptions.append(dict(message.topics))
                     await self._send(writer, Subscribed(topics=message.topics))
                 elif isinstance(message, RpcRequest):
                     await self._handle_request(writer, message)
@@ -187,3 +195,38 @@ async def test_reconnect_replays_outbox(fake_server: FakeServer) -> None:
         await asyncio.sleep(0.1)
     assert fake_server.delivered == ["在吗"]
     await asyncio.wait_for(client.close(), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_resumes_from_latest_topic_cursor(fake_server: FakeServer) -> None:
+    client = RemoteControl(str(fake_server.socket_path), token="t")
+    await client.connect()
+    stream = client.subscribe(["agent.result"], since_sequence=2)
+    pending = asyncio.create_task(stream.__anext__())
+    for _ in range(50):
+        if fake_server.subscriptions:
+            break
+        await asyncio.sleep(0.01)
+    assert fake_server.subscriptions[-1] == {"agent.result": 2}
+
+    await fake_server.push_event(
+        CosmosEvent(
+            event_id="e5",
+            topic="agent.result",
+            sequence=5,
+            at=datetime.now(UTC),
+            payload={},
+        )
+    )
+    event = await asyncio.wait_for(pending, timeout=2)
+    assert event.sequence == 5
+
+    await client._resubscribe()
+    for _ in range(50):
+        if len(fake_server.subscriptions) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert fake_server.subscriptions[-1] == {"agent.result": 5}
+
+    await stream.aclose()
+    await client.close()

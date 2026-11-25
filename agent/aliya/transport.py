@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 
@@ -81,7 +81,8 @@ class RemoteControl:
         self._presence: PresenceSnapshot | None = None
         self._capabilities: CosmosCapabilities | None = None
         self._topics: set[str] = set()
-        self._since: int | None = None
+        self._cursors: dict[str, int] = {}
+        self._event_ids: OrderedDict[str, None] = OrderedDict()
         self._connected = False
         self._closed = False
         self._backoff_seconds = 1.0
@@ -220,6 +221,12 @@ class RemoteControl:
             self._inbound.put_nowait(InboundEnvelope.model_validate(message.envelope))
         elif isinstance(message, Event):
             event = CosmosEvent.model_validate(message.event)
+            if event.event_id in self._event_ids:
+                return
+            self._event_ids[event.event_id] = None
+            while len(self._event_ids) > 1000:
+                self._event_ids.popitem(last=False)
+            self._cursors[event.topic] = max(self._cursors.get(event.topic, 0), event.sequence)
             if event.topic == "presence.changed":
                 changed = PresenceChanged.model_validate(event.payload)
                 self._presence = changed.snapshot
@@ -251,7 +258,9 @@ class RemoteControl:
     async def _resubscribe(self) -> None:
         if not self._topics:
             return
-        await self._send(Subscribe(topics={topic: self._since or 0 for topic in self._topics}))
+        await self._send(
+            Subscribe(topics={topic: self._cursors.get(topic, 0) for topic in self._topics})
+        )
 
     async def _replay_outbox(self) -> None:
         for client_msg_id, method, params in list(self._outbox):
@@ -291,7 +300,9 @@ class RemoteControl:
         self, topics: Sequence[str], *, since_sequence: int | None = None
     ) -> AsyncIterator[CosmosEvent]:
         self._topics = set(topics)
-        self._since = since_sequence
+        if since_sequence is not None:
+            for topic in topics:
+                self._cursors.setdefault(topic, since_sequence)
         if not self._connected:
             await self.connect()
         else:
