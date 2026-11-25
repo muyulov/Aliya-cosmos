@@ -36,6 +36,8 @@ class ControlPort(Protocol):
 
     def inbound(self) -> AsyncIterator[InboundEnvelope]: ...
 
+    async def ack_inbound(self, message_id: str) -> None: ...
+
     def subscribe(
         self, topics: Sequence[str], *, since_sequence: int | None = None
     ) -> AsyncIterator[CosmosEvent]: ...
@@ -102,6 +104,9 @@ class InProcessControl:
 
     def inbound(self) -> AsyncIterator[InboundEnvelope]:
         return self._control.inbound()
+
+    async def ack_inbound(self, message_id: str) -> None:
+        """同进程没有待确认队列，确认是空操作。"""
 
     def subscribe(
         self, topics: Sequence[str], *, since_sequence: int | None = None
