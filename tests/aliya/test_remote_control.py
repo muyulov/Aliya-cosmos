@@ -28,22 +28,29 @@ class FakeServer:
     def __init__(self, socket_path: Path) -> None:
         self.socket_path = socket_path
         self.delivered: list[str] = []
+        self._seen: set[str] = set()
         self._server: asyncio.AbstractServer | None = None
         self._writers: set[asyncio.StreamWriter] = set()
 
     async def start(self) -> None:
+        self.socket_path.unlink(missing_ok=True)
         self._server = await asyncio.start_unix_server(
             self._handle, path=str(self.socket_path)
         )
 
     async def stop(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
+        server = self._server
+        self._server = None
+        if server is not None:
+            server.close()
         for writer in list(self._writers):
             writer.close()
-            with contextlib.suppress(ConnectionResetError):
-                await writer.wait_closed()
+            with contextlib.suppress(ConnectionResetError, TimeoutError):
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+        if server is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(server.wait_closed(), timeout=2.0)
+        self.socket_path.unlink(missing_ok=True)
 
     async def push_inbound(self, envelope: InboundEnvelope) -> None:
         for writer in list(self._writers):
@@ -79,13 +86,19 @@ class FakeServer:
         finally:
             self._writers.discard(writer)
             writer.close()
-            with contextlib.suppress(ConnectionResetError):
-                await writer.wait_closed()
+            with contextlib.suppress(ConnectionResetError, TimeoutError):
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
 
     async def _handle_request(
         self, writer: asyncio.StreamWriter, message: RpcRequest
     ) -> None:
         if message.method == "deliver":
+            client_msg_id = str(message.params.get("client_msg_id", ""))
+            if client_msg_id and client_msg_id in self._seen:
+                await self._send(writer, RpcResponse(id=message.id, result=None))
+                return
+            if client_msg_id:
+                self._seen.add(client_msg_id)
             self.delivered.append(str(message.params["text"]))
             await self._send(writer, RpcResponse(id=message.id, result=None))
         elif message.method == "now":
@@ -160,3 +173,25 @@ async def test_inbound(fake_server: FakeServer) -> None:
     assert envelope.message.message_id == "m1"
     await client.ack_inbound("m1")
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_replays_outbox(fake_server: FakeServer) -> None:
+    client = RemoteControl(
+        str(fake_server.socket_path), token="t", request_timeout=2
+    )
+    await asyncio.wait_for(client.connect(), timeout=3)
+    await asyncio.wait_for(fake_server.stop(), timeout=3)
+
+    task = asyncio.create_task(client.deliver("在吗", session_id="s1"))
+    await asyncio.sleep(0.2)
+    await asyncio.wait_for(fake_server.start(), timeout=3)
+    with contextlib.suppress(ConnectionError, TimeoutError):
+        await asyncio.wait_for(task, timeout=5)
+
+    for _ in range(50):
+        if fake_server.delivered:
+            break
+        await asyncio.sleep(0.1)
+    assert fake_server.delivered == ["在吗"]
+    await asyncio.wait_for(client.close(), timeout=3)

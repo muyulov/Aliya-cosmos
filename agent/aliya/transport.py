@@ -132,8 +132,8 @@ class RemoteControl:
             self._reconnect_task = None
         if self._writer is not None:
             self._writer.close()
-            with contextlib.suppress(ConnectionResetError):
-                await self._writer.wait_closed()
+            with contextlib.suppress(ConnectionResetError, TimeoutError):
+                await asyncio.wait_for(self._writer.wait_closed(), timeout=1.0)
             self._writer = None
         self._connected = False
 
@@ -231,6 +231,8 @@ class RemoteControl:
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(ConnectionError("控制面连接断开"))
+                # 标记异常已读取，避免无人 await 时刷 "never retrieved"。
+                _ = future.exception()
         self._pending.clear()
 
     async def _reconnect(self) -> None:
