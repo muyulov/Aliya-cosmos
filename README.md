@@ -14,11 +14,17 @@ uv sync
 uv run python -m core.main
 
 # 启动主 agent（core 4 个服务 + cosmos 11 个服务）
-uv run python -m agent.cosmos.app
+# 控制面令牌只从进程环境变量读（.env 不会注入 os.environ），服务端与客户端必须同一个值
+ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.app
 
 # 另开终端，启动 Aliya（先 cosmos 后 Aliya）
 ALIYA_CONTROL_TOKEN=dev uv run python -m agent.aliya.app
+
+# 或者：用终端通道直接对话（CLI 即 cosmos，替代上面第一条命令）
+ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.cli
 ```
+
+`agent.cosmos.cli` 与 `agent.cosmos.app` 二选一：两者都装配同一套服务并监听同一个控制面 socket，前者额外把 stdin 接成用户通道、把 Aliya 的回复打印到 stdout。
 
 无需任何配置即可启动，所有配置项都有默认值。要自定义时改 `data/config/cosmos.yaml`；密钥类配置写在 `.env`（参考 `.env.example`）。
 
@@ -30,7 +36,8 @@ ALIYA_CONTROL_TOKEN=dev uv run python -m agent.aliya.app
 | --- | --- |
 | 安装依赖 | `uv sync` |
 | 启动基础服务 | `uv run python -m core.main` |
-| 启动主 agent | `uv run python -m agent.cosmos.app` |
+| 启动主 agent | `ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.app` |
+| 终端通道对话 | `ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.cli` |
 | 启动 Aliya | `ALIYA_CONTROL_TOKEN=dev uv run python -m agent.aliya.app` |
 | 跑测试 | `uv run pytest` |
 | 覆盖率 | `uv run pytest --cov=core --cov=agent` |
@@ -50,7 +57,7 @@ core/
   decision/      判断层：批量提问与 choice / score / noul 三原语
   agent/         Agent 工具层：工具声明与执行、Skill、MCP、系统提示拼装
 agent/
-  cosmos/        主 agent：契约、11 个常驻服务、进程内总线、装配与进程入口
+  cosmos/        主 agent：契约、11 个常驻服务、进程内总线、装配、进程入口与终端通道
   aliya/         上层控制者：独立进程、UDS 客户端、回合循环、记忆与自主行动
 data/           配置与运行数据：config/cosmos.yaml 为配置骨架，可安全提交
   skills/       技能目录：<name>/SKILL.md

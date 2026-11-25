@@ -118,7 +118,11 @@ agent/cosmos/
 启动进程（读 `data/config/cosmos.yaml`，Ctrl-C 优雅退出）：
 
 ```bash
-uv run python -m agent.cosmos.app
+# 常驻进程：Aliya 由另一个进程连上来
+ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.app
+
+# 或者在终端里直接对话：同样是 cosmos，额外把 stdin 接成用户通道
+ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.cli
 ```
 
 在自己的脚本里装配（与进程入口同一条路径）：

@@ -150,15 +150,23 @@ class InterceptHandler(logging.Handler):
         ).opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
-def setup_logging(settings: LogSettings | None = None) -> LogFiles:
-    """装配日志，返回本次启动实际写入的文件。可重复调用，会先移除已有 sink。"""
+def setup_logging(
+    settings: LogSettings | None = None,
+    *,
+    console_level: str | None = None,
+) -> LogFiles:
+    """装配日志，返回本次启动实际写入的文件。可重复调用，会先移除已有 sink。
+
+    `console_level` 只覆盖控制台 sink 的级别；两个文件 sink 仍跟随配置，
+    因此交互式入口能在终端里只看错误，完整 INFO 日志照常落盘。
+    """
     # 同上：显式判 None，避免配置模型定义 __bool__ / __len__ 后静默回退
     cfg = settings if settings is not None else get_settings().log
 
     # 返回的 handler id 在运行期不需要，显式赋给 _ 表示有意忽略
     _ = logger.remove()
 
-    add_console_sink(cfg)
+    add_console_sink(cfg, level=console_level)
     files = add_file_sinks(cfg)
 
     _intercept_stdlib()

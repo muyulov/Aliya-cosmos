@@ -19,6 +19,7 @@ logs/
 
 # 运行时数据（记忆库、桌面布局、统计、推演轨迹等本地产物，不入库）
 data/memory/
+agent/aliya/data/
 data/state/*
 !data/state/README.md
 

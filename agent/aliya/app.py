@@ -22,12 +22,15 @@ async def run(config_path: Path | None = None) -> None:
         raise SystemExit("缺少控制面令牌")
 
     control = RemoteControl(settings.agent.control.socket_path, token=token)
+    # LLM 端点按配置建客户端；没配 api_key 只警告，调用时才报错。
+    llm = LLMService(settings.llm)
+    await llm.start()
     runtime: AliyaRuntime | None = None
     try:
         await control.connect()
         runtime = AliyaRuntime(
             control=control,
-            llm=LLMService(),
+            llm=llm,
             config=settings.agent.aliya,
         )
         await runtime.start()
@@ -36,8 +39,13 @@ async def run(config_path: Path | None = None) -> None:
         if runtime is not None:
             await runtime.stop()
         await control.close()
+        await llm.stop()
 
 
 def main(config_path: Path | None = None) -> None:
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(run(config_path))
+
+
+if __name__ == "__main__":
+    main()

@@ -113,11 +113,15 @@ def _render(cfg: LogSettings, record: Record, stack: str | None, color: bool) ->
     return format_tree(record, stack=stack, color=color)
 
 
-def add_console_sink(cfg: LogSettings) -> None:
-    """控制台 sink。"""
+def add_console_sink(cfg: LogSettings, *, level: str | None = None) -> None:
+    """控制台 sink。
+
+    `level` 覆盖配置里的级别，只作用于这一个 sink：交互式入口用它压掉
+    INFO 噪音，文件 sink 仍按配置保留完整日志。
+    """
     _ = logger.add(
         sys.stderr,
-        level=cfg.level.upper(),
+        level=(level or cfg.level).upper(),
         format="{message}",
         colorize=False,
         backtrace=False,
