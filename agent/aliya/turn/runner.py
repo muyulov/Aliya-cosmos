@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from agent.aliya.prompt.builder import PromptBuilder
 from agent.aliya.turn.context import TurnContext
 from core.agent import ToolRegistry
 from core.config.settings import AgentAliyaSettings
 from core.llm import LLMService, assistant, tool_result
+from core.logger import log
 
 
 class TurnRunner:
@@ -20,17 +22,42 @@ class TurnRunner:
         builder: PromptBuilder,
         config: AgentAliyaSettings,
     ) -> None:
-        self._llm = llm
-        self._tools = tools
-        self._builder = builder
-        self._config = config
+        self._llm: LLMService = llm
+        self._tools: ToolRegistry = tools
+        self._builder: PromptBuilder = builder
+        self._config: AgentAliyaSettings = config
 
     async def run(self, *, turn: TurnContext) -> None:
         messages = self._builder.build(turn=turn)
-        for _ in range(self._config.reply.max_rounds):
-            reply = await asyncio.wait_for(
-                self._llm.chat_tools(messages, self._tools.declarations()),
-                timeout=self._config.reply.turn_timeout_seconds,
+        log.debug(
+            "提示词已构建",
+            来源=turn.origin,
+            消息数=len(messages),
+            上下文条目=turn.context_text().count("\n\n") + 1,
+            输入字数=len(turn.user_text),
+        )
+        for round_index in range(1, self._config.reply.max_rounds + 1):
+            started = time.monotonic()
+            try:
+                reply = await asyncio.wait_for(
+                    self._llm.chat_tools(messages, self._tools.declarations()),
+                    timeout=self._config.reply.turn_timeout_seconds,
+                )
+            except TimeoutError:
+                log.warning(
+                    "LLM 调用超时",
+                    轮次=round_index,
+                    超时秒=self._config.reply.turn_timeout_seconds,
+                    来源=turn.origin,
+                )
+                raise
+            log.debug(
+                "LLM 已返回",
+                轮次=round_index,
+                耗时毫秒=round((time.monotonic() - started) * 1000),
+                工具调用数=len(reply.tool_calls),
+                回复字数=len(reply.content or ""),
+                来源=turn.origin,
             )
             if reply.tool_calls:
                 messages.append(assistant(reply.content, tool_calls=reply.tool_calls))
@@ -42,8 +69,13 @@ class TurnRunner:
             if reply.content:
                 messages.append(assistant(reply.content))
                 if not turn.sent:
-                    await turn.send(reply.content)
+                    _ = await turn.send(reply.content)
             return
 
+        log.warning(
+            "达到最大工具轮次，发送兜底回复",
+            轮次上限=self._config.reply.max_rounds,
+            来源=turn.origin,
+        )
         if not turn.sent:
-            await turn.send(self._config.reply.fallback_text)
+            _ = await turn.send(self._config.reply.fallback_text)

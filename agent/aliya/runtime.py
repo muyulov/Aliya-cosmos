@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
-from collections.abc import Mapping
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 from uuid import uuid4
+
+from openai.types.chat import ChatCompletionMessageParam
 
 from agent.aliya.initiative import Initiative, PreferenceGate, TimeSignals
 from agent.aliya.memory.store import MemoryStore
@@ -26,13 +28,14 @@ from agent.cosmos.contracts import (
     CosmosEvent,
     DesktopSnapshot,
     DispatchIntent,
+    LinkState,
+    PresenceSnapshot,
     ReadablePresence,
     WorldInference,
 )
 from core.config.settings import AgentAliyaSettings
 from core.llm import LLMService
-
-_LOG = logging.getLogger(__name__)
+from core.logger import log
 
 type Phase = Literal["daily", "maintenance", "crisis", "rest"]
 
@@ -98,7 +101,7 @@ def _gap_text(now: datetime, last_user_at: datetime | None) -> str:
 
 
 def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
+    return cast("Mapping[str, object]", value) if isinstance(value, Mapping) else {}
 
 
 def event_brief(event: CosmosEvent) -> str:
@@ -130,7 +133,7 @@ def event_brief(event: CosmosEvent) -> str:
         lines = [f"这一批{status}：{summary}"]
         results = outcome.get("results")
         if isinstance(results, list):
-            for item in results[:3]:
+            for item in cast("list[object]", results)[:3]:
                 item_summary = _text(_mapping(item).get("summary"))
                 if item_summary:
                     lines.append(f"- {item_summary}")
@@ -164,10 +167,10 @@ class AliyaRuntime:
         config: AgentAliyaSettings,
         memory: MemoryStore | None = None,
     ) -> None:
-        self._control = control
-        self._llm = llm
-        self._config = config
-        self._memory = memory or MemoryStore(config.memory.dir)
+        self._control: ControlPort = control
+        self._llm: LLMService = llm
+        self._config: AgentAliyaSettings = config
+        self._memory: MemoryStore = memory or MemoryStore(config.memory.dir)
         self._queue: asyncio.Queue[TurnContext] = asyncio.Queue(maxsize=32)
         self._worker: asyncio.Task[None] | None = None
         self._ticker: asyncio.Task[None] | None = None
@@ -180,26 +183,26 @@ class AliyaRuntime:
         self._agent_states: dict[str, AgentRuntimeState] = {}
         self._progress: dict[str, AgentProgress] = {}
         self._pending_proactive: list[TurnContext] = []
-        self._link = "up"
+        self._link: LinkState = "up"
         self._last_user_at: datetime | None = None
-        self._last_session_id = ""
-        self._task_count = 0
-        self._crisis = False
-        self._initiative = Initiative(config.initiative)
-        self._preference_gate = PreferenceGate(config.initiative.prefer_when)
+        self._last_session_id: str = ""
+        self._task_count: int = 0
+        self._crisis: bool = False
+        self._initiative: Initiative = Initiative(config.initiative)
+        self._preference_gate: PreferenceGate = PreferenceGate(config.initiative.prefer_when)
         self._runner: TurnRunner | None = None
         self._proactive_runner: TurnRunner | None = None
-        self._started = False
-        self._pending_inbound = 0
-        self._closed = asyncio.Event()
+        self._started: bool = False
+        self._pending_inbound: int = 0
+        self._closed: asyncio.Event = asyncio.Event()
 
     async def start(self) -> None:
         if self._started:
             return
-        await self._control.handshake()
+        _ = await self._control.handshake()
         await self._prime_state()
         if self._config.memory.enabled:
-            self._memory.prune_turns(self._config.memory.max_turns)
+            _ = self._memory.prune_turns(self._config.memory.max_turns)
             if self._config.memory.anchors and not self._memory.load_anchors():
                 self._memory.save_anchors(self._config.memory.anchors)
         persona = load_persona(self._config.persona.source)
@@ -232,6 +235,15 @@ class AliyaRuntime:
             asyncio.create_task(self._consume_events()),
         ]
         self._started = True
+        log.info(
+            "Aliya 运行时已启动",
+            人格字数=len(persona),
+            准则字数=len(charter),
+            普通工具数=len(tools.tools),
+            主动工具数=len(proactive_tools.tools),
+            订阅主题数=len(_EVENT_TOPICS),
+            记忆启用=self._config.memory.enabled,
+        )
 
     async def _prime_state(self) -> None:
         """启动时拉一次状态，避免主动回合在首个事件到达前没有任何上下文。"""
@@ -242,27 +254,44 @@ class AliyaRuntime:
                 for entry in self._desktop.entries
                 if entry.status in {"running", "queued"}
             )
-        except Exception:
-            _LOG.debug("启动拉取桌面失败", exc_info=True)
+        except Exception as exc:
+            log.debug(
+                "启动拉取桌面失败，按空快照继续",
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+            )
         try:
             view = await self._control.get_world_view()
-        except Exception:
-            _LOG.debug("启动拉取世界推理失败", exc_info=True)
+        except Exception as exc:
+            log.debug(
+                "启动拉取世界推理失败，按无缓存继续",
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+            )
         else:
             if view is not None:
-                self._accept_world(view)
+                _ = self._accept_world(view)
         try:
             self._link = await self._control.get_link_state()
-        except Exception:
-            _LOG.debug("启动拉取链路状态失败", exc_info=True)
+        except Exception as exc:
+            log.debug(
+                "启动拉取链路状态失败，按 up 继续",
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+            )
         try:
             fetch = getattr(self._control, "fetch_presence", None)
-            snapshot = (
-                await fetch() if callable(fetch) else self._control.get_presence()
-            )
+            if fetch is None:
+                snapshot = self._control.get_presence()
+            else:
+                snapshot = await cast(Callable[[], Awaitable[PresenceSnapshot]], fetch)()
             self._presence = snapshot.readable
-        except Exception:
-            _LOG.debug("启动拉取状态失败", exc_info=True)
+        except Exception as exc:
+            log.debug(
+                "启动拉取状态失败，按无状态继续",
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+            )
 
     async def _recover_unanswered(self) -> None:
         """启动时补跑已落盘但未回复的回合；幂等键为 message_id。"""
@@ -282,14 +311,14 @@ class AliyaRuntime:
             )
             turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
             self._seen.add(stored.message_id)
-            await self._enqueue(turn)
+            _ = await self._enqueue(turn)
 
     async def stop(self) -> None:
         tasks = [self._worker, self._ticker, *self._consumers]
         for task in tasks:
             if task is not None:
-                task.cancel()
-        await asyncio.gather(
+                _ = task.cancel()
+        _ = await asyncio.gather(
             *(task for task in tasks if task is not None),
             return_exceptions=True,
         )
@@ -298,9 +327,10 @@ class AliyaRuntime:
         self._consumers = []
         self._started = False
         self._closed.set()
+        log.info("Aliya 运行时已停止")
 
     async def wait_closed(self) -> None:
-        await self._closed.wait()
+        _ = await self._closed.wait()
 
     async def wait_idle(self) -> None:
         """等待当前入站与队列中的回合处理完。"""
@@ -378,7 +408,7 @@ class AliyaRuntime:
             tasks = [task for task in tasks if task.task_id == task_id]
         if not tasks:
             return "现在没有在做的任务"
-        lines = []
+        lines: list[str] = []
         for task in tasks[:5]:
             progress = f"（{int(task.progress * 100)}%）" if task.progress is not None else ""
             lines.append(f"{task.label}：{task.status}{progress}")
@@ -389,14 +419,14 @@ class AliyaRuntime:
         return "已取消"
 
     async def retry(self, task_id: str) -> str:
-        await self._control.retry_task(task_id)
+        _ = await self._control.retry_task(task_id)
         return "已重试"
 
     async def refresh_world(self) -> str:
         view = await self._control.refresh_world()
         if view is None:
             return "现在看不出什么"
-        self._accept_world(view)
+        _ = self._accept_world(view)
         return self._world_text() or view.snapshot
 
     async def remember(self, note: str, kind: str) -> str:
@@ -416,17 +446,24 @@ class AliyaRuntime:
             at = envelope.message.at.isoformat() if envelope.message.at else ""
             if self._config.memory.enabled:
                 try:
-                    self._memory.record_inbound(
+                    _ = self._memory.record_inbound(
                         message_id,
                         envelope.message.text,
                         session_id=envelope.message.session_id,
                         at=at,
                     )
                 except OSError:
-                    _LOG.exception("入站消息落盘失败，暂不回执")
+                    log.exception("入站消息落盘失败，暂不回执", 消息=message_id)
                     continue
             self._seen.add(message_id)
             await self._ack(message_id)
+            log.debug(
+                "收到用户消息",
+                消息=message_id,
+                会话=envelope.message.session_id,
+                字数=len(envelope.message.text),
+                历史条数=len(envelope.conversation.turns),
+            )
             self._last_session_id = envelope.message.session_id
             self._last_user_at = envelope.message.at or self._now()
             self._initiative.record_user_reply()
@@ -445,7 +482,7 @@ class AliyaRuntime:
             turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
             self._pending_inbound += 1
             try:
-                await self._enqueue(turn)
+                _ = await self._enqueue(turn)
             finally:
                 self._pending_inbound -= 1
 
@@ -456,7 +493,14 @@ class AliyaRuntime:
             _EVENT_TOPICS, since_sequence=since, cursors=cursors
         ):
             self._cache_event(event)
-            if self._should_report(event):
+            report = self._should_report(event)
+            log.debug(
+                "收到控制面事件",
+                主题=event.topic,
+                序号=event.sequence,
+                触发回合=report,
+            )
+            if report:
                 turn = TurnContext(
                     user_text=event_brief(event),
                     session_id=self._last_session_id,
@@ -468,11 +512,17 @@ class AliyaRuntime:
                     droppable=event.topic == "agent.progress",
                 )
                 turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
-                await self._enqueue(turn)
+                _ = await self._enqueue(turn)
             try:
                 self._memory.save_cursor(event.sequence, topic=event.topic)
-            except OSError:
-                _LOG.warning("事件游标落盘失败", exc_info=True)
+            except OSError as exc:
+                log.warning(
+                    "事件游标落盘失败，重启后可能重复消费",
+                    主题=event.topic,
+                    序号=event.sequence,
+                    错误类型=type(exc).__name__,
+                    错误消息=str(exc),
+                )
 
     def _should_report(self, event: CosmosEvent) -> bool:
         if event.topic in _REPORT_TOPICS:
@@ -496,7 +546,7 @@ class AliyaRuntime:
         elif event.topic == "link.state.changed":
             state = event.payload.get("state")
             if state in {"up", "unstable", "down"}:
-                self._link = state
+                self._link = cast("LinkState", state)
         elif event.topic == "world.inference":
             if not self._config.world.consume:
                 return
@@ -504,7 +554,7 @@ class AliyaRuntime:
                 view = WorldInference.model_validate(event.payload.get("inference"))
             except (TypeError, ValueError):
                 return
-            self._accept_world(view)
+            _ = self._accept_world(view)
         elif event.topic == "desktop.layout.changed":
             try:
                 self._desktop = DesktopSnapshot.model_validate(event.payload)
@@ -536,7 +586,7 @@ class AliyaRuntime:
             try:
                 self._queue.put_nowait(turn)
             except asyncio.QueueFull:
-                _LOG.warning("回合队列已满，丢弃进度汇报")
+                log.warning("回合队列已满，丢弃进度汇报", 来源=turn.origin)
                 return False
             return True
         await self._queue.put(turn)
@@ -544,15 +594,31 @@ class AliyaRuntime:
 
     def _cancel_pending_proactive(self) -> None:
         """用户刚有动作：取消尚未开始的主动回合，不打断进行中的回合。"""
+        if not self._pending_proactive:
+            return
+        count = len(self._pending_proactive)
         for pending in self._pending_proactive:
             pending.canceled = True
         self._pending_proactive.clear()
+        log.info("用户有动作，已取消待执行的主动回合", 数量=count)
 
     def _accept_world(self, view: WorldInference) -> bool:
         """世界推理按 revision 单调更新，旧版本直接丢弃。"""
         if self._world is not None and view.revision < self._world.revision:
+            log.debug(
+                "丢弃旧版本世界推理",
+                收到版本=view.revision,
+                当前版本=self._world.revision,
+            )
             return False
         self._world = view
+        log.debug(
+            "接受世界推理",
+            版本=view.revision,
+            置信度=view.confidence,
+            假设数=len(view.hypotheses),
+            行动窗口数=len(view.action_windows),
+        )
         return True
 
     async def _run_worker(self) -> None:
@@ -566,14 +632,27 @@ class AliyaRuntime:
                     continue
             self._current_turn = turn
             turn.memory = self._compose_memory(turn.memory)
+            started = time.monotonic()
+            log.debug(
+                "回合开始",
+                来源=turn.origin,
+                主动=turn.proactive,
+                消息=turn.message_id or "-",
+                输入字数=len(turn.user_text),
+            )
             try:
                 runner = self._proactive_runner if turn.proactive else self._runner
                 assert runner is not None
                 await runner.run(turn=turn)
             except TimeoutError:
+                log.warning(
+                    "回合超时，发送兜底回复",
+                    来源=turn.origin,
+                    超时秒=self._config.reply.turn_timeout_seconds,
+                )
                 await self._fallback(turn)
             except Exception:
-                _LOG.exception("回合执行失败")
+                log.exception("回合执行失败", 来源=turn.origin, 消息=turn.message_id or "-")
                 await self._fallback(turn)
             finally:
                 if self._config.memory.enabled and turn.replies:
@@ -592,15 +671,25 @@ class AliyaRuntime:
                 await self._maybe_compress_memory()
                 self._current_turn = None
                 self._queue.task_done()
+                fields = {
+                    "来源": turn.origin,
+                    "耗时毫秒": round((time.monotonic() - started) * 1000),
+                    "回复条数": len(turn.replies),
+                    "已发送": turn.sent,
+                }
+                if turn.origin == "event":
+                    log.debug("回合结束", face=None, **fields)
+                else:
+                    log.info("回合结束", face=None, **fields)
                 await self._publish_context()
 
     async def _fallback(self, turn: TurnContext) -> None:
         if turn.sent:
             return
         try:
-            await turn.send(self._config.reply.fallback_text)
+            _ = await turn.send(self._config.reply.fallback_text)
         except Exception:
-            _LOG.exception("发送兜底回复失败")
+            log.exception("发送兜底回复失败", 来源=turn.origin)
 
     async def _run_ticker(self) -> None:
         while True:
@@ -611,14 +700,22 @@ class AliyaRuntime:
             decision = self._initiative.should_speak(
                 now=now,
                 presence=self._presence,
-                link=self._link,  # type: ignore[arg-type]
+                link=self._link,
                 last_user_at=self._last_user_at,
             )
             if not decision.should_speak:
                 continue
             preference = self._preference_gate.match(self._time_signals(now))
             if not preference.matched:
-                _LOG.debug("主动时间门控未命中：%s", preference.reason)
+                log.debug(
+                    "主动时间门控未命中",
+                    原因=preference.reason,
+                    距上次对话秒=(
+                        None
+                        if self._last_user_at is None
+                        else round((now - self._last_user_at).total_seconds())
+                    ),
+                )
                 continue
             user_text = (
                 f"现在是 {now:%H:%M}，距上次对话 {_gap_text(now, self._last_user_at)}。"
@@ -638,7 +735,13 @@ class AliyaRuntime:
             )
             turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
             self._pending_proactive.append(turn)
-            await self._enqueue(turn)
+            _ = await self._enqueue(turn)
+            log.info(
+                "主动回合已排队",
+                触发原因=decision.reason,
+                偏好条件=preference.condition or "-",
+                时间=f"{now:%H:%M}",
+            )
 
     def _time_signals(self, now: datetime | None = None) -> TimeSignals:
         """收集时间层可用的语义信号；只读缓存，不触发额外拉取。"""
@@ -672,7 +775,7 @@ class AliyaRuntime:
             if turn.text.strip()
         )[-8000:]
         previous = self._memory.load_summary().strip()
-        prompt = [
+        prompt: list[ChatCompletionMessageParam] = [
             {
                 "role": "system",
                 "content": (
@@ -686,13 +789,15 @@ class AliyaRuntime:
             },
         ]
         try:
-            chat = getattr(self._llm, "chat", None)
-            if not callable(chat):
-                raise AttributeError("LLM 不支持 chat")
             timeout = min(20, self._config.reply.turn_timeout_seconds)
-            summary = str(await asyncio.wait_for(chat(prompt), timeout=timeout))
-        except Exception:
-            _LOG.warning("记忆压缩失败，改用截断摘要", exc_info=True)
+            summary = str(await asyncio.wait_for(self._llm.chat(prompt), timeout=timeout))
+        except Exception as exc:
+            log.warning(
+                "记忆压缩失败，改用截断摘要",
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+                轮次数=len(turns),
+            )
             summary = transcript
         summary = summary.strip()[: self._config.memory.summary_chars]
         if not summary:
@@ -700,11 +805,15 @@ class AliyaRuntime:
         try:
             self._memory.save_summary(summary)
             # 留出一半余量，避免之后每回合都触发压缩。
-            self._memory.prune_turns(max(1, max_turns // 2))
+            _ = self._memory.prune_turns(max(1, max_turns // 2))
         except OSError:
-            _LOG.exception("记忆摘要落盘失败")
+            log.exception("记忆摘要落盘失败")
         else:
-            _LOG.info("记忆已压缩：保留 %d 条，摘要 %d 字", max(1, max_turns // 2), len(summary))
+            log.info(
+                "记忆已压缩",
+                保留条数=max(1, max_turns // 2),
+                摘要字数=len(summary),
+            )
 
     def _compose_memory(self, base: str | None) -> str | None:
         """cosmos 摘要 + 长期记忆；锚点与私密线不参与摘要。"""
@@ -789,8 +898,12 @@ class AliyaRuntime:
         if callable(provider):
             try:
                 value = provider()
-            except Exception:
-                _LOG.debug("读取服务端时间失败，退回本地时间", exc_info=True)
+            except Exception as exc:
+                log.debug(
+                    "读取服务端时间失败，退回本地时间",
+                    错误类型=type(exc).__name__,
+                    错误消息=str(exc),
+                )
             else:
                 if isinstance(value, datetime):
                     return value
@@ -799,8 +912,13 @@ class AliyaRuntime:
     async def _ack(self, message_id: str) -> None:
         try:
             await self._control.ack_inbound(message_id)
-        except Exception:
-            _LOG.warning("入站确认失败，等待重连重放", exc_info=True)
+        except Exception as exc:
+            log.warning(
+                "入站确认失败，等待重连重放",
+                消息=message_id,
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+            )
 
     async def _send_for_turn(self, turn: TurnContext, text: str) -> bool:
         accepted = await self._send(turn, text)
@@ -819,10 +937,22 @@ class AliyaRuntime:
             receipt = await self._control.notify(prepared)
         else:
             await self._control.deliver(prepared, session_id=turn.session_id)
+            log.debug(
+                "回复已投递",
+                会话=turn.session_id,
+                字数=len(prepared),
+                消息=turn.message_id or "-",
+            )
             return True
         if not receipt.accepted and receipt.deliver_after is None:
-            _LOG.info("主动消息被拒：%s", receipt.reason)
+            log.info("主动消息被拒", 原因=receipt.reason, 来源=turn.origin)
             return False
+        if receipt.deliver_after is not None:
+            log.debug(
+                "主动消息延迟投递",
+                来源=turn.origin,
+                投递时间=receipt.deliver_after.isoformat(),
+            )
         return True
 
     async def _deliver(self, text: str, session_id: str) -> None:
@@ -835,25 +965,29 @@ class AliyaRuntime:
         """按配置跑出站检查；命中先让模型重写一次，仍不通过则降级删除。"""
         checked = check(text, self._config.reply.post_checks)
         if not checked.text:
+            log.debug("出站内容被检查清空，放弃发送", 原字数=len(text))
             return ""
         if checked.rules:
-            _LOG.warning("出站检查命中：%s", checked.rules)
+            log.warning(
+                "出站检查命中",
+                规则="、".join(checked.rules),
+                原字数=len(text),
+            )
             rewritten = await self._rewrite_outbound(text, checked.rules)
             if rewritten:
                 checked = check(rewritten, self._config.reply.post_checks)
                 if not checked.text:
+                    log.debug("重写后仍被检查清空，放弃发送", 规则="、".join(checked.rules))
                     return ""
         limit = self._config.reply.max_chars_per_message
         if len(checked.text) > limit:
+            log.debug("出站内容超长，已截断", 原字数=len(checked.text), 上限=limit)
             return checked.text[: max(0, limit - 1)].rstrip() + "…"
         return checked.text
 
     async def _rewrite_outbound(self, text: str, rules: tuple[str, ...]) -> str | None:
         """模型可用时重写一次；不可用或失败返回 None，走降级删除。"""
-        chat = getattr(self._llm, "chat", None)
-        if not callable(chat):
-            return None
-        prompt = [
+        prompt: list[ChatCompletionMessageParam] = [
             {
                 "role": "system",
                 "content": (
@@ -864,9 +998,13 @@ class AliyaRuntime:
             {"role": "user", "content": f"原句：{text}\n命中：{'、'.join(rules)}"},
         ]
         try:
-            rewritten = str(await asyncio.wait_for(chat(prompt), timeout=10))
-        except Exception:
-            _LOG.warning("出站重写失败，走降级删除", exc_info=True)
+            rewritten = str(await asyncio.wait_for(self._llm.chat(prompt), timeout=10))
+        except Exception as exc:
+            log.warning(
+                "出站重写失败，走降级删除",
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+            )
             return None
         return rewritten.strip() or None
 
@@ -892,5 +1030,9 @@ class AliyaRuntime:
                     ),
                 )
             )
-        except Exception:
-            _LOG.debug("回传 AliyaContext 失败", exc_info=True)
+        except Exception as exc:
+            log.debug(
+                "回传 AliyaContext 失败",
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+            )

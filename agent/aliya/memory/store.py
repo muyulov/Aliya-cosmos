@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import json
-import logging
 import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
-_LOG = logging.getLogger(__name__)
+from core.logger import log
 
 #: 落盘前拒绝的敏感信息：API key、GitHub token、身份证、银行卡。
 _PII = (
@@ -20,6 +20,11 @@ _PII = (
     re.compile(r"\b\d{17}[\dXx]\b"),
     re.compile(r"\b\d{16,19}\b"),
 )
+
+
+def _json_load(text: str) -> object:
+    """把 `json.loads` 的 `Any` 收窄为 `object`，避免 Any 向调用方扩散。"""
+    return cast("object", json.loads(text))
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,9 +38,10 @@ class Turn:
 
 class MemoryStore:
     def __init__(self, root: str | Path) -> None:
-        self._dir = Path(root)
+        self._dir: Path = Path(root)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._user_ids: set[str] | None = None
+        log.debug("记忆存储已就绪", 目录=str(self._dir))
 
     # ---------- 回合 ----------
 
@@ -56,7 +62,7 @@ class MemoryStore:
             "at": at or datetime.now(UTC).isoformat(),
         }
         with (self._dir / "turns.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            _ = handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         if role == "user" and self._user_ids is not None:
             self._user_ids.add(message_id)
 
@@ -105,7 +111,7 @@ class MemoryStore:
         kept = turns[-max_turns:]
         path = self._dir / "turns.jsonl"
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(
+        _ = tmp.write_text(
             "".join(
                 json.dumps(
                     {
@@ -124,7 +130,9 @@ class MemoryStore:
         )
         os.replace(tmp, path)
         self._user_ids = None
-        return len(turns) - len(kept)
+        removed = len(turns) - len(kept)
+        log.debug("记忆轮次已裁剪", 删除条数=removed, 保留条数=len(kept))
+        return removed
 
     def _read_turns(self) -> list[Turn]:
         path = self._dir / "turns.jsonl"
@@ -133,18 +141,19 @@ class MemoryStore:
         turns: list[Turn] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
-                data = json.loads(line)
+                data = _json_load(line)
             except json.JSONDecodeError:
                 continue
             if not isinstance(data, dict):
                 continue
+            record = cast("dict[str, object]", data)
             turns.append(
                 Turn(
-                    message_id=str(data.get("message_id", "")),
-                    role=str(data.get("role", "")),
-                    text=str(data.get("text", "")),
-                    at=str(data.get("at", "")),
-                    session_id=str(data.get("session_id", "")),
+                    message_id=str(record.get("message_id", "")),
+                    role=str(record.get("role", "")),
+                    text=str(record.get("text", "")),
+                    at=str(record.get("at", "")),
+                    session_id=str(record.get("session_id", "")),
                 )
             )
         return turns
@@ -180,7 +189,9 @@ class MemoryStore:
 
     def load_summary(self) -> str:
         data = self._read_json("summary.json", {})
-        return str(data.get("summary", "")) if isinstance(data, dict) else ""
+        if not isinstance(data, dict):
+            return ""
+        return str(cast("dict[str, object]", data).get("summary", ""))
 
     def save_cursor(self, sequence: int, *, topic: str = "") -> None:
         cursors = self.load_cursors()
@@ -197,7 +208,9 @@ class MemoryStore:
         if not isinstance(data, dict):
             return {}
         cursors: dict[str, int] = {}
-        for topic, sequence in data.items():
+        for topic, sequence in cast("dict[str, object]", data).items():
+            if not isinstance(sequence, int | float | str):
+                continue
             try:
                 cursors[str(topic)] = int(sequence)
             except (TypeError, ValueError):
@@ -209,7 +222,7 @@ class MemoryStore:
         if not note.strip():
             return False
         if any(pattern.search(note) for pattern in _PII):
-            _LOG.warning("记忆内容疑似包含敏感信息，已拒绝落盘")
+            log.warning("记忆内容疑似包含敏感信息，已拒绝落盘", 类型=kind, 字数=len(note))
             return False
         if kind == "anchor":
             values = self.load_anchors()
@@ -227,6 +240,7 @@ class MemoryStore:
             values = self.load_facts()
             values.append(note)
             self.save_facts(values)
+        log.debug("记忆已写入", 类型=kind, 字数=len(note), 同类条目数=len(values))
         return True
 
     # ---------- 原子文件 ----------
@@ -234,7 +248,7 @@ class MemoryStore:
     def _write_json(self, name: str, value: object) -> None:
         path = self._dir / name
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(
+        _ = tmp.write_text(
             json.dumps(value, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -245,16 +259,16 @@ class MemoryStore:
         if not path.exists():
             return default
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return _json_load(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             bad = path.with_name(path.name + ".bad")
             with contextlib.suppress(OSError):
                 os.replace(path, bad)
-            _LOG.warning("记忆文件损坏，已备份：%s", path)
+            log.warning("记忆文件损坏，已备份", 文件=str(path), 备份=str(bad))
             return default
 
     def _load_list(self, name: str) -> list[str]:
         data = self._read_json(name, [])
         if not isinstance(data, list):
             return []
-        return [item for item in data if isinstance(item, str)]
+        return [item for item in cast("list[object]", data) if isinstance(item, str)]

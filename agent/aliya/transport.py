@@ -8,6 +8,7 @@ import uuid
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from pydantic import BaseModel
 
@@ -45,6 +46,7 @@ from agent.cosmos.contracts.rpc import (
     Subscribe,
     parse_rpc_line,
 )
+from core.logger import log
 
 CONTRACT_VERSION = "1.0"
 
@@ -54,8 +56,8 @@ class RemoteError(Exception):
 
     def __init__(self, code: str, message: str, *, retriable: bool = False) -> None:
         super().__init__(message)
-        self.code = code
-        self.retriable = retriable
+        self.code: str = code
+        self.retriable: bool = retriable
 
 
 class RemoteControl:
@@ -69,9 +71,9 @@ class RemoteControl:
         request_timeout: float = 15.0,
         outbox_limit: int = 200,
     ) -> None:
-        self._socket_path = socket_path
-        self._token = token
-        self._timeout = request_timeout
+        self._socket_path: str = socket_path
+        self._token: str = token
+        self._timeout: float = request_timeout
         self._outbox: deque[tuple[str, str, dict[str, object]]] = deque(maxlen=outbox_limit)
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
@@ -83,11 +85,11 @@ class RemoteControl:
         self._topics: set[str] = set()
         self._cursors: dict[str, int] = {}
         self._event_ids: OrderedDict[str, None] = OrderedDict()
-        self._connected = False
-        self._closed = False
-        self._backoff_seconds = 1.0
-        self._clock_offset = timedelta(0)
-        self._server_timezone = "UTC"
+        self._connected: bool = False
+        self._closed: bool = False
+        self._backoff_seconds: float = 1.0
+        self._clock_offset: timedelta = timedelta(0)
+        self._server_timezone: str = "UTC"
         self._read_task: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
 
@@ -99,12 +101,24 @@ class RemoteControl:
         while not self._closed:
             try:
                 reader, writer = await asyncio.open_unix_connection(self._socket_path)
-            except OSError:
+            except OSError as exc:
+                log.debug(
+                    "连接控制面失败，准备重试",
+                    端点=self._socket_path,
+                    错误类型=type(exc).__name__,
+                    错误消息=str(exc),
+                )
                 await self._sleep_backoff()
                 continue
             try:
                 capabilities = await self._hello(reader, writer)
-            except (ConnectionError, OSError, ValueError):
+            except (ConnectionError, OSError, ValueError) as exc:
+                log.warning(
+                    "控制面握手失败，准备重试",
+                    端点=self._socket_path,
+                    错误类型=type(exc).__name__,
+                    错误消息=str(exc),
+                )
                 writer.close()
                 with contextlib.suppress(ConnectionResetError):
                     await writer.wait_closed()
@@ -115,6 +129,13 @@ class RemoteControl:
             self._connected = True
             self._backoff_seconds = 1.0
             self._read_task = asyncio.create_task(self._read_loop())
+            log.info(
+                "已连接控制面",
+                端点=self._socket_path,
+                合约版本=CONTRACT_VERSION,
+                服务端时区=self._server_timezone,
+                待补发消息=len(self._outbox),
+            )
             await self._resubscribe()
             await self._replay_outbox()
             return
@@ -122,12 +143,12 @@ class RemoteControl:
     async def close(self) -> None:
         self._closed = True
         if self._read_task is not None:
-            self._read_task.cancel()
+            _ = self._read_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._read_task
             self._read_task = None
         if self._reconnect_task is not None:
-            self._reconnect_task.cancel()
+            _ = self._reconnect_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reconnect_task
             self._reconnect_task = None
@@ -137,6 +158,7 @@ class RemoteControl:
                 await asyncio.wait_for(self._writer.wait_closed(), timeout=1.0)
             self._writer = None
         self._connected = False
+        log.info("控制面连接已关闭", 端点=self._socket_path)
 
     async def handshake(self) -> CosmosCapabilities:
         if self._capabilities is None:
@@ -158,8 +180,11 @@ class RemoteControl:
         try:
             await self._send(RpcRequest(id=request_id, method=method, params=params))
             return await asyncio.wait_for(future, timeout=self._timeout)
+        except TimeoutError:
+            log.warning("控制面请求超时", 方法=method, 超时秒=self._timeout, 请求=request_id)
+            raise
         finally:
-            self._pending.pop(request_id, None)
+            _ = self._pending.pop(request_id, None)
 
     async def _hello(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -192,6 +217,12 @@ class RemoteControl:
             server_time = server_time.replace(tzinfo=UTC)
         self._clock_offset = server_time.astimezone(UTC) - datetime.now(UTC)
         self._server_timezone = message.timezone
+        log.debug(
+            "控制面握手完成",
+            合约版本=CONTRACT_VERSION,
+            服务端时区=message.timezone,
+            时钟偏移毫秒=round(self._clock_offset.total_seconds() * 1000),
+        )
         return CosmosCapabilities.model_validate(message.capabilities)
 
     async def _read_loop(self) -> None:
@@ -206,8 +237,10 @@ class RemoteControl:
                 self._handle_line(line.decode())
         finally:
             self._connected = False
+            pending = len(self._pending)
             self._fail_pending()
             if not self._closed:
+                log.warning("控制面连接断开，准备重连", 未完成请求=pending)
                 self._reconnect_task = asyncio.create_task(self._reconnect())
 
     def _handle_line(self, line: str) -> None:
@@ -217,7 +250,7 @@ class RemoteControl:
             if future is None or future.done():
                 return
             if message.ok:
-                future.set_result(message.result)
+                future.set_result(cast("object", message.result))
             elif message.error is not None:
                 future.set_exception(
                     RemoteError(
@@ -236,7 +269,7 @@ class RemoteControl:
                 return
             self._event_ids[event.event_id] = None
             while len(self._event_ids) > 1000:
-                self._event_ids.popitem(last=False)
+                _ = self._event_ids.popitem(last=False)
             self._cursors[event.topic] = max(self._cursors.get(event.topic, 0), event.sequence)
             if event.topic == "presence.changed":
                 changed = PresenceChanged.model_validate(event.payload)
@@ -257,6 +290,11 @@ class RemoteControl:
         await self.connect()
 
     async def _sleep_backoff(self) -> None:
+        log.debug(
+            "控制面暂不可用，退避后重试",
+            端点=self._socket_path,
+            退避秒=self._backoff_seconds,
+        )
         await asyncio.sleep(self._backoff_seconds)
         self._backoff_seconds = min(self._backoff_seconds * 2, 30)
 
@@ -274,10 +312,19 @@ class RemoteControl:
         )
 
     async def _replay_outbox(self) -> None:
+        if not self._outbox:
+            return
+        log.info("重放未确认的出站消息", 数量=len(self._outbox))
         for client_msg_id, method, params in list(self._outbox):
             try:
-                await self.call(method, params)
-            except (RemoteError, ConnectionError, TimeoutError):
+                _ = await self.call(method, params)
+            except (RemoteError, ConnectionError, TimeoutError) as exc:
+                log.debug(
+                    "出站补发中断，等待下次重连",
+                    方法=method,
+                    错误类型=type(exc).__name__,
+                    剩余数量=len(self._outbox),
+                )
                 return
             self._remove_outbox(client_msg_id)
 
@@ -290,6 +337,9 @@ class RemoteControl:
     async def _call_replayable(self, method: str, params: dict[str, object]) -> object:
         client_msg_id = uuid.uuid4().hex
         payload = {**params, "client_msg_id": client_msg_id}
+        limit = self._outbox.maxlen
+        if limit is not None and len(self._outbox) >= limit:
+            log.warning("出站补发队列已满，将丢弃最旧消息", 上限=limit, 方法=method)
         self._outbox.append((client_msg_id, method, payload))
         result = await self.call(method, payload)
         self._remove_outbox(client_msg_id)
@@ -321,11 +371,16 @@ class RemoteControl:
                     self._cursors[topic] = max(self._cursors.get(topic, 0), sequence)
         if since_sequence is not None:
             for topic in topics:
-                self._cursors.setdefault(topic, since_sequence)
+                _ = self._cursors.setdefault(topic, since_sequence)
         if not self._connected:
             await self.connect()
         else:
             await self._resubscribe()
+        log.debug(
+            "已订阅控制面事件",
+            主题数=len(self._topics),
+            主题="、".join(sorted(self._topics)),
+        )
         while True:
             event = await self._events.get()
             if event.topic in self._topics:
@@ -370,10 +425,10 @@ class RemoteControl:
         )
 
     async def cancel_task(self, task_id: str) -> None:
-        await self.call("cancel_task", {"task_id": task_id})
+        _ = await self.call("cancel_task", {"task_id": task_id})
 
     async def cancel_dispatch(self, dispatch_id: str) -> None:
-        await self.call("cancel_dispatch", {"dispatch_id": dispatch_id})
+        _ = await self.call("cancel_dispatch", {"dispatch_id": dispatch_id})
 
     async def retry_task(self, task_id: str) -> TaskHandle:
         return TaskHandle.model_validate(await self.call("retry_task", {"task_id": task_id}))
@@ -382,7 +437,7 @@ class RemoteControl:
         result = await self.call("list_tasks", {"agent_id": agent_id, "limit": limit})
         if not isinstance(result, list):
             raise RemoteError("invalid_response", "list_tasks 返回非列表")
-        return [TaskBrief.model_validate(item) for item in result]
+        return [TaskBrief.model_validate(item) for item in cast("list[object]", result)]
 
     # ---------- 状态 ----------
 
@@ -400,10 +455,10 @@ class RemoteControl:
         return snapshot
 
     async def set_presence_visibility(self, fields: Sequence[PresenceField]) -> None:
-        await self.call("set_presence_visibility", {"fields": list(fields)})
+        _ = await self.call("set_presence_visibility", {"fields": list(fields)})
 
     async def get_link_state(self) -> LinkState:
-        return await self.call("get_link_state", {})  # type: ignore[return-value]
+        return cast("LinkState", await self.call("get_link_state", {}))
 
     async def get_world_view(self, force: bool = False) -> WorldInference | None:
         result = await self.call("get_world_view", {"force": force})
@@ -414,12 +469,12 @@ class RemoteControl:
         return None if result is None else WorldInference.model_validate(result)
 
     async def set_aliya_context(self, ctx: AliyaContext) -> None:
-        await self.call("set_aliya_context", {"context": ctx.model_dump(mode="json")})
+        _ = await self.call("set_aliya_context", {"context": ctx.model_dump(mode="json")})
 
     # ---------- 消息 ----------
 
     async def deliver(self, text: str, *, session_id: str, kind: MessageKind = "chat") -> None:
-        await self._call_replayable(
+        _ = await self._call_replayable(
             "deliver", {"text": text, "session_id": session_id, "kind": kind}
         )
 
@@ -435,4 +490,4 @@ class RemoteControl:
         result = await self.call("history", {"session_id": session_id, "limit": limit})
         if not isinstance(result, list):
             raise RemoteError("invalid_response", "history 返回非列表")
-        return [TerminalMessage.model_validate(item) for item in result]
+        return [TerminalMessage.model_validate(item) for item in cast("list[object]", result)]

@@ -22,6 +22,7 @@ from agent.cosmos.contracts import (
 )
 from agent.cosmos.errors import AgentRegistrationError
 from core.config import AgentCardConfig, AgentCosmosSettings
+from core.logger import log
 
 
 class RegistrySink(Protocol):
@@ -71,9 +72,22 @@ def to_card(agent_id: str, config: AgentCardConfig) -> AgentCard:
 def load_agents(registry: RegistrySink, config: AgentCosmosSettings) -> None:
     """按配置逐个导入并注册；任何一步失败都带模块路径抛错。"""
     for entry in config.agents:
+        log.debug(
+            "加载子 agent 配置",
+            agent_id=entry.id,
+            模块=entry.module,
+            handler=entry.handler,
+        )
         try:
             module = importlib.import_module(entry.module)
         except Exception as exc:
+            log.error(
+                "导入子 agent 模块失败",
+                agent_id=entry.id,
+                模块=entry.module,
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+            )
             msg = f"导入子 agent 模块失败：{entry.module}：{type(exc).__name__}: {exc}"
             raise AgentRegistrationError(msg) from exc
 
@@ -92,3 +106,4 @@ def load_agents(registry: RegistrySink, config: AgentCosmosSettings) -> None:
             raise AgentRegistrationError(msg) from exc
 
         registry.register(card, cast("AgentHandler", handler), source="config")
+    log.info("子 agent 装配完成", 数量=len(config.agents))

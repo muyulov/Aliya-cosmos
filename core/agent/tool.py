@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from pydantic.errors import PydanticSchemaGenerationError
 
 from core.agent.errors import ToolDefinitionError
+from core.logger import log
 
 #: 执行入口：原始 arguments JSON → 回填文本
 type Invoker = Callable[[str], Awaitable[str]]
@@ -181,7 +182,9 @@ def _invoke_for(func: Callable[..., object], model: type[BaseModel] | None) -> I
             try:
                 parsed = model.model_validate_json(arguments or "{}")
             except ValidationError as exc:
-                return f"参数校验失败：{_describe_validation(exc)}"
+                detail = _describe_validation(exc)
+                log.debug("工具参数校验失败", 工具=func.__name__, 详情=detail)
+                return f"参数校验失败：{detail}"
             kwargs = cast("dict[str, object]", parsed.model_dump())
         if is_async:
             result = await cast("Awaitable[object]", func(**kwargs))

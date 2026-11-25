@@ -26,6 +26,7 @@ from typing import cast
 
 from agent.cosmos.world.classifier import FEATURE_NAMES, TriggerClassifier
 from agent.cosmos.world.trace import TraceRecord, read_traces
+from core.logger import log
 
 #: 相邻两轮超过这个间隔就不当作同一段因果
 MAX_PAIR_GAP_SECONDS = 3600.0
@@ -81,6 +82,12 @@ def calibrate(
     pairs, source = _label_pairs(records, label_error, min_samples)
     current = now or datetime.now(tz=UTC)
     if not pairs:
+        log.warning(
+            "没有可用于校准的轨迹样本，返回默认参数",
+            轨迹=str(trace_path),
+            窗口天数=window_days,
+            记录数=len(records),
+        )
         return CalibrationReport(
             generated_at=current.isoformat(),
             trace_path=str(trace_path),
@@ -202,6 +209,11 @@ def train_classifier(
     labels = {label for _, label in pairs}
     if len(labels) < 2:
         # 单一类别无法学习；给一个保守偏置，并标记退化，运行时退回规则。
+        log.warning(
+            "分类器训练样本只有单一类别，运行时将退回规则打分",
+            样本数=len(pairs),
+            标签=str(labels),
+        )
         weights["bias"] = -1.0 if labels == {0.0} else 1.0
         return TriggerClassifier(
             weights=weights,
@@ -307,6 +319,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"校准完成：records={report.records} labeled={report.labeled} "
         f"temperature={report.temperature} min_salience={report.min_salience} "
         f"source={report.label_source}"
+    )
+    log.info(
+        "世界推理校准完成",
+        轨迹=str(trace),
+        报告=str(out),
+        记录数=report.records,
+        标注数=report.labeled,
+        温度=report.temperature,
+        显著性阈值=report.min_salience,
+        标签来源=report.label_source,
     )
     print(summary)
     return 0

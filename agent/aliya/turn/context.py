@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -51,10 +51,16 @@ class TurnContext:
     @classmethod
     def from_envelope(cls, envelope: InboundEnvelope) -> TurnContext:
         history: list[ChatCompletionMessageParam] = [
-            {
-                "role": "user" if turn.role == "user" else "assistant",
-                "content": turn.text,
-            }
+            cast(
+                "ChatCompletionMessageParam",
+                cast(
+                    "object",
+                    {
+                        "role": "user" if turn.role == "user" else "assistant",
+                        "content": turn.text,
+                    },
+                ),
+            )
             for turn in envelope.conversation.turns
         ]
         tasks = "\n".join(f"{task.label}：{task.status}" for task in envelope.tasks) or None

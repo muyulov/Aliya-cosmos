@@ -26,6 +26,7 @@ from agent.cosmos.services import (
 )
 from agent.cosmos.transport import BusService
 from core.config import Settings, get_settings
+from core.logger import log
 from core.service import ServiceManager
 from core.service.registry import build_manager
 
@@ -48,6 +49,13 @@ def build_cosmos_manager(settings: Settings | None = None) -> ServiceManager:
         ControlServerService,
     )
     _wire(manager)
+    log.info(
+        "cosmos 服务已装配",
+        配置源=resolved.config_source,
+        配置子agent数=len(resolved.agent.cosmos.agents),
+        最大客户端数=resolved.agent.control.max_clients,
+        控制面路径=resolved.agent.control.socket_path,
+    )
     return manager
 
 
