@@ -22,6 +22,10 @@ class FakeControl:
     def __init__(self) -> None:
         self.inbound_queue: asyncio.Queue[InboundEnvelope] = asyncio.Queue()
         self.event_queue: asyncio.Queue[CosmosEvent] = asyncio.Queue()
+        self.delivered: list[str] = []
+
+    async def deliver(self, text: str, *, session_id: str, kind: str = "chat") -> None:
+        self.delivered.append(text)
 
     async def handshake(self) -> CosmosCapabilities:
         return CosmosCapabilities(api_version="1.0", contract_version="1.0.0")
@@ -182,6 +186,33 @@ async def test_event_is_pushed(
         message = parse_rpc_line((await reader.readline()).decode())
         assert message.type == "event"
         assert message.event["topic"] == "agent.result"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_deliver_is_deduplicated(
+    control_server: ControlServerService,
+    socket_path: Path,
+    fake_control: FakeControl,
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        await hello(reader, writer)
+        request = RpcRequest(
+            id="1",
+            method="deliver",
+            params={"text": "在吗", "session_id": "s1", "client_msg_id": "c1"},
+        )
+        writer.write(request.model_dump_json().encode() + b"\n")
+        await writer.drain()
+        assert parse_rpc_line((await reader.readline()).decode()).type == "result"
+
+        writer.write(request.model_copy(update={"id": "2"}).model_dump_json().encode() + b"\n")
+        await writer.drain()
+        assert parse_rpc_line((await reader.readline()).decode()).type == "result"
+        assert fake_control.delivered == ["在吗"]
     finally:
         writer.close()
         await writer.wait_closed()
