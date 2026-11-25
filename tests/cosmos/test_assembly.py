@@ -1,4 +1,4 @@
-"""装配入口：14 个服务、启停、两个进程入口。"""
+"""装配入口：15 个服务、启停、两个进程入口。"""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ from core.service.registry import build_manager
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_装配出十四个服务() -> None:
+def test_装配出十五个服务() -> None:
     manager = build_cosmos_manager(Settings())
     names = manager.names
-    assert len(names) == 14
+    assert len(names) == 15
     assert "bus" in names
     assert "cosmos.registry" in names
     assert "cosmos.runtime" in names
@@ -32,6 +32,7 @@ def test_装配出十四个服务() -> None:
     assert "cosmos.world" in names
     assert "cosmos.terminal" in names
     assert "cosmos.control" in names
+    assert "cosmos.control_server" in names
 
 
 async def test_全部服务可启动与停止() -> None:
