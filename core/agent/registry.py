@@ -38,6 +38,11 @@ class ToolRegistry:
         """已注册的工具名，顺序即声明顺序。"""
         return tuple(self._tools)
 
+    @property
+    def tools(self) -> tuple[Tool, ...]:
+        """按注册顺序返回工具对象，供提示词拼装使用。"""
+        return tuple(self._tools.values())
+
     def __len__(self) -> int:
         return len(self._tools)
 

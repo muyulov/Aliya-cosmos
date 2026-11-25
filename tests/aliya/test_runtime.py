@@ -118,9 +118,10 @@ def make_config(tmp_path: Path, *, timeout: float = 120) -> AgentAliyaSettings:
 @pytest.mark.asyncio
 async def test_inbound_turn_is_serial(tmp_path: Path) -> None:
     control = FakeControl()
+    llm = FakeLLM()
     runtime = AliyaRuntime(
         control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        llm=llm,  # type: ignore[arg-type]
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -129,6 +130,9 @@ async def test_inbound_turn_is_serial(tmp_path: Path) -> None:
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
         assert control.delivered == ["在。"]
         assert control.acked == ["m1"]
+        system = llm.messages[0]["content"]  # type: ignore[index]
+        assert "send_message" in system
+        assert "dispatch_task" in system
         turns = MemoryStore(tmp_path).recent_turns()
         assert [turn.role for turn in turns] == ["user", "aliya"]
         assert turns[0].message_id == "m1"

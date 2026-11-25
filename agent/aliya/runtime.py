@@ -90,21 +90,24 @@ class AliyaRuntime:
         if self._started:
             return
         await self._control.handshake()
-        builder = PromptBuilder(
-            persona=load_persona(self._config.persona.source),
-            charter=load_charter(self._config.persona.charter),
-            tools=[],
-        )
+        persona = load_persona(self._config.persona.source)
+        charter = load_charter(self._config.persona.charter)
+        tools = build_tools(self)
+        proactive_tools = build_tools(self, proactive=True)
         self._runner = TurnRunner(
             llm=self._llm,
-            tools=build_tools(self),
-            builder=builder,
+            tools=tools,
+            builder=PromptBuilder(persona=persona, charter=charter, tools=tools.tools),
             config=self._config,
         )
         self._proactive_runner = TurnRunner(
             llm=self._llm,
-            tools=build_tools(self, proactive=True),
-            builder=builder,
+            tools=proactive_tools,
+            builder=PromptBuilder(
+                persona=persona,
+                charter=charter,
+                tools=proactive_tools.tools,
+            ),
             config=self._config,
         )
         self._worker = asyncio.create_task(self._run_worker())
