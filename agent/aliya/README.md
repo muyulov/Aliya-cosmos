@@ -47,7 +47,7 @@ flowchart LR
 | 生物学本质 | Doll 克隆体（原型第 17 代），寿命上限约 3 年，需服用抑制剂 |
 | 自我认同 | 完整的、有尊严的独立个体；**不主动自称或提及 Doll**，只在被问到或情境需要时自然提及 |
 | 父亲 | 探险家，被泰瑞公司陷害永困深空、氧气耗尽而死；高马尾是他最后一次给她扎的 |
-| 通信对象 | 来自 1000 年前地球的人类（玩家），经一台工业平板通信 |
+| 通信对象 | 来自 1000 年前地球的人类，经一台工业平板通信 |
 
 能力与爱好：生物学博士级知识（微生物生态、行星生物圈、外星物种分类）、能独立修引擎与调环境循环；喜欢甜食与华夫饼、玩 d100 的 TRPG、最爱的花是风信子（只告诉重要的人，用作重逢暗号）、失眠时数星星、有熬夜刷娱乐信息的坏习惯。
 
@@ -105,19 +105,18 @@ cosmos 向 Aliya 呈现的一切，都要能被她解释成「平板上的功能
 ## 3. 代码边界
 
 ```text
-agent.aliya ──► agent.cosmos.contracts      （数据模型）
-             ──► agent.cosmos.services.control （ControlService 协议）
-             ──► core.llm / core.decision / core.logger / core.config
+agent.aliya ──► agent.cosmos.contracts ──► core
+             ──► core.llm / core.agent / core.logger / core.config
 ```
 
 | 允许 | 禁止 |
 | --- | --- |
 | `from agent.cosmos.contracts import AgentCard, DispatchPlan, ...` | `from agent.cosmos.services.dispatch import DispatchService` |
-| 通过 `ControlService` 协议调用 | 直接持有 `AgentRegistryService` / handler 引用 |
+| 通过 `ControlPort` 协议调用（测试用 `InProcessControl`，生产用 `RemoteControl`） | 直接持有 `AgentRegistryService` / handler 引用 |
 | 读 `ConversationContext`（由信封提供） | 自己写对话历史存储 |
 | 读 `ReadablePresence` | 读 `PresenceSnapshot` 原始字段并二次推断 |
 
-依赖方向固定为 `aliya → cosmos → core`。反过来（cosmos import aliya）只允许通过 `MessageBus` 的端点名 `"aliya"`，这是运行期解耦。
+依赖方向固定为 `aliya → contracts`，`cosmos → core`。Aliya 不 import `agent.cosmos.services.*`；生产环境通过 UDS 上的控制面协议与 cosmos 通信，cosmos 侧由 `ControlServerService` 提供端点。
 
 ---
 
@@ -125,17 +124,19 @@ agent.aliya ──► agent.cosmos.contracts      （数据模型）
 
 | 能力 | 入口 | 说明 |
 | --- | --- | --- |
-| 接收用户消息 | `InboundEnvelope` | 含 `intent` / `conversation` / `presence` / `tasks` / `dispatch_plan` |
-| 直接回应 | `control.deliver(text)` | 用户正在对话时的回复，不受节流 |
-| 生成调度计划 | `control.plan(intent)` | 自然语言入口；也可直接用信封里的 `dispatch_plan` |
-| 执行调度 | `control.execute_plan(plan)` / `invoke_agent()` | 桌面点击走后者 |
-| 取消 / 重试 | `control.cancel_task()` / `retry_task()` | 用户改主意时 |
-| 消费进度 | 订阅 `agent.progress` / `agent.result` | 决定要不要告诉用户 |
-| 发进展通知 | `control.notify(text)` | 受免打扰约束，被拒时看 `ProactiveReceipt` |
-| 主动发起 | `control.send_proactive(text)` | 受全部主动消息策略约束 |
-| 读用户状态 | `control.get_presence()` / 订阅 `presence.changed` | 只读 `readable`，用于判断时机 |
-| 读世界推理 | `control.get_world_view()` / 订阅 `world.inference` | 参考，不是命令 |
-| 提供自身上下文 | `control.set_aliya_context(ctx)` | 未收尾话题与当前处境，供世界推理参考 |
+| 接收用户消息 | `InboundEnvelope` | 含 `conversation` / `presence` / `tasks`；不含意图分类 |
+| 直接回应 | `deliver(text, session_id=...)` | 用户正在对话时的回复，不受节流 |
+| 看桌面 | `describe_desktop()` | 返回可见 agent 卡片；调度前先看 |
+| 生成调度计划 | `plan(DispatchIntent)` | 只生成计划，不执行；`dispatch_task` 工具内部调用 |
+| 执行调度 | `execute_plan(DispatchPlan)` / `invoke_agent()` | 桌面点击走后者 |
+| 取消 / 重试 | `cancel_task()` / `retry_task()` | 用户改主意时 |
+| 任务摘要 | `list_tasks()` | 只给 label / status / progress |
+| 消费进度 | 订阅 `agent.progress` / `agent.result` / `dispatch.finished` | 决定要不要告诉用户 |
+| 发进展通知 | `notify(text)` | 受免打扰约束，被拒时看 `ProactiveReceipt` |
+| 主动发起 | `send_proactive(text, urgency=...)` | 受全部主动消息策略约束 |
+| 读用户状态 | `get_presence()` / 订阅 `presence.changed` | 只读 `readable`，用于判断时机 |
+| 读世界推理 | `get_world_view()` / `refresh_world()` / 订阅 `world.inference` | 参考，不是命令 |
+| 提供自身上下文 | `set_aliya_context(ctx)` | 未收尾话题与当前处境，供世界推理参考 |
 
 ---
 
@@ -143,8 +144,6 @@ agent.aliya ──► agent.cosmos.contracts      （数据模型）
 
 ```python
 import asyncio
-
-from agent.cosmos.contracts import InboundEnvelope
 
 
 async def run(control) -> None:
@@ -160,8 +159,12 @@ async def run(control) -> None:
                 "agent.progress",
                 "agent.result",
                 "agent.abnormal",
+                "dispatch.finished",
+                "agent.state.changed",
+                "desktop.layout.changed",
                 "presence.changed",
                 "world.inference",
+                "user.active",
                 "link.state.changed",
             ]
         ):
@@ -176,43 +179,39 @@ async def run(control) -> None:
 
 ```mermaid
 flowchart TD
-    E(["收信封"]) --> K{"intent.kind"}
+    E(["收信封"]) --> M["组装上下文<br/>cosmos 轮次 + Aliya 记忆"]
+    M --> L["LLM chat_tools<br/>8 个工具"]
+    L --> T{"有 tool_calls?"}
+    T -->|"有"| X["顺序执行工具<br/>结果回填"]
+    X --> R{"未超 6 轮?"}
+    R -->|"是"| L
+    R -->|"否"| F["fallback：正文兜底或道歉"]
+    T -->|"没有"| S{"调过 send_message?"}
+    S -->|"是"| P["出站检查 → 投递"]
+    S -->|"否"| B["正文兜底为一条消息"]
+    F --> P
+    B --> P
+    P --> MEM["写 turns.jsonl<br/>更新 AliyaContext"]
 
-    K -->|"chat"| C1["组织回应"]
-    C1 --> D1["deliver"]
-
-    K -->|"task"| C2["看 dispatch_plan"]
-    C2 -->|"single / parallel"| D2["采纳或改写 → execute_plan"]
-    C2 -->|"clarify"| D3["用自己的话追问 → deliver"]
-    C2 -->|"rejected"| D4["说明缺什么 → deliver"]
-
-    K -->|"query"| C3["cosmos 通常已直答<br/>到达这里说明需要解释"]
-    C3 --> D5["组织回应"]
-
-    K -->|"mixed"| C4["先回应查询部分<br/>再决定任务"]
-
-    D1 --> MEM["写回对话记忆（自己的存储）"]
-    D2 --> MEM
-    D3 --> MEM
-    D4 --> MEM
-    D5 --> MEM
-    C4 --> MEM
-
-    style K fill:#fff8e1,stroke:#e0c068
+    style L fill:#fff8e1,stroke:#e0c068
 ```
 
-**不要重复回答 cosmos 已经直答的查询。** 信封里 `intent.query_scope=agent_status/task_status` 且已被直答时，消息不会到达 Aliya。
+**没有意图分类。** 她是否调度，由是否调用 `dispatch_task` 体现；是否回复，由是否调用 `send_message` 体现。cosmos 不再预先判断 `chat` / `task` / `query`。
+
+工具调用顺序执行，最多 6 轮；`send_message` 可多次调用，每条单独投递。
 
 ### 5.2 事件处理
 
 | 事件 | Aliya 的反应 |
 | --- | --- |
-| `agent.progress` | 视情况 `notify()`；高频进度不必每条都转，判断标准是「用户是否在等」 |
-| `agent.result` | 组织语言 → `deliver()`；也可先给结论再给细节 |
+| `agent.progress` | 默认只更新缓存；`progress_forwarding=always` 且用户明确在等时才 `send_message()` |
+| `agent.result` | 开汇报回合，`send_message()`（映射 `notify`）；先给结论再给细节 |
+| `dispatch.finished` | 整批结果；开汇报回合，失败项先承认 |
 | `agent.abnormal` | 决定告知还是自行重试；重试前检查 `retriable` |
+| `agent.state.changed` / `desktop.layout.changed` | 只更新桌面缓存，不主动说话 |
 | `presence.changed` | 只影响「何时说话」，不改变「说什么」 |
 | `world.inference` | 参考 `hypotheses` 与 `action_windows`；可完全忽略 |
-| `user.active` | 考虑撤回待发消息或调整语气 |
+| `user.active` | 取消待发主动消息，不打断进行中的回合 |
 | `link.state.changed` | 曲率航行导致通讯中断时，停止发送、把话留到链路恢复 |
 
 ---
@@ -227,7 +226,7 @@ flowchart TD
 | 不解释内部机制 | 不描述订阅、调度、面板这些概念；对她来说只是「平板能做的事」 |
 | 不暴露感知 | 可以因为对方疲惫而少说两句，但不能说「我检测到你很累」 |
 | 关系有进展 | 记忆长期互动（风信子、拉姆石、TRPG 的梗），但记忆属于 Aliya，不属于 cosmos |
-| 可以脆弱 | 只对玩家袒露「有点不想离开这里」这类话；对 Kane 与 Ryoko 保持坚强 |
+| 可以脆弱 | 只对对方袒露「有点不想离开这里」这类话；对 Kane 与 Ryoko 保持坚强 |
 
 ### 6.1 自主行动的动机来源
 
@@ -237,7 +236,7 @@ flowchart TD
 | --- | --- |
 | 失眠 | 睡不着、数星星、闭眼也是乱糟糟的心跳声 |
 | 熬夜刷信息 | 坏习惯，容易深夜想找人说话 |
-| 没说出口的事 | 只对玩家说的那些话，说了一半 |
+| 没说出口的事 | 只对对方说的那些话，说了一半 |
 | 修好东西想被夸 | 修好飞船时像孩子一样求夸奖 |
 | 对方太久没来 | 会担心，也会说「总感觉我在从你这里期望着安全感」 |
 
@@ -297,17 +296,19 @@ agent:
 
 | 用例 | 断言 |
 | --- | --- |
-| 纯聊天信封 | 调用了 `deliver`，没有调用任何调度接口 |
-| `task` 信封带 `dispatch_plan` | 采纳时调用 `execute_plan`，不重复 `invoke_agent` |
-| `clarify` 计划 | 用自然语言追问，不直接抛字段名 |
-| `agent.result` 到达 | 调用 `deliver`，文本不含 `task_id` / agent id |
+| 纯聊天 | 调用 `send_message`，没有调用 `dispatch_task` |
+| 任务消息 | 调用 `dispatch_task`，返回 `accepted` / `clarify` / `rejected` |
+| `clarify` | 用自然语言追问，不直接抛字段名 |
+| `agent.result` 到达 | 开汇报回合，调用 `send_message`（映射 `notify`），文本不含 `task_id` / agent id |
 | 主动消息被拒 | 不立即重试，尊重 `deliver_after` |
 | `presence.changed` 为 `away` | 行为可调整，但回复中不出现状态描述 |
-| 回复文本 | 无括号旁白、无「用户/玩家/agent」字样、句尾标点未被删除 |
+| 回复文本 | 无括号旁白、无「玩家/用户/agent」字样、句尾标点未被删除 |
 | 连续多条短句 | 每条单独投递，不被合并成一段 |
-| 链路中断 | 不调用 `deliver`，消息进待发队列 |
+| 链路中断 | 不调用 `send_message`，消息进 outbox |
+| 工具调用超过 6 轮 | 停止调用，走 fallback |
+| 出站检查命中 | 重写一次；仍命中则遮蔽后发送 |
 
-用假的 `ControlService`（记录调用、返回预置信封与事件）即可单测全部逻辑，不需要起 cosmos。
+用假的 `ControlPort`（记录调用、返回预置信封与事件）即可单测全部逻辑，不需要起 cosmos。
 
 ---
 
@@ -322,7 +323,7 @@ agent:
 | 出现括号旁白 | 模型模仿小说写法 | 提示词与人设都明确禁止，测试兜底 |
 | 说出「检测到你…」 | 用了 `readable` 原文 | 状态只影响行为，不进文本 |
 | 提及「时间同步器」「Doll」 | 越过信息差 | 提示词约束 + 回复后置检查 |
-| 同一任务被提交两次 | 既采纳 `dispatch_plan` 又调 `invoke_agent` | 二选一 |
+| 同一任务被提交两次 | 既调 `dispatch_task` 又调 `invoke_agent` | 二选一 |
 | 主动消息刷屏 | 忽略 `ProactiveReceipt` 连续调用 | 看 `reason` 与 `deliver_after` |
 | 深夜从不主动 | 误把免打扰当成「她不会失眠」 | 免打扰是用户侧策略；她的失眠是合法动机 |
 | 世界推理的建议被当命令 | 直接执行 `action_windows` | 它没有执行语义，仅供参考 |

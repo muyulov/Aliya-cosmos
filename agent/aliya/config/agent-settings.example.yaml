@@ -1,8 +1,8 @@
 # Aliya agent 配置样例
 #
 # 用法：把 agent.aliya 整段并入 data/config/cosmos.yaml。
-# 说明：这是目标形态的配置骨架。当前 core/config/settings.py 里还没有 AgentSettings，
-#       落地时需要按本文件新增 pydantic 模型并挂到 Settings 的顶层字段 agent。
+# 说明：这是目标形态的配置骨架。core/config/settings.py 已有 AgentSettings，
+#       但目前只挂了 cosmos 节点；落地时需要新增 aliya 与 control 节点。
 # 边界：本文件只表达 Aliya 自己的意愿、人设与记忆策略。
 #       通道侧的节流（免打扰、最小间隔、每日上限）与链路状态由
 #       agent.cosmos.terminal 执行，不要在这里重复配置，否则两处策略会打架。
