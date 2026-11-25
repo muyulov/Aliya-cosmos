@@ -223,3 +223,39 @@ async def test_deliver_is_deduplicated(
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_unacked_inbound_is_replayed_on_reconnect(
+    control_server: ControlServerService,
+    socket_path: Path,
+    fake_control: FakeControl,
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    await hello(reader, writer)
+    fake_control.inbound_queue.put_nowait(make_envelope("m1"))
+    message = parse_rpc_line((await reader.readline()).decode())
+    assert message.type == "inbound"
+    assert message.envelope["message"]["message_id"] == "m1"
+
+    writer.close()
+    await writer.wait_closed()
+    await asyncio.sleep(0.05)
+
+    reader2, writer2 = await asyncio.open_unix_connection(socket_path)
+    try:
+        await hello(reader2, writer2)
+        replay = parse_rpc_line((await asyncio.wait_for(reader2.readline(), 1)).decode())
+        assert replay.type == "inbound"
+        assert replay.envelope["message"]["message_id"] == "m1"
+
+        writer2.write(AckInbound(message_id="m1").model_dump_json().encode() + b"\n")
+        await writer2.drain()
+        for _ in range(50):
+            if control_server.pending_count == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert control_server.pending_count == 0
+    finally:
+        writer2.close()
+        await writer2.wait_closed()

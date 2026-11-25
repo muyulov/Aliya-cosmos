@@ -17,6 +17,7 @@ from agent.cosmos.contracts import (
     DesktopLayoutPatch,
     DispatchIntent,
     DispatchPlan,
+    InboundEnvelope,
 )
 from agent.cosmos.contracts.rpc import (
     AckInbound,
@@ -105,6 +106,7 @@ class ControlServerService(Service):
         self._server: asyncio.AbstractServer | None = None
         self._sessions: set[ControlSession] = set()
         self._dedupe: OrderedDict[str, object] = OrderedDict()
+        self._pending_inbound: OrderedDict[str, InboundEnvelope] = OrderedDict()
         self._socket_path = Path(self._config.socket_path)
 
     async def start(self) -> None:
@@ -198,6 +200,7 @@ class ControlServerService(Service):
             return
         if isinstance(message, AckInbound):
             session.pending.discard(message.message_id)
+            self._pending_inbound.pop(message.message_id, None)
             return
         if isinstance(message, RpcRequest):
             await self._handle_request(session, message)
@@ -303,8 +306,17 @@ class ControlServerService(Service):
             self._dedupe.popitem(last=False)
 
     async def _pump_inbound(self, session: ControlSession) -> None:
-        async for envelope in self._control.inbound():
+        # 重连先补发未确认的入站消息；客户端按 message_id 去重，保证至少一次。
+        for envelope in list(self._pending_inbound.values()):
             session.pending.add(envelope.message.message_id)
+            await self._send(
+                session.writer,
+                Inbound(envelope=envelope.model_dump(mode="json")),
+            )
+        async for envelope in self._control.inbound():
+            message_id = envelope.message.message_id
+            self._pending_inbound[message_id] = envelope
+            session.pending.add(message_id)
             await self._send(
                 session.writer,
                 Inbound(envelope=envelope.model_dump(mode="json")),
@@ -329,7 +341,7 @@ class ControlServerService(Service):
 
     @property
     def pending_count(self) -> int:
-        return sum(len(session.pending) for session in self._sessions)
+        return len(self._pending_inbound)
 
     async def _send(self, writer: asyncio.StreamWriter, message: BaseModel) -> None:
         writer.write(message.model_dump_json().encode() + b"\n")
