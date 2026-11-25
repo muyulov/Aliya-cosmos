@@ -11,9 +11,7 @@ def now() -> datetime:
 
 def test_default_is_wait() -> None:
     gate = Initiative(AgentAliyaInitiativeSettings())
-    decision = gate.should_speak(
-        now=now(), presence=None, link="up", last_user_at=now()
-    )
+    decision = gate.should_speak(now=now(), presence=None, link="up", last_user_at=now())
     assert decision.should_speak is False
     assert decision.reason == "default_wait"
 

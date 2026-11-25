@@ -130,9 +130,7 @@ class AliyaRuntime:
         """等待当前入站与队列中的回合处理完。"""
         await asyncio.sleep(0.02)
         while (
-            self._pending_inbound > 0
-            or not self._queue.empty()
-            or self._current_turn is not None
+            self._pending_inbound > 0 or not self._queue.empty() or self._current_turn is not None
         ):
             await asyncio.sleep(0.01)
         await self._queue.join()
@@ -263,13 +261,9 @@ class AliyaRuntime:
                 if not turn.sent:
                     await turn.send(self._config.reply.fallback_text)
             else:
-                self._memory.append_turn(
-                    turn.message_id or "-", "user", turn.user_text
-                )
+                self._memory.append_turn(turn.message_id or "-", "user", turn.user_text)
                 for reply in turn.replies:
-                    self._memory.append_turn(
-                        f"{turn.message_id}:reply", "aliya", reply
-                    )
+                    self._memory.append_turn(f"{turn.message_id}:reply", "aliya", reply)
             finally:
                 self._current_turn = None
                 self._queue.task_done()

@@ -45,9 +45,7 @@ class TurnContext:
             }
             for turn in envelope.conversation.turns
         ]
-        tasks = "\n".join(
-            f"{task.label}：{task.status}" for task in envelope.tasks
-        ) or None
+        tasks = "\n".join(f"{task.label}：{task.status}" for task in envelope.tasks) or None
         return cls(
             user_text=envelope.message.text,
             history=history,

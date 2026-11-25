@@ -129,8 +129,6 @@ async def test_turn_timeout_falls_back(tmp_path: Path) -> None:
     try:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=3)
-        assert control.delivered == [
-            AgentAliyaSettings().reply.fallback_text
-        ]
+        assert control.delivered == [AgentAliyaSettings().reply.fallback_text]
     finally:
         await runtime.stop()

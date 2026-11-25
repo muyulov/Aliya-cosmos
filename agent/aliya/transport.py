@@ -72,9 +72,7 @@ class RemoteControl:
         self._socket_path = socket_path
         self._token = token
         self._timeout = request_timeout
-        self._outbox: deque[tuple[str, str, dict[str, object]]] = deque(
-            maxlen=outbox_limit
-        )
+        self._outbox: deque[tuple[str, str, dict[str, object]]] = deque(maxlen=outbox_limit)
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future[object]] = {}
@@ -253,9 +251,7 @@ class RemoteControl:
     async def _resubscribe(self) -> None:
         if not self._topics:
             return
-        await self._send(
-            Subscribe(topics={topic: self._since or 0 for topic in self._topics})
-        )
+        await self._send(Subscribe(topics={topic: self._since or 0 for topic in self._topics}))
 
     async def _replay_outbox(self) -> None:
         for client_msg_id, method, params in list(self._outbox):
@@ -271,9 +267,7 @@ class RemoteControl:
             maxlen=self._outbox.maxlen,
         )
 
-    async def _call_replayable(
-        self, method: str, params: dict[str, object]
-    ) -> object:
+    async def _call_replayable(self, method: str, params: dict[str, object]) -> object:
         client_msg_id = uuid.uuid4().hex
         payload = {**params, "client_msg_id": client_msg_id}
         self._outbox.append((client_msg_id, method, payload))
@@ -313,14 +307,10 @@ class RemoteControl:
         return DesktopSnapshot.model_validate(await self.call("describe_desktop", {}))
 
     async def get_agent(self, agent_id: str) -> AgentDetail:
-        return AgentDetail.model_validate(
-            await self.call("get_agent", {"agent_id": agent_id})
-        )
+        return AgentDetail.model_validate(await self.call("get_agent", {"agent_id": agent_id}))
 
     async def open_agent(self, agent_id: str) -> AgentDetail:
-        return AgentDetail.model_validate(
-            await self.call("open_agent", {"agent_id": agent_id})
-        )
+        return AgentDetail.model_validate(await self.call("open_agent", {"agent_id": agent_id}))
 
     async def patch_layout(self, patch: DesktopLayoutPatch) -> DesktopSnapshot:
         return DesktopSnapshot.model_validate(
@@ -356,13 +346,9 @@ class RemoteControl:
         await self.call("cancel_dispatch", {"dispatch_id": dispatch_id})
 
     async def retry_task(self, task_id: str) -> TaskHandle:
-        return TaskHandle.model_validate(
-            await self.call("retry_task", {"task_id": task_id})
-        )
+        return TaskHandle.model_validate(await self.call("retry_task", {"task_id": task_id}))
 
-    async def list_tasks(
-        self, agent_id: str | None = None, limit: int = 20
-    ) -> list[TaskBrief]:
+    async def list_tasks(self, agent_id: str | None = None, limit: int = 20) -> list[TaskBrief]:
         result = await self.call("list_tasks", {"agent_id": agent_id, "limit": limit})
         if not isinstance(result, list):
             raise RemoteError("invalid_response", "list_tasks 返回非列表")
@@ -393,31 +379,21 @@ class RemoteControl:
         return None if result is None else WorldInference.model_validate(result)
 
     async def set_aliya_context(self, ctx: AliyaContext) -> None:
-        await self.call(
-            "set_aliya_context", {"context": ctx.model_dump(mode="json")}
-        )
+        await self.call("set_aliya_context", {"context": ctx.model_dump(mode="json")})
 
     # ---------- 消息 ----------
 
-    async def deliver(
-        self, text: str, *, session_id: str, kind: MessageKind = "chat"
-    ) -> None:
+    async def deliver(self, text: str, *, session_id: str, kind: MessageKind = "chat") -> None:
         await self._call_replayable(
             "deliver", {"text": text, "session_id": session_id, "kind": kind}
         )
 
-    async def notify(
-        self, text: str, *, dispatch_id: str | None = None
-    ) -> ProactiveReceipt:
-        result = await self._call_replayable(
-            "notify", {"text": text, "dispatch_id": dispatch_id}
-        )
+    async def notify(self, text: str, *, dispatch_id: str | None = None) -> ProactiveReceipt:
+        result = await self._call_replayable("notify", {"text": text, "dispatch_id": dispatch_id})
         return ProactiveReceipt.model_validate(result)
 
     async def send_proactive(self, text: str, *, urgency: float = 0.5) -> ProactiveReceipt:
-        result = await self._call_replayable(
-            "send_proactive", {"text": text, "urgency": urgency}
-        )
+        result = await self._call_replayable("send_proactive", {"text": text, "urgency": urgency})
         return ProactiveReceipt.model_validate(result)
 
     async def history(self, session_id: str, limit: int = 20) -> list[TerminalMessage]:

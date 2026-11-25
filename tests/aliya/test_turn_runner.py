@@ -67,9 +67,7 @@ async def test_tool_loop_then_send(runtime: FakeRuntime) -> None:
     llm.replies = [
         AssistantReply(
             content=None,
-            tool_calls=(
-                ToolCall(id="1", name="send_message", arguments='{"text":"在吗"}'),
-            ),
+            tool_calls=(ToolCall(id="1", name="send_message", arguments='{"text":"在吗"}'),),
         ),
         AssistantReply(content=None, tool_calls=()),
     ]
@@ -84,9 +82,7 @@ async def test_max_rounds_fallback(runtime: FakeRuntime) -> None:
     llm.replies = [
         AssistantReply(
             content=None,
-            tool_calls=(
-                ToolCall(id=str(i), name="see_desktop", arguments="{}"),
-            ),
+            tool_calls=(ToolCall(id=str(i), name="see_desktop", arguments="{}"),),
         )
         for i in range(10)
     ]

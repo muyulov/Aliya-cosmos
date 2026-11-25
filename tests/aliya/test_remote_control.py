@@ -34,9 +34,7 @@ class FakeServer:
 
     async def start(self) -> None:
         self.socket_path.unlink(missing_ok=True)
-        self._server = await asyncio.start_unix_server(
-            self._handle, path=str(self.socket_path)
-        )
+        self._server = await asyncio.start_unix_server(self._handle, path=str(self.socket_path))
 
     async def stop(self) -> None:
         server = self._server
@@ -59,9 +57,7 @@ class FakeServer:
                 Inbound(envelope=envelope.model_dump(mode="json")),
             )
 
-    async def _handle(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._writers.add(writer)
         try:
             hello = parse_rpc_line((await reader.readline()).decode())
@@ -89,9 +85,7 @@ class FakeServer:
             with contextlib.suppress(ConnectionResetError, TimeoutError):
                 await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
 
-    async def _handle_request(
-        self, writer: asyncio.StreamWriter, message: RpcRequest
-    ) -> None:
+    async def _handle_request(self, writer: asyncio.StreamWriter, message: RpcRequest) -> None:
         if message.method == "deliver":
             client_msg_id = str(message.params.get("client_msg_id", ""))
             if client_msg_id and client_msg_id in self._seen:
@@ -177,9 +171,7 @@ async def test_inbound(fake_server: FakeServer) -> None:
 
 @pytest.mark.asyncio
 async def test_reconnect_replays_outbox(fake_server: FakeServer) -> None:
-    client = RemoteControl(
-        str(fake_server.socket_path), token="t", request_timeout=2
-    )
+    client = RemoteControl(str(fake_server.socket_path), token="t", request_timeout=2)
     await asyncio.wait_for(client.connect(), timeout=3)
     await asyncio.wait_for(fake_server.stop(), timeout=3)
 

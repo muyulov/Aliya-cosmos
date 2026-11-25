@@ -293,9 +293,7 @@ class ControlServerService(Service):
                 dict(raw_params),  # type: ignore[arg-type]
             )
         if method == "patch_layout":
-            return await control.patch_layout(
-                DesktopLayoutPatch.model_validate(params["patch"])
-            )
+            return await control.patch_layout(DesktopLayoutPatch.model_validate(params["patch"]))
         if method == "set_aliya_context":
             return await control.set_aliya_context(AliyaContext.model_validate(params["context"]))
         return await getattr(control, method)(**params)

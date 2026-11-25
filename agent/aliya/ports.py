@@ -64,9 +64,7 @@ class ControlPort(Protocol):
 
     async def retry_task(self, task_id: str) -> TaskHandle: ...
 
-    async def list_tasks(
-        self, agent_id: str | None = None, limit: int = 20
-    ) -> list[TaskBrief]: ...
+    async def list_tasks(self, agent_id: str | None = None, limit: int = 20) -> list[TaskBrief]: ...
 
     def get_presence(self) -> PresenceSnapshot: ...
 
@@ -80,13 +78,9 @@ class ControlPort(Protocol):
 
     async def set_aliya_context(self, ctx: AliyaContext) -> None: ...
 
-    async def deliver(
-        self, text: str, *, session_id: str, kind: MessageKind = "chat"
-    ) -> None: ...
+    async def deliver(self, text: str, *, session_id: str, kind: MessageKind = "chat") -> None: ...
 
-    async def notify(
-        self, text: str, *, dispatch_id: str | None = None
-    ) -> ProactiveReceipt: ...
+    async def notify(self, text: str, *, dispatch_id: str | None = None) -> ProactiveReceipt: ...
 
     async def send_proactive(self, text: str, *, urgency: float = 0.5) -> ProactiveReceipt: ...
 
@@ -145,9 +139,7 @@ class InProcessControl:
     async def retry_task(self, task_id: str) -> TaskHandle:
         return await self._control.retry_task(task_id)
 
-    async def list_tasks(
-        self, agent_id: str | None = None, limit: int = 20
-    ) -> list[TaskBrief]:
+    async def list_tasks(self, agent_id: str | None = None, limit: int = 20) -> list[TaskBrief]:
         return await self._control.list_tasks(agent_id, limit)
 
     def get_presence(self) -> PresenceSnapshot:
@@ -168,14 +160,10 @@ class InProcessControl:
     async def set_aliya_context(self, ctx: AliyaContext) -> None:
         await self._control.set_aliya_context(ctx)
 
-    async def deliver(
-        self, text: str, *, session_id: str, kind: MessageKind = "chat"
-    ) -> None:
+    async def deliver(self, text: str, *, session_id: str, kind: MessageKind = "chat") -> None:
         await self._control.deliver(text, session_id=session_id, kind=kind)
 
-    async def notify(
-        self, text: str, *, dispatch_id: str | None = None
-    ) -> ProactiveReceipt:
+    async def notify(self, text: str, *, dispatch_id: str | None = None) -> ProactiveReceipt:
         return await self._control.notify(text, dispatch_id=dispatch_id)
 
     async def send_proactive(self, text: str, *, urgency: float = 0.5) -> ProactiveReceipt:

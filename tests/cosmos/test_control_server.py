@@ -96,9 +96,7 @@ async def hello(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
 
 
 @pytest.mark.asyncio
-async def test_hello_and_now(
-    control_server: ControlServerService, socket_path: Path
-) -> None:
+async def test_hello_and_now(control_server: ControlServerService, socket_path: Path) -> None:
     reader, writer = await asyncio.open_unix_connection(socket_path)
     await hello(reader, writer)
 
@@ -179,9 +177,7 @@ async def test_event_is_pushed(
     reader, writer = await asyncio.open_unix_connection(socket_path)
     try:
         await hello(reader, writer)
-        writer.write(
-            Subscribe(topics={"agent.result": 0}).model_dump_json().encode() + b"\n"
-        )
+        writer.write(Subscribe(topics={"agent.result": 0}).model_dump_json().encode() + b"\n")
         await writer.drain()
         assert parse_rpc_line((await reader.readline()).decode()).type == "subscribed"
 
