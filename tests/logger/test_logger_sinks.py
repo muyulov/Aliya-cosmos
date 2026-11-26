@@ -378,6 +378,29 @@ def test_json_模式端到端(tmp_path: Path) -> None:
     assert "\x1b[" not in raw
 
 
+def test_日志带上调用点来源(tmp_path: Path) -> None:
+    """默认开启来源：每条日志都能看出是哪个文件哪一行打的。"""
+    from core.logger import log
+
+    files = setup_logging(_cfg(tmp_path))
+    log.info("来源检查")
+    logger.remove()
+
+    text = files.app.read_text(encoding="utf-8")
+    assert "test_logger_sinks.py:" in text
+
+
+def test_关闭来源后不输出调用点(tmp_path: Path) -> None:
+    from core.logger import log
+
+    files = setup_logging(_cfg(tmp_path, source=False))
+    log.info("无来源检查")
+    logger.remove()
+
+    text = files.app.read_text(encoding="utf-8")
+    assert "test_logger_sinks.py:" not in text
+
+
 def test_门面各级别方法都能落盘(tmp_path: Path) -> None:
     """回归：debug / success / critical 也要能走到 sink（此前只覆盖了 info / error）。"""
     from core.logger import log
@@ -389,9 +412,11 @@ def test_门面各级别方法都能落盘(tmp_path: Path) -> None:
     logger.remove()
 
     text = files.app.read_text(encoding="utf-8")
-    assert "[D] (・_・;) 调试" in text
-    assert "[S] 成功" in text  # SUCCESS 没有默认颜文字，消息直接跟在标记后
-    assert "[C] (╯°□°)╯ 严重" in text
+    # 头部现在夹着调用点来源（[D] 文件名:行号 ...），因此按「级别标记 + 消息」分段断言
+    assert "[D]" in text
+    assert "(・_・;) 调试" in text
+    assert "[S]" in text and "成功" in text  # SUCCESS 没有默认颜文字
+    assert "[C]" in text and "(╯°□°)╯ 严重" in text
 
 
 def test_session_path_无占位符时按字面拼接(tmp_path: Path) -> None:

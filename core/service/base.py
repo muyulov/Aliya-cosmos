@@ -141,7 +141,9 @@ class Service:
         if exc is not None:
             fields["错误类型"] = type(exc).__name__
             fields["错误消息"] = str(exc)
-        self.log.error(message, face, **fields)
+        # stacklevel=1：再跳一层，把日志来源落在调用 log_error 的业务代码上，
+        # 而不是所有服务错误都显示 base.py 的 log_error
+        self.log.error(message, face, stacklevel=1, **fields)
 
     @property
     def running(self) -> bool:

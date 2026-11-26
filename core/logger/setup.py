@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from types import FrameType, ModuleType
 from typing import override
 
@@ -30,6 +32,24 @@ _INTERCEPTED_LOGGERS = (
     "httpx",
     "httpcore",
 )
+
+#: 本文件所在目录：用于把「来源」定位到业务调用点，而不是日志门面内部
+_LOGGER_DIR = Path(__file__).resolve().parent
+
+
+def _caller_depth() -> int:
+    """计算 loguru 的 depth：跳过本模块内的门面帧，落在真正的业务调用点。
+
+    固定写 depth=2 不够用：`Service.log_error` 这类包装层会再套一层，来源就
+    停在包装函数上。这里按文件名判断——只要还在 `core/logger/` 里就继续往上走，
+    第一个外部帧就是调用点。包装层可再传 `stacklevel` 多跳一层。
+    """
+    frame = sys._getframe(1)
+    depth = 0
+    while frame is not None and Path(frame.f_code.co_filename).parent == _LOGGER_DIR:
+        frame = frame.f_back
+        depth += 1
+    return depth
 
 
 class Log:
@@ -71,34 +91,63 @@ class Log:
     def _compose(self, message: str) -> str:
         return f"[{self._prefix}] {message}" if self._prefix else message
 
-    def _emit(self, level: str, message: str, face: str | None = None, **fields: object) -> None:
+    def _emit(
+        self,
+        level: str,
+        message: str,
+        face: str | None = None,
+        *,
+        stacklevel: int = 0,
+        **fields: object,
+    ) -> None:
         resolved = face or faces_module.DEFAULT_BY_LEVEL.get(level.upper(), "")
         merged = {**self._base, **context_module.current(), **fields}
-        logger.bind(face=resolved, fields=merged).log(level.upper(), self._compose(message))
+        # 动态算 depth：跳过门面自身的帧，来源才落在业务调用点而不是 setup.py
+        depth = _caller_depth() + stacklevel
+        logger.bind(face=resolved, fields=merged).opt(depth=depth).log(
+            level.upper(), self._compose(message)
+        )
 
-    def debug(self, message: str, face: str | None = None, **fields: object) -> None:
-        self._emit("DEBUG", message, face, **fields)
+    def debug(
+        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
+    ) -> None:
+        self._emit("DEBUG", message, face, stacklevel=stacklevel, **fields)
 
-    def info(self, message: str, face: str | None = None, **fields: object) -> None:
-        self._emit("INFO", message, face, **fields)
+    def info(
+        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
+    ) -> None:
+        self._emit("INFO", message, face, stacklevel=stacklevel, **fields)
 
-    def success(self, message: str, face: str | None = None, **fields: object) -> None:
-        self._emit("SUCCESS", message, face, **fields)
+    def success(
+        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
+    ) -> None:
+        self._emit("SUCCESS", message, face, stacklevel=stacklevel, **fields)
 
-    def warning(self, message: str, face: str | None = None, **fields: object) -> None:
-        self._emit("WARNING", message, face, **fields)
+    def warning(
+        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
+    ) -> None:
+        self._emit("WARNING", message, face, stacklevel=stacklevel, **fields)
 
-    def error(self, message: str, face: str | None = None, **fields: object) -> None:
-        self._emit("ERROR", message, face, **fields)
+    def error(
+        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
+    ) -> None:
+        self._emit("ERROR", message, face, stacklevel=stacklevel, **fields)
 
-    def critical(self, message: str, face: str | None = None, **fields: object) -> None:
-        self._emit("CRITICAL", message, face, **fields)
+    def critical(
+        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
+    ) -> None:
+        self._emit("CRITICAL", message, face, stacklevel=stacklevel, **fields)
 
-    def exception(self, message: str, face: str | None = None, **fields: object) -> None:
+    def exception(
+        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
+    ) -> None:
         """记录异常并附带 traceback。"""
         resolved = face or faces_module.DEFAULT_BY_LEVEL.get("ERROR", "")
         merged = {**self._base, **context_module.current(), **fields}
-        logger.bind(face=resolved, fields=merged).exception(self._compose(message))
+        depth = _caller_depth() + stacklevel
+        logger.bind(face=resolved, fields=merged).opt(depth=depth).exception(
+            self._compose(message)
+        )
 
     @contextmanager
     def context(self, **kv: object) -> Generator[None, None, None]:

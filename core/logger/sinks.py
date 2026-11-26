@@ -62,6 +62,19 @@ def _use_color(cfg: LogSettings) -> bool:
     return _is_tty()
 
 
+def _source_of(record: Record) -> str:
+    """把调用点渲染成 `文件名:行号`；取不到时返回空串。
+
+    只取文件名而非完整路径：日志里出现整条绝对路径既冗长，又会把开发机的
+    目录结构带进生产日志；同名文件靠消息与上下文区分即可。
+    """
+    name = getattr(record.get("file"), "name", "")
+    line = record.get("line")
+    if not isinstance(name, str) or not name or not isinstance(line, int):
+        return ""
+    return f"{name}:{line}"
+
+
 def build_filter(cfg: LogSettings, *, color: bool) -> FilterFunction:
     """构造 per-sink filter：把 record 渲染为完整文本。
 
@@ -90,10 +103,11 @@ def build_filter(cfg: LogSettings, *, color: bool) -> FilterFunction:
     def _filter(record: Record) -> bool:
         extra = record["extra"]
 
-        # 首次进入时留存原始消息与堆栈，供所有 sink 复用
+        # 首次进入时留存原始消息、堆栈与调用点，供所有 sink 复用
         if raw_key not in extra:
             extra[raw_key] = record["message"]
             extra[stack_key] = format_exception(record)
+            extra[SOURCE_KEY] = _source_of(record) if cfg.source else ""
             # 堆栈已自行渲染，清空以免 loguru 再追加一份原始堆栈
             record["exception"] = None
 

@@ -40,6 +40,7 @@ def make_record(
     level: str = "INFO",
     face: str = "",
     exception: object = None,
+    source: str = "",
     extra_fields: dict[str, object] | None = None,
     **fields: object,
 ) -> Record:
@@ -58,7 +59,7 @@ def make_record(
         "level": FakeLevel(level),
         "time": datetime(2026, 8, 27, 23, 9, 52),
         "exception": exception,
-        "extra": {"face": face, "fields": merged},
+        "extra": {"face": face, "fields": merged, "source": source},
     }
     return cast(Record, cast(object, raw))
 
@@ -194,6 +195,34 @@ def test_单行布局转义内嵌换行() -> None:
     assert "\n" not in line
     assert "第一行\\n第二行" in line
     assert "正文=甲\\n乙" in line
+
+
+def test_树形布局渲染调用点来源() -> None:
+    line = format_tree(make_record("消息", face=faces.LOVE, source="runtime.py:42"))
+    assert line == "2026-08-27 23:09:52 [I] runtime.py:42 (*^▽^*) 消息"
+
+
+def test_单行布局渲染调用点来源() -> None:
+    line = format_line(make_record("消息", source="runtime.py:42", 键="值"))
+    assert line == "2026-08-27 23:09:52 [I] runtime.py:42 (^_^)/ 消息 | 键=值"
+
+
+def test_未提供来源时头部保持原样() -> None:
+    line = format_tree(make_record("消息"))
+    assert line == "2026-08-27 23:09:52 [I] (^_^)/ 消息"
+
+
+def test_json_输出调用点来源() -> None:
+    raw = format_json(make_record("消息", source="a.py:1"))
+    payload = cast("dict[str, object]", json.loads(raw))
+    assert payload["source"] == "a.py:1"
+
+
+def test_json_来源不被业务字段覆盖() -> None:
+    """回归：source 是框架元数据，业务字段同名时一律让位。"""
+    record = make_record("消息", source="real.py:7", extra_fields={"source": "伪造"})
+    payload = cast("dict[str, object]", json.loads(format_json(record)))
+    assert payload["source"] == "real.py:7"
 
 
 def test_默认不着色() -> None:
