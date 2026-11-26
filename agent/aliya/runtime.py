@@ -41,16 +41,16 @@ from core.logger import log
 type Phase = Literal["daily", "maintenance", "crisis", "rest"]
 
 _REPORT_TOPICS = {"agent.result", "dispatch.finished", "agent.abnormal"}
-#: see_desktop 一次最多列出的工具数；超出的只报数量，避免刷爆上下文。
-_DESKTOP_LIMIT = 12
 #: task_status 的查询窗口；指定 id 查不到时据此提示「可能不在最近 N 条」。
-_TASK_QUERY_LIMIT = 20
+_TASK_QUERY_LIMIT = 50
 #: 跟进意图最长可预约 7 天；越界输入在工具边界收敛。
 _MAX_FOLLOWUP_MINUTES = 7 * 24 * 60
 #: 主动开口最长可延后 24 小时。
 _MAX_DEFER_MINUTES = 24 * 60
 #: 到期跟进被取消或失败后，延后多久再试。
 _INTENT_RETRY_MINUTES = 30
+#: 注入上下文的最近事实条数；事实只写不读，等于没记。
+_FACTS_IN_CONTEXT = 8
 _EVENT_TOPICS = [
     "agent.progress",
     "agent.result",
@@ -115,6 +115,25 @@ def _mapping(value: object) -> Mapping[str, object]:
     return cast("Mapping[str, object]", value) if isinstance(value, Mapping) else {}
 
 
+def remember_result(payload: Mapping[str, object], counts: dict[str, int]) -> None:
+    """记一次单条结果汇报；只统计带 `dispatch_id` 的批次任务。"""
+    dispatch_id = _text(payload.get("dispatch_id"))
+    if dispatch_id:
+        counts[dispatch_id] = counts.get(dispatch_id, 0) + 1
+
+
+def batch_needs_report(outcome: Mapping[str, object], reported: int) -> bool:
+    """整批汇总是否还要单独汇报。
+
+    批次成功、且每个结果都已通过 `agent.result` 汇报过时返回 False，
+    避免单任务场景下同一件事被汇报两遍；部分失败或取消仍要汇总。
+    """
+    status = _text(outcome.get("status"))
+    results = outcome.get("results")
+    total = len(cast("list[object]", results)) if isinstance(results, list) else 0
+    return not (status == "ok" and total > 0 and reported >= total)
+
+
 def event_brief(event: CosmosEvent) -> str:
     """把真实事件载荷转成模型可读的一段话。
 
@@ -134,6 +153,10 @@ def event_brief(event: CosmosEvent) -> str:
         hint = _text(error.get("user_hint"))
         if hint:
             lines.append(f"提示：{hint}")
+        # 摘要只说「成没成」，正文才是她要转述给用户的东西；不给她只能让用户自己贴
+        content = _text(result.get("content"))
+        if content:
+            lines.append("内容：\n" + content)
         if result.get("truncated") is True:
             lines.append("（结果已截断）")
         return "\n".join(lines)
@@ -145,9 +168,13 @@ def event_brief(event: CosmosEvent) -> str:
         results = outcome.get("results")
         if isinstance(results, list):
             for item in cast("list[object]", results)[:3]:
-                item_summary = _text(_mapping(item).get("summary"))
+                data = _mapping(item)
+                item_summary = _text(data.get("summary"))
                 if item_summary:
                     lines.append(f"- {item_summary}")
+                content = _text(data.get("content"))
+                if content:
+                    lines.append("  " + content)
         return "\n".join(lines)
     if event.topic == "agent.progress":
         label = _text(payload.get("label")) or "任务"
@@ -194,6 +221,8 @@ class AliyaRuntime:
         self._agent_states: dict[str, AgentRuntimeState] = {}
         self._progress: dict[str, AgentProgress] = {}
         self._pending_proactive: list[TurnContext] = []
+        #: 每个 dispatch 已通过 agent.result 汇报过的任务数，用于整批去重
+        self._reported_by_dispatch: dict[str, int] = {}
         #: 主动开口的延后窗口；到点后清空并恢复常规判断。
         self._defer_until: datetime | None = None
         self._link: LinkState = "up"
@@ -382,7 +411,7 @@ class AliyaRuntime:
                 desktop=self._desktop_text(),
                 world=self._world_text(),
             )
-            turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+            self._bind_turn(turn)
             self._seen.add(stored.message_id)
             _ = await self._enqueue(turn)
 
@@ -437,15 +466,12 @@ class AliyaRuntime:
         snapshot = await self._control.describe_desktop()
         lines = [snapshot.summary]
         # 带上 id：dispatch_task 的 agent_id 只能从这里获得，缺了模型就没法精确指定工具。
-        for entry in snapshot.entries[:_DESKTOP_LIMIT]:
+        for entry in snapshot.entries:
             capabilities = "、".join(entry.card.capabilities[:3])
             line = f"{entry.card.id}｜{entry.card.name}（{entry.status}）：{entry.readable.summary}"
             if capabilities:
                 line += f"；能做：{capabilities}"
             lines.append(line)
-        hidden = len(snapshot.entries) - _DESKTOP_LIMIT
-        if hidden > 0:
-            lines.append(f"（还有 {hidden} 个工具未列出）")
         return "\n".join(lines)
 
     async def dispatch(
@@ -642,7 +668,7 @@ class AliyaRuntime:
                 turn.tasks = turn.tasks or self._tasks_text()
                 turn.desktop = self._desktop_text()
                 turn.world = self._world_text()
-                turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+                self._bind_turn(turn)
                 self._pending_inbound += 1
                 try:
                     _ = await self._enqueue(turn)
@@ -682,7 +708,7 @@ class AliyaRuntime:
                         origin="event",
                         droppable=event.topic == "agent.progress",
                     )
-                    turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+                    self._bind_turn(turn)
                     _ = await self._enqueue(turn)
                 try:
                     self._memory.save_cursor(event.sequence, topic=event.topic)
@@ -703,6 +729,13 @@ class AliyaRuntime:
                 )
 
     def _should_report(self, event: CosmosEvent) -> bool:
+        if event.topic == "dispatch.finished":
+            outcome = _mapping(event.payload.get("outcome"))
+            dispatch_id = _text(outcome.get("dispatch_id"))
+            reported = self._reported_by_dispatch.pop(dispatch_id, 0) if dispatch_id else 0
+            if len(self._reported_by_dispatch) > 200:
+                self._reported_by_dispatch.clear()
+            return batch_needs_report(outcome, reported)
         if event.topic in _REPORT_TOPICS:
             return True
         if event.topic != "agent.progress":
@@ -716,7 +749,9 @@ class AliyaRuntime:
         return turn is not None and turn.origin == "user"
 
     def _cache_event(self, event: CosmosEvent) -> None:
-        if event.topic == "presence.changed":
+        if event.topic == "agent.result":
+            remember_result(event.payload, self._reported_by_dispatch)
+        elif event.topic == "presence.changed":
             try:
                 self._presence = ReadablePresence.model_validate(event.payload["readable"])
             except (KeyError, ValueError):
@@ -827,7 +862,7 @@ class AliyaRuntime:
                 await runner.run(turn=turn)
             except TimeoutError:
                 log.warning(
-                    "回合超时，发送兜底回复",
+                    "回合超时，发送失败提示",
                     来源=turn.origin,
                     超时秒=self._config.reply.turn_timeout_seconds,
                 )
@@ -877,12 +912,13 @@ class AliyaRuntime:
                     )
 
     async def _fallback(self, turn: TurnContext) -> None:
-        if turn.sent or turn.silent:
+        """失败提示以 system 身份投递：不算 Aliya 的回复，也不写入记忆。"""
+        if turn.sent or turn.silent or turn.origin != "user":
             return
         try:
-            _ = await turn.send(self._config.reply.fallback_text)
+            _ = await turn.send_system(self._config.reply.fallback_text)
         except Exception:
-            log.exception("发送兜底回复失败", 来源=turn.origin)
+            log.exception("发送失败提示失败", 来源=turn.origin)
 
     async def _run_ticker(self) -> None:
         while True:
@@ -920,7 +956,7 @@ class AliyaRuntime:
             origin="proactive",
             intent_text=intent.text,
         )
-        turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+        self._bind_turn(turn)
         self._pending_proactive.append(turn)
         _ = await self._enqueue(turn)
         log.info("到期跟进已排队", 内容=intent.text[:40], 到期=intent.due_at.isoformat())
@@ -994,7 +1030,7 @@ class AliyaRuntime:
             proactive=True,
             origin="proactive",
         )
-        turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+        self._bind_turn(turn)
         self._pending_proactive.append(turn)
         _ = await self._enqueue(turn)
         log.info(
@@ -1085,6 +1121,9 @@ class AliyaRuntime:
         anchors = self._memory.load_anchors()
         if anchors:
             parts.append("锚点：" + "、".join(anchors))
+        facts = self._memory.load_facts()[-_FACTS_IN_CONTEXT:]
+        if facts:
+            parts.append("记得：" + "；".join(facts))
         topics = self._memory.load_open_topics()[: self._config.memory.open_topics_limit]
         if topics:
             parts.append("未收尾：" + "、".join(topics))
@@ -1095,9 +1134,16 @@ class AliyaRuntime:
         return "\n".join(parts) or None
 
     def _desktop_text(self) -> str | None:
-        if self._desktop is None or not self._desktop.summary.strip():
+        """只在平板上有事发生时注入；全空闲不写，避免模型每回合复述「都闲着」。
+
+        工具清单本身由提示词里的工具索引提供，她想知道细节随时可以调 see_desktop。
+        """
+        snapshot = self._desktop
+        if snapshot is None or not snapshot.summary.strip():
             return None
-        return f"平板：{self._desktop.summary}"
+        if snapshot.entries and all(entry.status == "idle" for entry in snapshot.entries):
+            return None
+        return f"平板：{snapshot.summary}"
 
     def _tasks_text(self) -> str | None:
         """把运行态与最近进度压成一段；只给展示名，不暴露 agent_id。"""
@@ -1114,7 +1160,7 @@ class AliyaRuntime:
                 f"（{int(progress.progress * 100)}%）" if progress.progress is not None else ""
             )
             lines.append(f"{progress.label}{percent}：{detail}")
-        return "\n".join(lines[:8]) or None
+        return "\n".join(lines) or None
 
     def _world_text(self) -> str | None:
         """把世界推理压成提示词可用的一段，不暴露内部标识。"""
@@ -1171,6 +1217,13 @@ class AliyaRuntime:
                 错误消息=str(exc),
             )
 
+    def _bind_turn(self, turn: TurnContext) -> None:
+        """绑定出站通道与回合时间：正常回复走 Aliya 身份，失败提示走 system 身份。"""
+        turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+        turn.system_sender = lambda text, turn=turn: self._send_system(turn, text)
+        if turn.now is None:
+            turn.now = self._now()
+
     async def _send_for_turn(self, turn: TurnContext, text: str) -> bool:
         accepted = await self._send(turn, text)
         if accepted and turn.proactive and not turn.sent:
@@ -1212,6 +1265,24 @@ class AliyaRuntime:
             return
         await self._control.deliver(prepared, session_id=session_id)
 
+    async def _send_system(self, turn: TurnContext, text: str) -> bool:
+        """以 system 消息投递失败提示。
+
+        不走人格出站检查，避免重写时又变成 Aliya 的口吻；终端按 `system`
+        处理，不写对话轮次、不记 Aliya 统计，也不进她的记忆。
+        """
+        session_id = turn.session_id or self._last_session_id
+        if not session_id:
+            log.warning("没有会话可投递系统提示", 来源=turn.origin)
+            return False
+        try:
+            await self._control.deliver(text, session_id=session_id, kind="system")
+        except Exception:
+            log.exception("发送系统提示失败", 来源=turn.origin, 会话=session_id)
+            return False
+        log.info("系统提示已投递", 来源=turn.origin, 会话=session_id, 字数=len(text))
+        return True
+
     async def _prepare_outbound(self, text: str) -> str:
         """按配置跑出站检查；命中先让模型重写一次，仍不通过则降级删除。"""
         checked = check(text, self._config.reply.post_checks)
@@ -1231,7 +1302,7 @@ class AliyaRuntime:
                     log.debug("重写后仍被检查清空，放弃发送", 规则="、".join(checked.rules))
                     return ""
         limit = self._config.reply.max_chars_per_message
-        if len(checked.text) > limit:
+        if limit and len(checked.text) > limit:
             log.debug("出站内容超长，已截断", 原字数=len(checked.text), 上限=limit)
             return checked.text[: max(0, limit - 1)].rstrip() + "…"
         return checked.text

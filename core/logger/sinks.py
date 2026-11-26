@@ -24,7 +24,13 @@ from typing import NamedTuple
 from loguru import logger
 
 from core.config import LogSettings
-from core.logger.formatters import format_exception, format_json, format_line, format_tree
+from core.logger.formatters import (
+    SOURCE_KEY,
+    format_exception,
+    format_json,
+    format_line,
+    format_tree,
+)
 from core.logger.types import FilterFunction, Record
 
 #: 错误日志文件的级别门槛

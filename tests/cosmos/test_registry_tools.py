@@ -5,12 +5,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-import httpx2
 import pytest
 
 from agent.cosmos.contracts import AgentContext, AgentRequest, Artifact
@@ -192,6 +192,15 @@ async def test_search_rejects_outside_path() -> None:
     assert result.error.code == "invalid_params"
 
 
+async def test_search_keeps_long_line_whole(tmp_path: Path) -> None:
+    long_line = "prefix " + "x" * 1_000 + " needle"
+    _ = (tmp_path / "long.txt").write_text(long_line, encoding="utf-8")
+
+    result = await search.handle(make_request("search", query="needle"), ctx())
+    assert result.content is not None
+    assert "x" * 1_000 in result.content
+
+
 async def test_search_skips_sensitive_dir(tmp_path: Path) -> None:
     hidden = tmp_path / "data" / "state"
     hidden.mkdir(parents=True)
@@ -296,33 +305,127 @@ def test_validate_rejects_fix_option() -> None:
     assert run.validate_command(["ruff", "check", "--fix"]) is not None
 
 
+async def test_run_output_keeps_head_and_tail() -> None:
+    stream = asyncio.StreamReader()
+    payload = b"A" * 100 + b"B" * 100
+    stream.feed_data(payload)
+    stream.feed_eof()
+
+    data, truncated = await run.read_output(stream, limit=60)
+    assert truncated is True
+    assert data.startswith(b"A")
+    assert data.endswith(b"B")
+    assert "中间省略".encode() in data
+
+
+async def test_run_output_under_limit_is_intact() -> None:
+    stream = asyncio.StreamReader()
+    payload = b"hello world"
+    stream.feed_data(payload)
+    stream.feed_eof()
+
+    data, truncated = await run.read_output(stream, limit=1_000)
+    assert truncated is False
+    assert data == payload
+
+
 # ---------- 联网台 ----------
 
 
-async def test_web_rejects_non_http_scheme() -> None:
-    result = await web.handle(make_request("web", url="file:///etc/passwd"), ctx())
+async def test_web_requires_query() -> None:
+    result = await web.handle(make_request("web"), ctx())
     assert result.status == "failed"
     assert result.error is not None
     assert result.error.code == "invalid_params"
 
 
-async def test_web_rejects_localhost() -> None:
-    result = await web.handle(make_request("web", url="http://localhost:8000/"), ctx())
+async def test_web_rejects_non_http_url() -> None:
+    result = await web.handle(
+        make_request("web", query="读一下", url="file:///etc/passwd"), ctx()
+    )
     assert result.status == "failed"
     assert result.error is not None
     assert result.error.code == "invalid_params"
 
 
-async def test_web_rejects_private_ip() -> None:
-    result = await web.handle(make_request("web", url="http://127.0.0.1/"), ctx())
+async def test_web_returns_answer_with_citations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_search(_query: str, _url: str | None) -> tuple[str, list[tuple[str, str]]]:
+        return "今天有两条相关消息。", [("示例站", "https://example.com/a")]
+
+    monkeypatch.setattr(web, "request_search", fake_search)
+    result = await web.handle(make_request("web", query="今天有什么消息"), ctx())
+    assert result.status == "ok"
+    assert result.content is not None
+    assert "两条相关消息" in result.content
+    assert "https://example.com/a" in result.content
+
+
+async def test_web_passes_url_for_read_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, str | None]] = []
+
+    async def fake_search(query: str, url: str | None) -> tuple[str, list[tuple[str, str]]]:
+        seen.append((query, url))
+        return "读完了。", []
+
+    monkeypatch.setattr(web, "request_search", fake_search)
+    _ = await web.handle(
+        make_request("web", query="讲了什么", url="https://example.com/doc"), ctx()
+    )
+    assert seen == [("讲了什么", "https://example.com/doc")]
+
+
+async def test_web_truncates_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_search(_query: str, _url: str | None) -> tuple[str, list[tuple[str, str]]]:
+        return "字" * 500, []
+
+    monkeypatch.setattr(web, "request_search", fake_search)
+    result = await web.handle(make_request("web", query="查", max_chars=200), ctx())
+    assert result.status == "ok"
+    assert result.content is not None
+    assert "正文已截断" in result.content
+
+
+async def test_web_keeps_full_answer_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_search(_query: str, _url: str | None) -> tuple[str, list[tuple[str, str]]]:
+        return "字" * 5_000, []
+
+    monkeypatch.setattr(web, "request_search", fake_search)
+    result = await web.handle(make_request("web", query="查"), ctx())
+    assert result.status == "ok"
+    assert result.content is not None
+    assert "正文已截断" not in result.content
+    assert len(result.content) >= 5_000
+
+
+async def test_web_reports_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_search(_query: str, _url: str | None) -> tuple[str, list[tuple[str, str]]]:
+        raise web.WebNotConfigured
+
+    monkeypatch.setattr(web, "request_search", fake_search)
+    result = await web.handle(make_request("web", query="查"), ctx())
     assert result.status == "failed"
     assert result.error is not None
-    assert result.error.code == "invalid_params"
-    assert "内网" in result.error.message
+    assert result.error.code == "not_configured"
 
 
-async def test_web_guard_blocks_redirect_target() -> None:
-    """重定向的每一跳都要过同一个守卫，公网跳到内网会被拦下。"""
-    target = httpx2.Request("GET", "http://169.254.169.254/latest/meta-data/")
-    with pytest.raises(web.BlockedHost):
-        await web.guard_request(target)
+async def test_web_maps_search_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_search(_query: str, _url: str | None) -> tuple[str, list[tuple[str, str]]]:
+        raise web.WebSearchError("rate_limited", "请求太频繁", retriable=True)
+
+    monkeypatch.setattr(web, "request_search", fake_search)
+    result = await web.handle(make_request("web", query="查"), ctx())
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code == "rate_limited"
+    assert result.error.retriable is True
+
+
+def test_web_dedupes_citations() -> None:
+    items = [
+        {"type": "url_citation", "url_citation": {"url": "https://a", "title": "A"}},
+        {"type": "url_citation", "url_citation": {"url": "https://a", "title": "A"}},
+        {"type": "url_citation", "url_citation": {"url": "https://b", "title": "B"}},
+    ]
+    assert web.extract_citations(items) == [("A", "https://a"), ("B", "https://b")]

@@ -211,7 +211,7 @@ AgentResult.cancelled(summary="用户取消了任务")
 | `status=failed` | 必须给 `error`，`summary` 说明失败结果 |
 | `status=cancelled` | `error.code="cancelled"` |
 | `summary` 为空 | 非法，运行期判 `failed(internal)` |
-| `content` 超长 | 超过 `max_content_chars`（默认 20000）截断并标 `truncated=true` |
+| `content` 超长 | 各工具自行控制输出长度；cosmos 不再二次截断，`truncated` 由工具按自身上限标记 |
 
 ---
 
@@ -408,10 +408,10 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
 
 | id | 展示名 | 模块 | 职责 | 关键边界 |
 | --- | --- | --- | --- | --- |
-| `edit` | 编辑台 | `registry/edit.py` | `write` / `append` / `replace` 改文件 | 路径限定 `data/Aliya/workspace`；拒绝 `.git`、`.env`、`data/state`、`logs`、`data/mcp.json`；单次写入 ≤ 200k 字、目标文件 ≤ 2MB；临时文件 + `os.replace` 原子写 |
+| `edit` | 编辑台 | `registry/edit.py` | `write` / `append` / `replace` 改文件 | 路径限定 `data/Aliya/workspace`；拒绝 `.git`、`.env`、`data/state`、`logs`、`data/mcp.json`；单次写入 ≤ 1M 字、目标文件 ≤ 8MB；临时文件 + `os.replace` 原子写 |
 | `search` | 检索台 | `registry/search.py` | 按文件名或正文检索 | 只读，限定 `data/Aliya/workspace`；跳过依赖、缓存、版本库与敏感目录；跳过二进制与大文件 |
 | `run` | 运行台 | `registry/run.py` | 执行 pytest / ruff check / python -m / uv run / git 只读查询 | cwd 限定 `data/Aliya/workspace`；无 shell；命令名不能带路径；参数不能指向工作区外；不接受 `--fix`、`format` 与任意脚本；超时/取消 kill 整个进程组 |
-| `web` | 联网台 | `registry/web.py` | 抓取公开网页转纯文本 | 仅 http/https；DNS 解析后必须是公网地址；拒绝本机与内网 |
+| `web` | 联网台 | `registry/web.py` | 调用 DeepSeek 联网搜索 / 读链接 | 搜索与抓取在服务端完成；模型固定 `deepseek-flash`；需配置 API Key；不支持域名与位置过滤 |
 | `echo` | 回声台 | `registry/echo.py` | 原样返回指令 | 联调用，不做任何文件与网络操作 |
 
 四个业务工具的安全边界都在各自 handler 内实现（见第 7 节：cosmos 不做路径级沙箱），
@@ -487,5 +487,5 @@ agent:
 | --- | --- |
 | 参数二次校验与失败分类 | `edit.handle`（缺参、路径越界、原文不存在分别给不同 `code`） |
 | 只读遍历与目录剪枝 | `search._scan`（就地修改 `dirs`，跳过依赖与敏感目录） |
-| 子进程、超时与输出截断 | `run._execute`（`create_subprocess_exec`，超时 kill 后 `wait`） |
+| 子进程、超时与读取上限 | `run._execute`（`create_subprocess_exec`，超时 kill 后 `wait`） |
 | 外部请求与 SSRF 防护 | `web._host_is_public`（解析后要求所有地址 `is_global`） |

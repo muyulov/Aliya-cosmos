@@ -10,6 +10,7 @@ from agent.cosmos.services.registry import AgentRegistryService
 from agent.cosmos.services.runtime import AgentRuntimeService
 from agent.cosmos.services.terminal import TerminalService
 from agent.cosmos.services.world import WorldBridgeService
+from agent.cosmos.services.ws_channel import WebSocketChannelService
 
 __all__ = [
     "AgentRegistryService",
@@ -21,5 +22,6 @@ __all__ = [
     "DispatchService",
     "PresenceService",
     "TerminalService",
+    "WebSocketChannelService",
     "WorldBridgeService",
 ]

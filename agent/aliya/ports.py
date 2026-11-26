@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Protocol
 
 from agent.cosmos.contracts import (
@@ -106,7 +106,8 @@ class InProcessControl:
         return await self._control.handshake()
 
     def now(self) -> datetime:
-        return datetime.now(UTC)
+        """与 UDS 客户端一致：用控制面的时钟服务，而不是写死 UTC。"""
+        return self._control.now()
 
     def inbound(self) -> AsyncIterator[InboundEnvelope]:
         return self._control.inbound()

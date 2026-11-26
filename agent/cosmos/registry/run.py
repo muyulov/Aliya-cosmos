@@ -16,6 +16,7 @@ import contextlib
 import os
 import shlex
 import signal
+from collections import deque
 from pathlib import Path
 
 from agent.cosmos.contracts import (
@@ -91,10 +92,9 @@ DENIED_TOKENS: frozenset[str] = frozenset(
 )
 #: python -m 允许的模块：只放开测试、检查与字节码编译
 ALLOWED_MODULES: frozenset[str] = frozenset({"pytest", "ruff", "compileall", "unittest"})
-#: 输出截断上限（字符）
-MAX_OUTPUT_CHARS = 8_000
-#: 单条流最多读取的字节数；超出即停止累积，避免大输出撑爆内存
-MAX_OUTPUT_BYTES = 256_000
+#: 单条流最多读取的字节数：这是读取的物理上限，不是展示截断。
+#: 超过后停止累积并显式标注，避免一条刷屏命令把内存与上下文一起撑爆。
+MAX_OUTPUT_BYTES = 4_000_000
 #: 超时上限（秒）
 MAX_TIMEOUT_SECONDS = 300
 
@@ -264,8 +264,8 @@ async def _execute(
         async with asyncio.timeout(timeout):
             # 两条流必须并发读：只读其中一条时，另一条写满管道会卡住子进程
             (out, out_cut), (err, err_cut) = await asyncio.gather(
-                _read_limited(process.stdout),
-                _read_limited(process.stderr),
+                read_output(process.stdout),
+                read_output(process.stderr),
             )
             code = await process.wait()
     except TimeoutError:
@@ -283,22 +283,47 @@ async def _execute(
     )
 
 
-async def _read_limited(
+async def read_output(
     stream: asyncio.StreamReader | None, limit: int = MAX_OUTPUT_BYTES
 ) -> tuple[bytes, bool]:
-    """边读边累积到上限：超出部分丢弃，但不停止读取，避免子进程因管道满而阻塞。"""
+    """读完整条流，超限时保留头尾。
+
+    错误与结论通常落在输出末尾，只留头部会把最有用的部分丢掉；
+    尾部缓冲最多保留两倍上限，避免长输出把内存吃满。
+    """
     if stream is None:
         return b"", False
-    kept: list[bytes] = []
+    head_limit = limit * 2 // 3
+    tail_limit = limit - head_limit
+    head: list[bytes] = []
+    head_size = 0
+    tail: deque[bytes] = deque()
+    tail_size = 0
     total = 0
     while True:
         chunk = await stream.read(65_536)
         if not chunk:
             break
-        if total < limit:
-            kept.append(chunk[: limit - total])
         total += len(chunk)
-    return b"".join(kept), total > limit
+        if head_size < head_limit:
+            take = min(len(chunk), head_limit - head_size)
+            head.append(chunk[:take])
+            head_size += take
+            chunk = chunk[take:]
+        if not chunk:
+            continue
+        tail.append(chunk)
+        tail_size += len(chunk)
+        while tail_size > tail_limit * 2 and len(tail) > 1:
+            tail_size -= len(tail.popleft())
+
+    head_data = b"".join(head)
+    tail_data = b"".join(tail)[-tail_limit:] if tail_limit else b""
+    if total <= limit:
+        return head_data + tail_data, False
+    omitted = total - len(head_data) - len(tail_data)
+    marker = f"\n…（中间省略 {omitted} 字节）…\n".encode()
+    return head_data + marker + tail_data, True
 
 
 async def _terminate(process: asyncio.subprocess.Process) -> None:
@@ -312,14 +337,13 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 
 
 def _render(code: int, stdout: str, stderr: str, truncated: bool) -> str:
-    """按段拼接并截断；截断信息显式写出来，避免模型以为输出就这么多。"""
+    """按段完整拼接；只有读取物理上限被触发时才标注。"""
     lines = [f"退出码：{code}"]
     for title, text in (("输出", stdout.strip()), ("错误", stderr.strip())):
-        if not text:
-            continue
-        if truncated or len(text) > MAX_OUTPUT_CHARS:
-            text = text[:MAX_OUTPUT_CHARS] + "\n（输出已截断）"
-        lines.append(f"{title}：\n{text}")
+        if text:
+            lines.append(f"{title}：\n{text}")
+    if truncated:
+        lines.append(f"（输出超过 {MAX_OUTPUT_BYTES} 字节，已保留头尾）")
     return "\n".join(lines)
 
 

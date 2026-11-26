@@ -16,13 +16,19 @@ import pytest
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 
 from agent.aliya.memory.store import MemoryStore
-from agent.aliya.runtime import AliyaRuntime, event_brief
+from agent.aliya.runtime import (
+    AliyaRuntime,
+    batch_needs_report,
+    event_brief,
+    remember_result,
+)
 from agent.aliya.turn.context import TurnContext
 from agent.cosmos.contracts import (
     AgentCard,
     AgentDetail,
     AgentProgress,
     AgentRuntimeState,
+    AgentStatus,
     AliyaContext,
     ConversationContext,
     CosmosCapabilities,
@@ -65,6 +71,7 @@ class FakeControl:
         self.inbound_queue: asyncio.Queue[InboundEnvelope] = asyncio.Queue()
         self.event_queue: asyncio.Queue[CosmosEvent] = asyncio.Queue()
         self.delivered: list[str] = []
+        self.delivered_kinds: list[str] = []
         self.notified: list[str] = []
         self.proactive: list[str] = []
         self.acked: list[str] = []
@@ -111,6 +118,7 @@ class FakeControl:
 
     async def deliver(self, text: str, *, session_id: str, kind: str = "chat") -> None:
         self.delivered.append(text)
+        self.delivered_kinds.append(kind)
 
     async def notify(self, text: str, *, dispatch_id: str | None = None) -> ProactiveReceipt:
         self.notified.append(text)
@@ -237,6 +245,16 @@ class FakeLLM(LLMService):
         content = cast("dict[str, object]", cast("object", self.messages[0])).get("content")
         return content if isinstance(content, str) else ""
 
+    @property
+    def prompt_text(self) -> str:
+        """全部消息正文：上下文与工具索引走消息，不再进系统提示词。"""
+        parts: list[str] = []
+        for message in self.messages:
+            content = cast("dict[str, object]", cast("object", message)).get("content")
+            if isinstance(content, str):
+                parts.append(content)
+        return "\n".join(parts)
+
     def text_of(self, role: str) -> list[str]:
         """按角色取出消息正文，供断言上下文注入用。"""
         texts: list[str] = []
@@ -289,6 +307,25 @@ def make_config(tmp_path: Path, *, timeout: float = 120) -> AgentAliyaSettings:
     )
 
 
+def test_remember_result_counts_per_dispatch() -> None:
+    counts: dict[str, int] = {}
+    remember_result({"dispatch_id": "d1"}, counts)
+    remember_result({"dispatch_id": "d1"}, counts)
+    remember_result({"dispatch_id": None}, counts)
+    assert counts == {"d1": 2}
+
+
+def test_batch_skipped_when_all_results_reported() -> None:
+    outcome: dict[str, object] = {"status": "ok", "results": [{}, {}]}
+    assert batch_needs_report(outcome, 2) is False
+    assert batch_needs_report(outcome, 1) is True
+
+
+def test_batch_with_partial_status_still_reports() -> None:
+    outcome: dict[str, object] = {"status": "partial", "results": [{}]}
+    assert batch_needs_report(outcome, 1) is True
+
+
 @pytest.mark.asyncio
 async def test_inbound_turn_is_serial(tmp_path: Path) -> None:
     control = FakeControl()
@@ -304,9 +341,9 @@ async def test_inbound_turn_is_serial(tmp_path: Path) -> None:
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
         assert control.delivered == ["在。"]
         assert control.acked == ["m1"]
-        system = llm.system_text
-        assert "send_message" in system
-        assert "dispatch_task" in system
+        prompt = llm.prompt_text
+        assert "send_message" in prompt
+        assert "dispatch_task" in prompt
         turns = MemoryStore(tmp_path).recent_turns()
         assert [turn.role for turn in turns] == ["user", "aliya"]
         assert turns[0].message_id == "m1"
@@ -328,6 +365,9 @@ async def test_turn_timeout_falls_back(tmp_path: Path) -> None:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=3)
         assert control.delivered == [AgentAliyaSettings().reply.fallback_text]
+        # 失败提示以 system 身份发出，不是 Aliya 说的话。
+        assert control.delivered_kinds == ["system"]
+        assert [turn.role for turn in MemoryStore(tmp_path).recent_turns()] == ["user"]
     finally:
         await runtime.stop()
 
@@ -375,11 +415,11 @@ async def test_long_term_memory_is_injected(tmp_path: Path) -> None:
     try:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
-        system = llm.system_text
-        assert "她最近在整理旧照片" in system
-        assert "风信子" in system
-        assert "海边的约定" in system
-        assert "只对你说的话" in system
+        prompt = llm.prompt_text
+        assert "她最近在整理旧照片" in prompt
+        assert "风信子" in prompt
+        assert "海边的约定" in prompt
+        assert "只对你说的话" in prompt
     finally:
         await runtime.stop()
 
@@ -447,6 +487,23 @@ def test_event_brief_reads_nested_payloads() -> None:
         },
     )
     assert event_brief(result) == "任务完成：登录修好了"
+
+    with_content = CosmosEvent(
+        event_id="e1b",
+        topic="agent.result",
+        sequence=2,
+        at=datetime.now(UTC),
+        payload={
+            "result": {
+                "status": "ok",
+                "summary": "搜到结果",
+                "content": "今天有两条消息。\n参考：https://example.com",
+            }
+        },
+    )
+    brief = event_brief(with_content)
+    assert "内容：" in brief
+    assert "今天有两条消息" in brief
 
     finished = CosmosEvent(
         event_id="e2",
@@ -538,10 +595,10 @@ async def test_world_inference_is_cached_and_injected(tmp_path: Path) -> None:
         await asyncio.sleep(0.05)
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
-        system = llm.system_text
-        assert "夜里很安静" in system
-        assert "她可能失眠" in system
-        assert "轻声问候" in system
+        prompt = llm.prompt_text
+        assert "夜里很安静" in prompt
+        assert "她可能失眠" in prompt
+        assert "轻声问候" in prompt
     finally:
         await runtime.stop()
 
@@ -597,10 +654,10 @@ async def test_start_primes_desktop_presence_and_world(tmp_path: Path) -> None:
     try:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
-        system = llm.system_text
-        assert "平板：桌面上有两张卡" in system
-        assert "在电脑前" in system
-        assert "夜里很安静" in system
+        prompt = llm.prompt_text
+        assert "平板：桌面上有两张卡" in prompt
+        assert "在电脑前" in prompt
+        assert "夜里很安静" in prompt
     finally:
         await runtime.stop()
 
@@ -691,6 +748,63 @@ def test_event_caches_feed_task_and_desktop_context(tmp_path: Path) -> None:
     assert runtime._desktop_text() == "平板：桌面很干净"
 
 
+def _desktop_entry(status: AgentStatus) -> DesktopEntry:
+    return DesktopEntry(
+        card=AgentCard(
+            id="echo",
+            name="回声",
+            summary="复述内容",
+            description="把给定内容复述一遍",
+            capabilities=["repeat"],
+        ),
+        status=status,
+        readable=ReadableState(summary="闲着" if status == "idle" else "在忙"),
+    )
+
+
+def test_全部空闲的平板不进上下文(tmp_path: Path) -> None:
+    """工具全闲着时不该每回合注入「5 个空闲」，否则模型会反复播报。"""
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    runtime._desktop = DesktopSnapshot(
+        generated_at=datetime.now(UTC),
+        summary="5 个工具，5 个空闲",
+        entries=[_desktop_entry("idle") for _ in range(5)],
+    )
+    assert runtime._desktop_text() is None
+
+
+def test_有任务在跑时平板仍进上下文(tmp_path: Path) -> None:
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    runtime._desktop = DesktopSnapshot(
+        generated_at=datetime.now(UTC),
+        summary="2 个工具，1 个空闲，1 个正在忙",
+        entries=[_desktop_entry("idle"), _desktop_entry("running")],
+    )
+    assert runtime._desktop_text() == "平板：2 个工具，1 个空闲，1 个正在忙"
+
+
+def test_长期记忆里的事实会进上下文(tmp_path: Path) -> None:
+    """remember(kind=fact) 写进去的事实必须能被后续回合读到，否则「记住」是空话。"""
+    store = MemoryStore(str(tmp_path))
+    assert store.remember("我的中文名字是梦", "fact") is True
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    memory = runtime._compose_memory(None)
+    assert memory is not None
+    assert "记得：我的中文名字是梦" in memory
+
+
 @pytest.mark.asyncio
 async def test_dispatch_hint_includes_tool_preferences(tmp_path: Path) -> None:
     control = FakeControl()
@@ -726,6 +840,21 @@ async def test_outbound_check_and_limit_follow_config(tmp_path: Path) -> None:
     assert len(prepared) == 5
     assert prepared.endswith("…")
     assert llm.chat_calls
+
+
+@pytest.mark.asyncio
+async def test_zero_limit_keeps_message_intact(tmp_path: Path) -> None:
+    config = AgentAliyaSettings(
+        memory=AgentAliyaMemorySettings(dir=str(tmp_path)),
+        reply=AgentAliyaReplySettings(max_chars_per_message=0, post_checks=[]),
+    )
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=config,
+    )
+    text = "很长的回复" * 1_000
+    assert await runtime._prepare_outbound(text) == text
 
 
 @pytest.mark.asyncio

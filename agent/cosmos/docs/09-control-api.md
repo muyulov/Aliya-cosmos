@@ -31,7 +31,7 @@
 | 世界 | `get_world_view(force=False)` | 世界推演结果 |
 | 世界 | `refresh_world()` | 强制刷新推演 |
 | 世界 | `set_aliya_context(ctx)` | 提供 Aliya 侧上下文 |
-| 消息 | `deliver(text, session_id=...)` | 回应用户 |
+| 消息 | `deliver(text, session_id=..., kind="chat")` | 回应用户；`kind="system"` 用于失败提示 |
 | 消息 | `notify(text)` | 进展通知（受节流） |
 | 消息 | `send_proactive(text, urgency=0.5)` | 主动发起对话（受节流；`urgency >= 0.8` 可突破小时预算） |
 | 消息 | `history(session_id, limit=20)` | 读取对话历史 |
@@ -196,7 +196,7 @@ async def set_aliya_context(self, ctx: AliyaContext) -> None: ...
 ## 6. 消息
 
 ```python
-async def deliver(self, text: str, *, session_id: str) -> None: ...
+async def deliver(self, text: str, *, session_id: str, kind: MessageKind = "chat") -> None: ...
 async def notify(self, text: str, *, dispatch_id: str | None = None) -> ProactiveReceipt: ...
 async def send_proactive(
     self, text: str, *, urgency: float = 0.5
@@ -211,6 +211,8 @@ async def history(self, session_id: str, limit: int = 20) -> list[TerminalMessag
 | `send_proactive()` | 是（全部策略） | 主动发起对话；普通建议受每小时预算，`urgency >= 0.8` 只突破小时预算 |
 
 `deliver()` 不节流是刻意的：用户问了一句，Aliya 必须能回答。节流只作用于「Aliya 单方面想说」的场景。
+
+`kind="system"` 只用于回合失败提示：终端不把它写进对话轮次，也不计入 Aliya 消息统计，客户端应作为系统提示展示。
 
 ---
 

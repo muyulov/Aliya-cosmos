@@ -36,7 +36,7 @@ from core.llm.messages import user
 from core.llm.service import LLMService
 from core.service import ClockService, Service
 
-#: 进入对话轮次的消息类型；progress / result / system 只进任务摘要
+#: 进入对话轮次的消息类型；progress / result / system 不进对话轮次
 CONVERSATION_KINDS: frozenset[str] = frozenset({"chat", "task", "query", "mixed"})
 
 #: 分段时认的句子边界
@@ -308,7 +308,7 @@ class ConversationService(Service):
         return list(reversed(texts[:limit]))
 
     async def record_aliya(self, message: TerminalMessage) -> None:
-        """写入一条 Aliya 消息；progress / result 只更新任务摘要，不进对话轮次。"""
+        """写入一条 Aliya 消息；progress / result / system 不进对话轮次。"""
         if message.kind not in CONVERSATION_KINDS:
             return
         session = self._session(message.session_id)
@@ -412,12 +412,12 @@ class ConversationService(Service):
         if not parts:
             return [text]
         if len(parts) > self._terminal.max_parts:
+            # 分段上限只是建议值：宁可多发几条，也不能把回复尾部丢掉
             self.log.warning(
-                "分段过多，已截断",
+                "分段数超过建议上限，仍完整投递",
                 段数=len(parts),
-                上限=self._terminal.max_parts,
+                建议上限=self._terminal.max_parts,
             )
-            parts = parts[: self._terminal.max_parts]
         return parts
 
     def _split_with_atomic(self, text: str, max_chars: int) -> list[str]:

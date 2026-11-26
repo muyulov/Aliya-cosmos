@@ -54,8 +54,8 @@ agent:
     reply:
       max_rounds: 6
       turn_timeout_seconds: 120
-      max_chars_per_message: 1200
-      fallback_text: 嗯……我这边卡了一下，等我一下。
+      max_chars_per_message: 0 # 0 表示不截断；超过时由终端分段投递
+      fallback_text: 回复失败，请稍后再试。 # 以 system 消息投递，不算 Aliya 的回复
       progress_forwarding: on_wait # always / on_wait / never
       post_checks: [narration, engineering_terms, internal_ids, presence_leak]
 

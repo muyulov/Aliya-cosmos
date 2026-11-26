@@ -69,24 +69,32 @@ class TurnRunner:
             if reply.content:
                 messages.append(assistant(reply.content))
                 if not turn.sent:
-                    _ = await turn.send(reply.content)
+                    accepted = await turn.send(reply.content)
+                    if not accepted:
+                        log.warning("回复未通过出站检查", 轮次=round_index, 来源=turn.origin)
+                        await self._notify_failure(turn=turn)
                 return
 
-            # 主动回合可能主动选择这次不开口（例如 defer_proactive）；此时不兜底。
+            # 主动回合可能主动选择这次不开口（例如 defer_proactive）；此时不补提示。
             if turn.silent:
-                log.debug("回合选择静默，不发送兜底回复", 轮次=round_index, 来源=turn.origin)
+                log.debug("回合选择静默，不发送失败提示", 轮次=round_index, 来源=turn.origin)
                 return
 
-            # 空回复既没有工具调用也没有内容：用户会收不到任何消息，按失败兜底。
-            log.warning("模型返回空回复，发送兜底回复", 轮次=round_index, 来源=turn.origin)
-            if not turn.sent:
-                _ = await turn.send(self._config.reply.fallback_text)
+            # 空回复既没有工具调用也没有内容：用户会收不到任何消息，按失败处理。
+            log.warning("模型返回空回复", 轮次=round_index, 来源=turn.origin)
+            await self._notify_failure(turn=turn)
             return
 
         log.warning(
-            "达到最大工具轮次，发送兜底回复",
+            "达到最大工具轮次",
             轮次上限=self._config.reply.max_rounds,
             来源=turn.origin,
         )
-        if not turn.sent and not turn.silent:
-            _ = await turn.send(self._config.reply.fallback_text)
+        await self._notify_failure(turn=turn)
+
+    async def _notify_failure(self, *, turn: TurnContext) -> None:
+        """回合没产出可发送内容时，用 system 消息提示，而不是替 Aliya 说话。"""
+        if turn.sent or turn.silent or turn.origin != "user":
+            log.debug("非用户回合失败，不发送提示", 来源=turn.origin)
+            return
+        _ = await turn.send_system(self._config.reply.fallback_text)

@@ -64,9 +64,11 @@ class MessageMeta(BaseModel):
 | `mixed` | 双向 | 同时含查询与任务 | 用户 |
 | `progress` | Aliya → 用户 | 进展通知 | cosmos 生成，Aliya 授权 |
 | `result` | Aliya → 用户 | 任务结果 | Aliya |
-| `system` | 双向 | 系统提示（如「服务重启」） | cosmos |
+| `system` | 双向 | 系统提示（如「服务重启」、Aliya 回合失败） | cosmos / Aliya 失败提示 |
 
 `progress` / `result` 的 `text` 由 Aliya 或模板生成，`dispatch_id` 挂钩对应批次。它们**不会**进入 `ConversationContext` 的对话轮次（否则历史会被进度信息淹没），只进入任务摘要。
+
+`system` 同样不进对话轮次，也不计入 Aliya 消息统计：它是通道/系统的提示，不是她说过的话。Aliya 回合失败时由终端以该类型补一条 `reply.fallback_text`。
 
 ---
 
@@ -131,7 +133,7 @@ class ConversationContext(BaseModel):
 
 | 字段 | 规则 |
 | --- | --- |
-| `turns` | 只含对话轮次，不含 `progress` / `result` 消息 |
+| `turns` | 只含对话轮次，不含 `progress` / `result` / `system` 消息 |
 | `summary` | 超过 `turns` 上限的旧内容由 `ConversationService` 压缩，压缩失败则截断并 WARNING |
 | `presence` | 只给 `ReadablePresence`，不给原始字段；采集关闭时 `None` |
 | `tasks` | 最近 5 条，按 `started_at` 倒序；`id` 不给 Aliya 用于展示，只用于操作 |
@@ -298,6 +300,7 @@ cosmos **不重写**待发内容，只决定「发不发」。要不要换个说
 | 场景 | 行为 |
 | --- | --- |
 | 目标 Aliya 不可达 | 消息进队列，重试 3 次；仍失败则回用户 `暂时联系不上，请稍后再试`（模板文案） |
+| Aliya 回合失败 / 超时 | 用户回合补一条 `system` 提示（`reply.fallback_text`）；不写对话轮次与 Aliya 统计，不算她的回复 |
 | 上下文压缩失败 | 截断旧轮次，WARNING |
 | 脱敏命中 | 记录命中规则名与位置，不记原文 |
 | 主动消息被拒 | 返回 `ProactiveReceipt`，不抛错 |
@@ -333,6 +336,33 @@ class TerminalService(Service):
 | `note_link_heartbeat()` | 通道 → cosmos | 刷新链路心跳，必要时从 down/unstable 恢复 |
 | `history_pattern()` | cosmos → 世界推理 | 按天聚合画像；`window_days` 缺省用 `proactive.history_window_days` |
 | `history()` | —— | 读取对话历史（不含调度事件） |
+
+### 9.1 WebSocket 终端通道
+
+`WebSocketChannelService` 把浏览器接成 `UserChannelPort`，配置在 `agent.cosmos.terminal.ws`（默认开启，只监听回环地址；CLI 启动时会自动关闭）。协议是一帧一条 JSON：
+
+| 帧 | 方向 | 说明 |
+| --- | --- | --- |
+| `hello` | 浏览器 → cosmos | 首帧；携带 `session_id` 与可选 `token`，超时 10s |
+| `ready` | cosmos → 浏览器 | 会话建立，回传 `session_id` |
+| `history` | cosmos → 浏览器 | 握手后补发最近 `history_limit` 条对话；0 条时不发 |
+| `message` | 双向 | 上行 `text` / `kind` / `client_msg_id`；下行带完整 `TerminalMessage` |
+| `typing` | 浏览器 → cosmos | 上报输入状态，转成 `PresenceInput(is_typing, device="web")` |
+| `ping` / `pong` | 双向 | 维持链路心跳；服务端同时刷新 `note_link_heartbeat()` |
+| `error` | cosmos → 浏览器 | `code` + `message`，非法报文不静默丢弃 |
+
+边界：
+
+| 规则 | 说明 |
+| --- | --- |
+| 单一出口 | 与 CLI 一样占用 `TerminalService` 的用户通道，二者只能选一个 |
+| 会话路由 | 出站按 `session_id` 投给对应客户端；无匹配会话时广播给全部客户端 |
+| 慢消费 | 每客户端出站队列上限 `queue_limit`，满了丢最旧并告警，不阻塞终端 |
+| 系统提示 | 下行 `kind=system`（如回合失败）按系统提示渲染，不显示成 Aliya 的台词 |
+| 认证 | `token_env` 留空表示不校验；绑定非回环地址时未配令牌直接拒绝启动 |
+| 消息类型 | 浏览器只能发 `chat` / `query` / `task`；`progress` / `result` 只由 cosmos 产生 |
+| 不记正文 | 日志只记会话、客户端数、错误类型，不记消息文本 |
+| 自带测试页 | WS 同端口托管 `agent/cosmos/web/ws-test.html`：`http://<host>:<port>/`，含对话、typing 与原始帧日志 |
 
 ---
 
@@ -373,7 +403,7 @@ class TerminalService(Service):
 - 代码围栏、行内代码、Markdown 链接、URL 先识别为原子块，内部不切。
 - 普通文本按「段落 → 句子 → 字素」切；使用字素边界避免拆坏 emoji 与组合字符。
 - 原子块超过 `max_chars` 但在 `segment_hard_max_chars` 内时整体保留；超过硬上限才按行/字素继续切，代码块续段会重新打开围栏。
-- `max_parts` 限制单条回复段数；超出时截断并 WARNING，避免消息风暴。
+- `max_parts` 只是建议上限：分段数超过时只记 WARNING，仍完整投递，不丢弃尾部。
 
 ### 11.4 脱敏：真正遮蔽，而不是只检测
 
@@ -398,12 +428,12 @@ class TerminalService(Service):
 - 「有回应」的判定窗口是 `reply_window_minutes`（默认 30 分钟）；超过窗口的回话不计入回复率。
 
 ```yaml
-      context_max_tokens: 4000
+      context_max_tokens: 16000
       summary_batch_turns: 4
       session_ttl_hours: 72
       pinned_fact_ttl_days: 30
-      max_parts: 12
-      segment_hard_max_chars: 4000
+      max_parts: 24
+      segment_hard_max_chars: 8000
       unanswered_notice: true
       delivery:
         retry: 3

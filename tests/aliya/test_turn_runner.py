@@ -13,6 +13,8 @@ from core.llm import AssistantReply, ToolCall
 class FakeRuntime:
     def __init__(self) -> None:
         self.delivered: list[str] = []
+        #: 失败提示走 system 通道，和 Aliya 的正常回复分开记录
+        self.notices: list[str] = []
         #: 模拟 AliyaRuntime 的 _current_turn：工具发送后同步回合的 sent 状态
         self.turn: TurnContext | None = None
 
@@ -24,6 +26,9 @@ class FakeRuntime:
         if self.turn is not None:
             self.turn.sent = True
             self.turn.replies.append(text)
+
+    async def send_system(self, text: str) -> None:
+        self.notices.append(text)
 
     async def describe_desktop(self) -> str:
         return "桌面"
@@ -118,32 +123,54 @@ async def test_max_rounds_fallback(runtime: FakeRuntime) -> None:
         for i in range(10)
     ]
     runner = make_runner(llm, runtime)
-    await runner.run(turn=TurnContext(user_text="在吗", sender=runtime.send))
-    assert runtime.delivered == [AgentAliyaSettings().reply.fallback_text]
+    turn = TurnContext(user_text="在吗", sender=runtime.send, system_sender=runtime.send_system)
+    await runner.run(turn=turn)
+    assert runtime.delivered == []
+    assert runtime.notices == [AgentAliyaSettings().reply.fallback_text]
     assert llm.calls == AgentAliyaSettings().reply.max_rounds
 
 
 @pytest.mark.asyncio
 async def test_empty_reply_falls_back(runtime: FakeRuntime) -> None:
-    """模型既没调工具也没给正文时，必须发兜底回复而不是静默结束。"""
+    """模型既没调工具也没给正文时，必须发系统提示而不是静默结束。"""
     llm = FakeLLM()
     llm.replies = [AssistantReply(content=None, tool_calls=())]
     runner = make_runner(llm, runtime)
-    turn = TurnContext(user_text="在吗", sender=runtime.send)
+    turn = TurnContext(user_text="在吗", sender=runtime.send, system_sender=runtime.send_system)
     runtime.turn = turn
     await runner.run(turn=turn)
-    assert runtime.delivered == [AgentAliyaSettings().reply.fallback_text]
+    assert runtime.delivered == []
+    assert runtime.notices == [AgentAliyaSettings().reply.fallback_text]
+    assert turn.sent is False
+
+
+@pytest.mark.asyncio
+async def test_rejected_reply_falls_back(runtime: FakeRuntime) -> None:
+    """正文被出站检查拦下时，用户不能什么都收不到。"""
+
+    async def reject(_text: str) -> bool:
+        return False
+
+    llm = FakeLLM()
+    llm.replies = [AssistantReply(content="在。", tool_calls=())]
+    runner = make_runner(llm, runtime)
+    turn = TurnContext(user_text="在吗", sender=reject, system_sender=runtime.send_system)
+    await runner.run(turn=turn)
+    assert runtime.delivered == []
+    assert runtime.notices == [AgentAliyaSettings().reply.fallback_text]
+    assert turn.sent is False
 
 
 @pytest.mark.asyncio
 async def test_silent_turn_skips_fallback(runtime: FakeRuntime) -> None:
-    """主动回合已决定不开口时，空回复不能再补一条兜底消息。"""
+    """主动回合已决定不开口时，空回复不能再补一条提示。"""
     llm = FakeLLM()
     llm.replies = [AssistantReply(content=None, tool_calls=())]
     runner = make_runner(llm, runtime)
     turn = TurnContext(
         user_text="",
         sender=runtime.send,
+        system_sender=runtime.send_system,
         proactive=True,
         origin="proactive",
         silent=True,
@@ -151,3 +178,23 @@ async def test_silent_turn_skips_fallback(runtime: FakeRuntime) -> None:
     runtime.turn = turn
     await runner.run(turn=turn)
     assert runtime.delivered == []
+    assert runtime.notices == []
+
+
+@pytest.mark.asyncio
+async def test_proactive_empty_reply_skips_fallback(runtime: FakeRuntime) -> None:
+    """主动回合失败就直接放弃，不能借系统提示向用户补一条。"""
+    llm = FakeLLM()
+    llm.replies = [AssistantReply(content=None, tool_calls=())]
+    runner = make_runner(llm, runtime)
+    turn = TurnContext(
+        user_text="",
+        sender=runtime.send,
+        system_sender=runtime.send_system,
+        proactive=True,
+        origin="proactive",
+    )
+    runtime.turn = turn
+    await runner.run(turn=turn)
+    assert runtime.delivered == []
+    assert runtime.notices == []

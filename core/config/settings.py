@@ -48,6 +48,8 @@ class LogSettings(BaseModel):
     - `layout`：单行（默认，字段内联成 `键=值`，便于 grep 与按行采集）或树形
       （字段缩进成树，人读更清楚）。
     - `color`：仅控制台生效，文件永远不带 ANSI 转义；`auto` 仅在终端下着色。
+    - `source`：是否在每条日志里带上调用点 `文件名:行号`。默认开启——定位问题时
+      不必再从消息反推是哪一行打的；压日志体积或对接固定格式采集时关掉。
     - `file_name` / `error_file_name`：支持 loguru 的时间模板，启动时间戳在装配时
       求值，因此每次启动都写到独立文件；模板里的 `{}` 同时让 loguru 的 retention
       能跨启动识别同族文件（写死文件名则只能清理本进程自己轮转出的小文件）。
@@ -61,6 +63,7 @@ class LogSettings(BaseModel):
     json_output: bool = Field(default=False, alias="json")
     layout: Literal["tree", "line"] = "line"
     color: Literal["auto", "always", "never"] = "auto"
+    source: bool = True
     dir: str = "logs"
     file_name: str = "cosmos-main-{time:%Y%m%d-%H%M%S}.log"
     error_file_name: str = "cosmos-error-{time:%Y%m%d-%H%M%S}.log"
@@ -376,26 +379,46 @@ class AgentDeliverySettings(_AgentConfigNode):
     dead_letter: bool = True
 
 
+class AgentWebSocketChannelSettings(_AgentConfigNode):
+    """浏览器/用户侧 WebSocket 终端通道（06 章）。"""
+
+    enabled: bool = False
+    #: 默认只监听回环地址；绑定其它地址时必须配置令牌
+    host: str = "127.0.0.1"
+    #: 0 表示由系统分配端口（测试用）；生产环境请显式指定
+    port: int = Field(default=8780, ge=0, le=65535)
+    path: str = "/ws"
+    #: 访问令牌所在环境变量；留空表示不校验
+    token_env: str = ""
+    #: 单客户端出站队列上限；满了丢最旧并告警
+    queue_limit: int = Field(default=200, ge=1)
+    #: 客户端未声明 session_id 时使用的会话标识
+    default_session_id: str = "web"
+    #: 握手后补发的历史条数；0 关闭
+    history_limit: int = Field(default=20, ge=0, le=200)
+
+
 class AgentTerminalSettings(_AgentConfigNode):
     """通信终端（06 章）。"""
 
-    conversation_turns: int = Field(default=20, ge=1)
-    summary_chars: int = Field(default=400, ge=0)
+    conversation_turns: int = Field(default=40, ge=1)
+    summary_chars: int = Field(default=800, ge=0)
     #: 上下文预算与压缩策略
-    context_max_tokens: int = Field(default=4000, ge=256)
+    context_max_tokens: int = Field(default=16000, ge=256)
     summary_batch_turns: int = Field(default=4, ge=1)
     session_ttl_hours: int = Field(default=72, ge=1)
     max_sessions: int = Field(default=200, ge=1)
     pinned_fact_ttl_days: int = Field(default=30, ge=1)
-    #: 单条回复最多切成几段，防止消息风暴
-    max_parts: int = Field(default=12, ge=1)
+    #: 单条回复的建议分段上限；超出只告警，仍完整投递
+    max_parts: int = Field(default=24, ge=1)
     #: 代码块/URL 的硬上限；超过才允许继续切
-    segment_hard_max_chars: int = Field(default=4000, ge=100)
+    segment_hard_max_chars: int = Field(default=8000, ge=100)
     #: 是否向 Aliya 暴露 unanswered_count；关闭时传 0
     unanswered_notice: bool = True
     delivery: AgentDeliverySettings = AgentDeliverySettings()
     redaction: AgentRedactionSettings = AgentRedactionSettings()
     proactive: AgentProactiveSettings = AgentProactiveSettings()
+    ws: AgentWebSocketChannelSettings = AgentWebSocketChannelSettings()
 
 
 class AgentWorldHistorySettings(_AgentConfigNode):
@@ -602,8 +625,10 @@ class AgentAliyaInitiativeSettings(_AgentConfigNode):
 class AgentAliyaReplySettings(_AgentConfigNode):
     max_rounds: int = Field(default=6, ge=1)
     turn_timeout_seconds: float = Field(default=120, gt=0)
-    max_chars_per_message: int = Field(default=1200, ge=1)
-    fallback_text: str = "嗯……我这边卡了一下，等我一下。"
+    #: 单条出站消息的字符上限；0 表示不截断（默认），由通道分段处理
+    max_chars_per_message: int = Field(default=0, ge=0)
+    #: 用户回合失败时的系统提示；以 system 消息投递，不算 Aliya 的回复
+    fallback_text: str = "回复失败，请稍后再试。"
     progress_forwarding: Literal["always", "on_wait", "never"] = "on_wait"
     post_checks: list[str] = Field(
         default_factory=lambda: [

@@ -4,10 +4,11 @@
 - 关联目录：`agent/aliya`（Aliya 的实现，本文档描述协作接口与边界）
 - 角色设定：`data/prompt/Aliya.md`（人设唯一来源，本文档的表述需与它一致）
 - 底层依赖：`core/`（service / config / logger / llm / decision / agent）
-- 状态：**已实现**。15 个常驻服务（core 4 个 + cosmos 11 个，含 `ControlServerService`）与契约模型已落地，
-  启动命令 `uv run python -m agent.cosmos.app`；链路心跳、通道状态上报、调度并发/supersede、
-  世界推理定时兜底与事件缺口快照补偿已接入；桌面内置 5 个工具
-  （echo / edit / search / run / web），Aliya 以独立进程通过 UDS 控制面连接
+- 状态：**已实现**。16 个常驻服务（core 4 个 + cosmos 12 个，含 `ControlServerService` 与
+  `WebSocketChannelService`）与契约模型已落地，启动命令 `uv run python -m agent.cosmos.app`；
+  链路心跳、通道状态上报、调度并发/supersede、世界推理定时兜底与事件缺口快照补偿已接入；
+  桌面内置 5 个工具（echo / edit / search / run / web），Aliya 以独立进程通过 UDS 控制面连接，
+  浏览器可通过 WebSocket 终端通道接入
 
 ---
 
@@ -83,7 +84,7 @@ agent/cosmos/
   registry/      子 agent 配置加载（bootstrap）与内置工具：
                  echo（回声）、edit（编辑）、search（检索）、run（运行）、web（联网）
   transport/     MessageBus / EventBus 端口、进程内实现与 BusService
-  assembly.py    装配入口：core 4 个服务 + cosmos 11 个服务
+  assembly.py    装配入口：core 4 个服务 + cosmos 12 个服务
   app.py         进程入口：uv run python -m agent.cosmos.app
   errors.py      错误树（CosmosError 及其子类）
   __init__.py    对外只导出 CosmosError 与 build_cosmos_manager（延迟导入）
@@ -110,6 +111,7 @@ agent/cosmos/
 | `TerminalService` | 双向消息通道、路由、异步推送、主动消息投递 | `ConversationService` / `DispatchService` / `PresenceService` |
 | `ControlService` | 向 Aliya 暴露的控制面（桌面操作、订阅、发消息） | 以上全部 |
 | `ControlServerService` | 把 `ControlService` 暴露为 UDS/NDJSON 控制面：握手、RPC、入站与事件推送 | `ControlService` / `ClockService` / 配置 |
+| `WebSocketChannelService` | 浏览器侧用户通道：JSON 报文进出 `TerminalService`，按会话推送回复 | `TerminalService` / 配置 |
 
 依赖方向单向：`agent.cosmos → core`，且 `core` 不知道 `agent` 的存在。
 
@@ -157,7 +159,7 @@ asyncio.run(main())
 
 | 注入点 | 默认实现 | 谁来替换 |
 | --- | --- | --- |
-| `TerminalService.set_user_channel()` | `MemoryUserChannel` | 部署方（WebSocket / CLI） |
+| `TerminalService.set_user_channel()` | `MemoryUserChannel` | 内置 `WebSocketChannelService`（配置 `terminal.ws.enabled`）或 CLI 终端通道 |
 | `WorldBridgeService.set_port()` | 按 `world.port_module` 动态加载；内置规则基线 `agent.cosmos.world.reasoning` | 部署方 / 世界推理实现 |
 | `WorldBridgeService.set_link_provider()` | 由 `assembly` 接到 `TerminalService.link_state` | 已在装配里接好 |
 | `WorldBridgeService.set_history_provider()` | 由 `assembly` 接到 `TerminalService.history_pattern`，窗口取 `world.history.window_days` | 已在装配里接好 |

@@ -36,10 +36,11 @@ description: 把查文件、改文件、跑测试、读网页交给平板上对�
 运行台不接受安装、发布、推送、删除、改文件（`--fix`、`ruff format`）与任意脚本；
 命令名和参数都不能带工作区外的路径；遇到这类需求直接告诉对方做不了。
 
-## 读网页
+## 联网查资料
 
-- 用 `dispatch_task(agent_id="web", params={url: "https://..."})`，只支持公开页面。
-- 抓回来的是纯文本，引用时挑重点，不要把整页念给对方。
+- 搜索：`dispatch_task(agent_id="web", params={query: "今天有什么相关消息"})`
+- 读链接：`dispatch_task(agent_id="web", params={query: "这篇讲了什么", url: "https://..."})`
+- 结果是带引用的回答，引用时挑重点，不要把整段念给对方。
 
 ## 失败怎么处理
 

@@ -51,9 +51,9 @@ embedding:
 # 两个端点都没配 api_key 时，服务只警告、健康检查 unhealthy，进程照常启动（不 fail fast）。
 llm:
   chat:
-    base_url: https://api.deepseek.com/v1 # 端点地址；OpenAI 兼容端点（vLLM / Ollama / Moonshot）改这里即可
+    base_url: http://127.0.0.1:7863/v1 # 端点地址；OpenAI 兼容端点（vLLM / Ollama / Moonshot）改这里即可
     api_key: ${DEEPSEEK_API_KEY:} # 冒号后为空：.env 里没配时取空串，该端点不可用
-    model: deepseek-flash # 该端点的模型
+    model: global:deepseek-v4.1-flash # 该端点的模型
     timeout: 60 # 单次请求超时（秒），必须为正数
     retries: 2 # SDK 重试次数，0 关闭；流式一旦开始消费就不再重试
     structured_mode: json_object # 兼容端点不支持时改 json_object（该模式要求提示词里出现 json 字样）
@@ -62,9 +62,9 @@ llm:
   vision:
     # 多模态走这个端点：调用时显式传 endpoint="vision" 才切过来（不按 model 名自动切换）。
     # 本端点没配 api_key 时只是它自己不可用，不指定 endpoint 的调用仍走 chat。
-    base_url: https://api.deepseek.com/v1
+    base_url: http://127.0.0.1:7863/v1
     api_key: ${DEEPSEEK_API_KEY:}
-    model: deepseek-flash
+    model: global:deepseek-v4.1-flash
     timeout: 60
     retries: 2
     structured_mode: json_object
@@ -123,6 +123,7 @@ agent:
     reply:
       max_rounds: 6
       turn_timeout_seconds: 120
+      max_chars_per_message: 0 # 0 表示不截断；超过时由终端分段投递
     tools:
       mcp_enabled: true # 接入 data/mcp.json 里的外部工具；空的 mcpServers 不连任何 server
       skills_enabled: true # 加载 data/skills/*/SKILL.md，只披露索引，正文按需读取
@@ -177,15 +178,27 @@ agent:
         aliya_can_hide: true # Aliya 可要求关闭任一字段
     # ---------- 通信终端 ----------
     terminal:
-      conversation_turns: 20 # 信封里携带的最近轮次
-      summary_chars: 400 # 更早内容的摘要长度上限
-      context_max_tokens: 4000 # 上下文预算；超限先摘要再裁剪
+      # 浏览器/用户侧 WebSocket 通道：与默认内存队列二选一，随 cosmos 常驻启动。
+      # 默认只监听回环地址；绑定其它地址时必须配置 token_env，否则拒绝启动。
+      # 协议见 agent/cosmos/services/ws_channel.py 顶部说明。
+      ws:
+        enabled: true # 默认开启；只监听回环地址，CLI 启动时会自动关闭
+        host: 127.0.0.1
+        port: 8780 # 0 表示由系统分配（测试用）
+        path: /ws
+        token_env: "" # 留空不校验；对外监听时必填（如 ALIYA_WEB_TOKEN）
+        queue_limit: 200 # 单客户端出站积压上限，满了丢最旧并告警
+        default_session_id: web # 浏览器未声明 session_id 时使用
+        history_limit: 20 # 握手后补发的最近对话条数；0 关闭
+      conversation_turns: 40 # 信封里携带的最近轮次
+      summary_chars: 800 # 更早内容的摘要长度上限
+      context_max_tokens: 16000 # 上下文预算；超限先摘要再裁剪
       summary_batch_turns: 4 # 每积累几轮旧内容压一次摘要
       session_ttl_hours: 72 # 空闲会话回收
       max_sessions: 200 # 会话数上限；超出按最久未活跃回收
       pinned_fact_ttl_days: 30 # 偏好/约束等固定事实保留天数
-      max_parts: 12 # 单条回复最多分段数
-      segment_hard_max_chars: 4000 # 代码块/URL 的硬上限
+      max_parts: 24 # 建议分段上限；超出仍完整投递，只记告警
+      segment_hard_max_chars: 8000 # 代码块/URL 的硬上限
       unanswered_notice: true # 是否向 Aliya 暴露 unanswered_count；false 时传 0
       delivery:
         retry: 3 # 出站投递失败后的重试次数
@@ -361,20 +374,22 @@ agent:
         card:
           name: 联网台
           icon: "🌐"
-          summary: 抓取公开网页正文
+          summary: 联网搜索并读链接
           description: >-
-            抓取一个公开网页并转成纯文本，适合读文章、文档与公告。
-            不支持登录、提交表单、下载文件；只访问公网地址，拒绝本机与内网。
-          capabilities: [web_fetch, read_page]
+            把问题交给 DeepSeek 联网搜索，返回带引用的回答；可选阅读指定链接。
+            搜索与抓取在服务端完成，本工具不下载页面；需要 llm.chat 配置 DeepSeek API Key。
+            不支持限定域名、地理位置或强制指定搜索工具。
+          capabilities: [web_search, read_page]
           params_schema:
             type: object
             properties:
+              query: {type: string}
               url: {type: string}
-              max_chars: {type: integer, minimum: 200, maximum: 20000}
-            required: [url]
+              max_chars: {type: integer, minimum: 0}
+            required: [query]
           examples:
-            - input: 读一下这篇公告的内容
-            - input: 把这个文档页面的正文抓下来
+            - input: 查一下今天有哪些关于这个项目的新闻
+            - input: 读一下这个链接说了什么
           desktop: {group: web, order: 10, pinned: false, visible: true}
           execution: {timeout_seconds: 60, max_concurrent: 2, queue: true, retryable: true}
           permissions: {read_presence: false, notify_user: false, read_conversation: false}

@@ -1,7 +1,7 @@
 """cosmos 装配入口。
 
 `core` 不 import `agent`，因此装配放在这里：先拿 core 的 4 个服务，再按
-「同层无依赖、注册顺序即启动顺序」注册 cosmos 的 11 个服务。
+「同层无依赖、注册顺序即启动顺序」注册 cosmos 的 12 个服务。
 
 跨服务的反向读取（链路状态）用 setter 注入，避免构造器循环依赖：
 
@@ -22,6 +22,7 @@ from agent.cosmos.services import (
     DispatchService,
     PresenceService,
     TerminalService,
+    WebSocketChannelService,
     WorldBridgeService,
 )
 from agent.cosmos.transport import BusService
@@ -32,7 +33,7 @@ from core.service.registry import build_manager
 
 
 def build_cosmos_manager(settings: Settings | None = None) -> ServiceManager:
-    """构造并装配 core + cosmos 全部服务（共 15 个）。"""
+    """构造并装配 core + cosmos 全部服务（共 16 个）。"""
     resolved = settings if settings is not None else get_settings()
     manager = build_manager(resolved)
     manager.register(
@@ -47,6 +48,7 @@ def build_cosmos_manager(settings: Settings | None = None) -> ServiceManager:
         TerminalService,
         ControlService,
         ControlServerService,
+        WebSocketChannelService,
     )
     _wire(manager)
     log.info(
@@ -55,6 +57,7 @@ def build_cosmos_manager(settings: Settings | None = None) -> ServiceManager:
         配置子agent数=len(resolved.agent.cosmos.agents),
         最大客户端数=resolved.agent.control.max_clients,
         控制面路径=resolved.agent.control.socket_path,
+        WebSocket终端通道=resolved.agent.cosmos.terminal.ws.enabled,
     )
     return manager
 

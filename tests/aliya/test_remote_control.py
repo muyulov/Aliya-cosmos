@@ -1,8 +1,9 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -30,8 +31,9 @@ from agent.cosmos.contracts.rpc import (
 
 
 class FakeServer:
-    def __init__(self, socket_path: Path) -> None:
+    def __init__(self, socket_path: Path, *, timezone: str = "UTC") -> None:
         self.socket_path = socket_path
+        self.timezone = timezone
         self.delivered: list[str] = []
         self.subscriptions: list[dict[str, int]] = []
         #: 置位后下一次 deliver 返回业务错误，用于验证 outbox 不无限重放
@@ -78,8 +80,8 @@ class FakeServer:
                 writer,
                 HelloOk(
                     capabilities={"api_version": "1.0", "contract_version": "1.0.0"},
-                    server_time=datetime.now(UTC),
-                    timezone="UTC",
+                    server_time=datetime.now(ZoneInfo(self.timezone)),
+                    timezone=self.timezone,
                 ),
             )
             while True:
@@ -178,6 +180,22 @@ async def test_call_round_trip(fake_server: FakeServer) -> None:
     assert isinstance(result, dict)
     assert "server_time" in result
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_now_uses_server_timezone(tmp_path: Path) -> None:
+    """握手拿到的是服务端时区，now() 不能把东八区下午还原成 UTC 早上。"""
+    server = FakeServer(tmp_path / "aliya.sock", timezone="Asia/Shanghai")
+    await server.start()
+    client = RemoteControl(str(server.socket_path), token="t")
+    try:
+        await client.connect()
+        now = client.now()
+        assert now.utcoffset() == timedelta(hours=8)
+        assert now.hour == datetime.now(ZoneInfo("Asia/Shanghai")).hour
+    finally:
+        await client.close()
+        await server.stop()
 
 
 @pytest.mark.asyncio

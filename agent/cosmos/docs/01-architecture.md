@@ -192,6 +192,7 @@ WorldBridgeService 组装 WorldInput
 | `DispatchService` | 统一调度管线、匹配、并行、降级 | 上面四个 |
 | `WorldBridgeService` | 输入组装、结果转发、缓存 | `ClockService`、`PresenceService`、`AgentRuntimeService` |
 | `TerminalService` | 双向消息、推送、主动消息节流 | `ConversationService`、`PresenceService` |
+| `WebSocketChannelService` | 浏览器用户通道：WebSocket JSON 收发、输入状态上报、按会话推送 | `TerminalService`、`AgentSettings` |
 | `ControlService` | Aliya 控制面 | 以上全部 |
 | `ControlServerService` | 控制面 UDS/NDJSON 端点：握手、RPC、入站与事件推送 | `ControlService`、`ClockService`、`AgentSettings` |
 
@@ -256,12 +257,14 @@ agent.aliya  ──►  agent.cosmos.contracts / ControlPort  ──►  core.*
 
 其他服务把 `BusService` 当普通依赖注入，再通过属性拿端口；换 WebSocket / IPC 时只换 `BusService` 内部的实现，服务代码与端口签名不动。
 
-`UserChannelPort` / `WorldReasoningPort` 这类部署方端口不走容器注入（容器只认 Service 与配置节点），而是在 `start()` 前用 setter 注入：
+`UserChannelPort` / `WorldReasoningPort` 这类部署方端口不走容器注入（容器只认 Service 与配置节点），而是用 setter 注入：
 
 ```python
 terminal.set_user_channel(channel)
 world.set_port(port)
 ```
+
+内置的 `WebSocketChannelService` 在自己的 `start()` 里注入自己，停止时把通道交还给内存兜底；CLI 则在 `lifespan()` 之后接管，因此 CLI 与 WebSocket 通道只能二选一。
 
 链路状态这类「反向读取」也用 setter 解耦：`assembly` 把 `TerminalService.link_state` 注册给 `WorldBridgeService`，两个服务的构造器因此没有循环依赖。
 

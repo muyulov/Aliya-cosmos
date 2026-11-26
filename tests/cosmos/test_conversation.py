@@ -56,6 +56,8 @@ def make_message(
 
 
 async def test_上下文压缩与轮次上限(settings: Settings) -> None:
+    # 压缩窗口显式设定，避免用例随默认值变化而失效
+    settings.agent.cosmos.terminal.conversation_turns = 20
     llm = FakeLLM(summary="更早的摘要")
     service = make_service(settings, llm)
     for index in range(24):
@@ -68,6 +70,7 @@ async def test_上下文压缩与轮次上限(settings: Settings) -> None:
 
 
 async def test_压缩失败时截断并告警(settings: Settings) -> None:
+    settings.agent.cosmos.terminal.conversation_turns = 20
     messages: list[str] = []
     sink_id = logger.add(lambda message: messages.append(str(message)), level="WARNING")
     service = make_service(settings, FakeLLM(fail=True))
@@ -165,12 +168,14 @@ async def test_分段保护代码块与链接(settings: Settings) -> None:
     assert any("https://example.com/a/very/long/path" in part for part in parts)
 
 
-async def test_分段超过上限时截断(settings: Settings) -> None:
+async def test_分段超过建议上限仍完整投递(settings: Settings) -> None:
     settings.agent.cosmos.desktop.max_content_chars = 10
     settings.agent.cosmos.terminal.max_parts = 2
     service = make_service(settings, FakeLLM())
     parts = await service.format("一二三四五六七八九十" * 6, kind="chat")
-    assert len(parts) == 2
+    # 分段上限只是建议值，尾部内容不能被丢掉
+    assert len(parts) > 2
+    assert "九十" in parts[-1]
 
 
 async def test_脱敏返回遮蔽文本(settings: Settings) -> None:
@@ -210,6 +215,7 @@ async def test_上下文超预算会裁剪(settings: Settings) -> None:
 
 
 async def test_摘要按批次触发(settings: Settings) -> None:
+    settings.agent.cosmos.terminal.conversation_turns = 20
     service = make_service(settings, FakeLLM(summary="摘要"))
     for index in range(21):
         await service.record_user(make_message(f"第 {index} 条", index=index))

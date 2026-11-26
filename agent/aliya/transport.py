@@ -7,8 +7,9 @@ import contextlib
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel
 
@@ -51,6 +52,15 @@ from core.logger import log
 CONTRACT_VERSION = "1.0"
 
 
+def _parse_timezone(name: str) -> tzinfo:
+    """解析握手里的时区名；非法或缺失时退回 UTC，不让时区问题拖垮连接。"""
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("服务端时区无法解析，按 UTC 处理", 时区=name)
+        return UTC
+
+
 class RemoteError(Exception):
     """控制面返回的业务错误。"""
 
@@ -90,6 +100,8 @@ class RemoteControl:
         self._backoff_seconds: float = 1.0
         self._clock_offset: timedelta = timedelta(0)
         self._server_timezone: str = "UTC"
+        #: 握手时确定的时区；now() 必须按它还原，否则跨时区会差几个小时。
+        self._server_tz: tzinfo = UTC
         self._read_task: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
 
@@ -168,8 +180,12 @@ class RemoteControl:
         return self._capabilities
 
     def now(self) -> datetime:
-        """按握手时校准的偏移返回服务端时间。"""
-        return datetime.now(UTC) + self._clock_offset
+        """按握手时校准的偏移与服务端时区返回当前时间。
+
+        只回偏移不回时区，会让 `now().hour` 永远是 UTC：东八区下午两点会被当成
+        早上六点，主动时段的判断也跟着错。
+        """
+        return (datetime.now(UTC) + self._clock_offset).astimezone(self._server_tz)
 
     async def call(self, method: str, params: dict[str, object]) -> object:
         if not self._connected:
@@ -217,6 +233,7 @@ class RemoteControl:
             server_time = server_time.replace(tzinfo=UTC)
         self._clock_offset = server_time.astimezone(UTC) - datetime.now(UTC)
         self._server_timezone = message.timezone
+        self._server_tz = _parse_timezone(message.timezone)
         log.debug(
             "控制面握手完成",
             合约版本=CONTRACT_VERSION,

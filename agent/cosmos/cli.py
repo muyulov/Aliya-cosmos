@@ -6,7 +6,7 @@
     ALIYA_CONTROL_TOKEN=dev uv run python -m agent.aliya.app
 
 CLI 进程本身就是 cosmos：启动全部常驻服务与 UDS 控制面，Aliya 作为独立进程连上来。
-用户输入经 `TerminalService.ingest()` 进总线，Aliya 的回复经 `UserChannelPort` 打印。
+用户输入经 `TerminalService.ingest()` 进总线，Aliya 的回复与系统提示经 `UserChannelPort` 打印。
 先开 CLI 再开 Aliya 也不会丢消息：消息总线在无订阅者时会积压。
 """
 
@@ -49,15 +49,17 @@ def _enable_ansi() -> bool:
 
 
 class ConsoleUserChannel:
-    """用户通道：把 Aliya 发出的消息逐条打到 stdout。
+    """用户通道：把终端消息逐条打到 stdout。
 
     cosmos 只做分段与脱敏、不合并；这里也逐条打印，保持「她发几条就是几条」。
+    `system` 消息（如回合失败提示）用系统前缀，不能冒用 Aliya 的身份。
     回复随时可能到达——包括用户正在敲下一句的时候——所以打印前先清掉当前行的
     输入提示符，打完再把提示符补回来，避免出现「你> Aliya> ...」这种串行。
     """
 
     _PROMPT: str = "你> "
     _REPLY_PREFIX: str = "Aliya> "
+    _SYSTEM_PREFIX: str = "系统> "
     _CLEAR_LINE: str = "\r\033[K"
 
     def __init__(self) -> None:
@@ -68,7 +70,7 @@ class ConsoleUserChannel:
 
     async def send(self, message: TerminalMessage) -> None:
         async with self._lock:
-            self._write(message.text)
+            self._write(message.text, system=message.kind == "system")
 
     def prompt(self) -> None:
         """在空闲行上摆好输入提示符。"""
@@ -89,13 +91,14 @@ class ConsoleUserChannel:
             _ = sys.stdout.flush()
             self._prompt_shown = False
 
-    def _write(self, text: str) -> None:
+    def _write(self, text: str, *, system: bool = False) -> None:
         if self._prompt_shown:
             _ = sys.stdout.write(self._CLEAR_LINE)
             self._prompt_shown = False
+        prefix = self._SYSTEM_PREFIX if system else self._REPLY_PREFIX
         lines = text.splitlines() or [""]
-        print(f"{self._REPLY_PREFIX}{lines[0]}", flush=True)
-        indent = " " * len(self._REPLY_PREFIX)
+        print(f"{prefix}{lines[0]}", flush=True)
+        indent = " " * len(prefix)
         for line in lines[1:]:
             print(f"{indent}{line}", flush=True)
         self.prompt()
@@ -149,6 +152,8 @@ def _print_banner(settings: Settings) -> None:
 
 async def run(settings: Settings, session_id: str = _DEFAULT_SESSION) -> None:
     """装配 cosmos，读 stdin 并投递用户消息，直到 EOF 或退出命令。"""
+    # CLI 自己就是用户通道：关掉常驻 WS 通道，避免两个出口抢同一条消息流。
+    settings.agent.cosmos.terminal.ws.enabled = False
     manager = build_cosmos_manager(settings)
     channel = ConsoleUserChannel()
     log.info("终端会话已开始", 会话=session_id, 控制面=settings.agent.control.socket_path)

@@ -73,8 +73,6 @@ TIMEOUT_GRACE_SECONDS = 5.0
 HEARTBEAT_TICK_SECONDS = 1.0
 #: 幂等缓存保留时长
 IDEMPOTENT_TTL_SECONDS = 600.0
-#: `AgentResult.content` 上限（08 章 4.2）
-CONTENT_MAX_CHARS = 20000
 #: 历史耗时样本数（P50 用）
 DURATION_SAMPLES = 20
 
@@ -918,10 +916,7 @@ class AgentRuntimeService(Service):
                 merged.append(artifact)
         if merged:
             updates["artifacts"] = merged
-        content = result.content
-        if content is not None and len(content) > CONTENT_MAX_CHARS:
-            updates["content"] = content[:CONTENT_MAX_CHARS]
-            updates["truncated"] = True
+        # 正文长度由各工具自己控制；cosmos 不再做二次截断，避免把结论截掉
         if not updates:
             return result
         return result.model_copy(update=updates)

@@ -12,6 +12,7 @@ dependencies = [
     "openai>=3.0",
     "httpx2>=2.12",
     "mcp>=2.3",
+    "websockets>=14",
 ]
 
 [dependency-groups]

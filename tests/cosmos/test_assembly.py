@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import signal
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -33,10 +34,10 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     return resolved
 
 
-def test_装配出十五个服务() -> None:
+def test_装配出十六个服务() -> None:
     manager = build_cosmos_manager(Settings())
     names = manager.names
-    assert len(names) == 15
+    assert len(names) == 16
     assert "bus" in names
     assert "cosmos.registry" in names
     assert "cosmos.runtime" in names
@@ -73,6 +74,12 @@ def test_core_入口行为不变() -> None:
     assert set(manager.names) == {"clock", "embedding", "llm", "decision"}
 
 
+def _port_busy(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
 async def _socket_busy(path: Path) -> bool:
     """判断 socket 是否已被监听；残留文件直接清理。"""
     if not path.exists():
@@ -91,6 +98,9 @@ async def _socket_busy(path: Path) -> bool:
 async def test_cosmos_进程可优雅退出() -> None:
     if await _socket_busy(DEFAULT_SOCKET):
         pytest.skip("默认控制面 socket 已被占用，跳过进程级测试")
+    ws_port = Settings().agent.cosmos.terminal.ws.port
+    if _port_busy(ws_port):
+        pytest.skip(f"默认 WebSocket 端口 {ws_port} 已被占用，跳过进程级测试")
     env = {**os.environ, "ALIYA_CONTROL_TOKEN": "test-token"}
     process = await asyncio.create_subprocess_exec(
         sys.executable,

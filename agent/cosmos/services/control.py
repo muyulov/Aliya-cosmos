@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
+from datetime import datetime
 from typing import ClassVar
 
 from agent.cosmos.contracts import (
@@ -145,6 +146,13 @@ class ControlService(Service):
                 "history_limit": self._config.cosmos.desktop.history_limit,
             },
         )
+
+    def now(self) -> datetime:
+        """当前时间（时钟服务配置的时区）。
+
+        同进程客户端与 UDS 客户端共用同一个时间来源，避免一边 UTC 一边本地时区。
+        """
+        return self._clock.now()
 
     def _check_contract(self) -> None:
         version = self._config.cosmos.contract.contract_version

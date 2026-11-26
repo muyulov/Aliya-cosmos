@@ -43,10 +43,8 @@ SKIP_DIR_NAMES: frozenset[str] = frozenset(
 )
 #: 按相对根的路径跳过（目录名比较覆盖不到的多级路径）
 SKIP_RELATIVE: frozenset[str] = frozenset({"data/models"})
-#: 单文件扫描上限（字节）
-MAX_FILE_BYTES = 1_000_000
-#: 单行最多回显的字符数
-MAX_LINE_CHARS = 160
+#: 单文件扫描上限（字节）；超过的文件直接跳过，不读进内存
+MAX_FILE_BYTES = 4_000_000
 
 
 CARD = AgentCard(
@@ -186,8 +184,7 @@ def _match_content(path: Path, root: Path, needle: str) -> list[str]:
     found: list[str] = []
     for number, line in enumerate(text.splitlines(), start=1):
         if needle in line.lower():
-            snippet = line.strip()[:MAX_LINE_CHARS]
-            found.append(f"{_relative(path, root)}:{number}: {snippet}")
+            found.append(f"{_relative(path, root)}:{number}: {line.strip()}")
     return found
 
 

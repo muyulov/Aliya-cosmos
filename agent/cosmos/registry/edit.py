@@ -32,9 +32,9 @@ from core.agent.workspace import (
 )
 
 #: 单次写入上限（字符）；再大应改用检索台分批处理
-MAX_WRITE_CHARS = 200_000
+MAX_WRITE_CHARS = 1_000_000
 #: 单个目标文件的大小上限（字节）；读与写都受限，避免大文件进内存
-MAX_TARGET_BYTES = 2_000_000
+MAX_TARGET_BYTES = 8_000_000
 
 CARD = AgentCard(
     id="edit",

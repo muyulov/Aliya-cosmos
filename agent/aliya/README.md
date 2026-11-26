@@ -185,12 +185,12 @@ flowchart TD
     T -->|"有"| X["顺序执行工具<br/>结果回填"]
     X --> R{"未超 6 轮?"}
     R -->|"是"| L
-    R -->|"否"| F["fallback：正文兜底或道歉"]
+    R -->|"否"| F["失败提示：system 消息<br/>不算 Aliya 回复"]
     T -->|"没有"| S{"调过 send_message?"}
     S -->|"是"| P["出站检查 → 投递"]
-    S -->|"否"| B["正文兜底为一条消息"]
-    F --> P
-    B --> P
+    S -->|"否"| B["失败提示：system 消息"]
+    F --> N["终端按 system 投递"]
+    B --> N
     P --> MEM["写 turns.jsonl<br/>更新 AliyaContext"]
 
     style L fill:#fff8e1,stroke:#e0c068
@@ -199,6 +199,17 @@ flowchart TD
 **没有意图分类。** 她是否调度，由是否调用 `dispatch_task` 体现；是否回复，由是否调用 `send_message` 体现。cosmos 不再预先判断 `chat` / `task` / `query`。
 
 工具调用顺序执行，最多 6 轮；`send_message` 可多次调用，每条单独投递。
+
+回合失败（超时、异常、空回复或超轮次）时，用户回合只补一条 `system` 提示
+（`reply.fallback_text`）：它不写 `turns.jsonl`、不计入 Aliya 消息统计，也不会被当成她说的话。
+事件与主动回合失败则直接放弃，不向用户补提示。
+
+提示词分层：系统提示只放准则、人格与技能索引；工具索引（名称 + 描述首行）与动态上下文
+（时间、记忆、状态、任务、桌面、世界）拼成一条独立的 `[当前上下文]` 消息，排在历史之前。
+时间按控制面时区给出；桌面快照只在有工具在忙或异常时注入，全空闲时不写，避免模型反复播报「都闲着」。
+长期记忆里的最近事实也会进上下文——`remember(kind=fact)` 只写不读，等于没记。
+工具结果原样回填、不截断；历史完整使用上游窗口，不再二次裁剪条数或内容。
+出站消息默认也不截断（`reply.max_chars_per_message=0`）；超长内容由终端按段投递。
 
 ### 5.2 事件处理
 
@@ -221,7 +232,7 @@ flowchart TD
 
 | 类别 | 工具 | 说明 |
 | --- | --- | --- |
-| 通信 | `send_message` | 用户唯一能看见她的途径 |
+| 通信 | `send_message` | 她说话的唯一途径；失败提示走 `system`，不经过它 |
 | 调度 | `see_desktop` / `dispatch_task` / `task_status` / `cancel_task` / `retry_task` | 看平板、派活、查进度、改主意 |
 | 情境 | `refresh_world` / `current_time` | 重新感知世界；读控制面校准过的时间 |
 | 文件 | `read_file` | 只读，限定在 `data/Aliya/workspace`，敏感路径拒绝 |
@@ -231,6 +242,8 @@ flowchart TD
 
 本地工具的运行时能力统一由 `RuntimePort` 提供（`send` / `describe_desktop` / `dispatch` / `now` 等），
 工具函数用闭包绑定 runtime，避免 `self` 被当成工具参数。
+工具结果与子 agent 的 `AgentResult.content` 都完整回填，不做长度截断；只有工具自身的
+物理上限（如命令输出、单个文件大小）仍然保留。
 文件与命令类工具（`read_file` 与子 agent 的 `edit` / `search` / `run`）的根都是
 `data/Aliya/workspace`，她要动的东西不会落到项目源码上。
 
@@ -324,6 +337,11 @@ agent:
       consume: true # 是否订阅 world.inference
       max_hypotheses_used: 2
       trust_threshold: 0.5 # 低于此置信度的假设不采纳
+    reply:
+      max_rounds: 6
+      turn_timeout_seconds: 120
+      # 用户回合失败时由终端以 system 消息发出，不算她的回复
+      fallback_text: 回复失败，请稍后再试。
     tools:
       prefer_agents: [edit] # 有多个候选时的偏好，不构成强制
 ```
@@ -348,7 +366,7 @@ agent:
 | 回复文本 | 无括号旁白、无「玩家/用户/agent」字样、句尾标点未被删除 |
 | 连续多条短句 | 每条单独投递，不被合并成一段 |
 | 链路中断 | 不调用 `send_message`，消息进 outbox |
-| 工具调用超过 6 轮 | 停止调用，走 fallback |
+| 工具调用超过 6 轮 | 停止调用；用户回合补一条 system 失败提示，不记成她的回复 |
 | 出站检查命中 | 重写一次；仍命中则遮蔽后发送 |
 
 用假的 `ControlPort`（记录调用、返回预置信封与事件）即可单测全部逻辑，不需要起 cosmos。

@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Protocol
 
 from agent.aliya.memory import MemoryKind, MemoryScope
+from agent.aliya.turn.context import format_moment
 from core.agent import ToolRegistry, tool
 from core.agent.workspace import (
     WorkspacePathError,
@@ -27,9 +28,6 @@ MAX_READ_LINES = 200
 #: 计算表达式长度与指数上限，挡住 `9**9**9` 这类把回合卡死的输入
 MAX_EXPRESSION_CHARS = 200
 MAX_EXPONENT = 100
-
-_WEEKDAYS = ("一", "二", "三", "四", "五", "六", "日")
-
 
 class _CalcError(ValueError):
     """表达式不受支持，或结果没有意义。"""
@@ -91,6 +89,7 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
         """查看平板上现在有哪些工具、能否使用、各自在做什么。
 
         在决定派活或需要指定工具之前先看；只读快照，不会触发任何操作。
+        用户随口打招呼、闲聊时不要为了找话说去看它，更不要把结果念出来。
         返回每个工具的 id、名字、状态与能力，派活时把 id 填进 agent_id。
         """
         return await runtime.describe_desktop()
@@ -171,8 +170,7 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
         想知道「现在」而不想凭感觉猜时用；只读，不会改变任何东西。
         返回服务端校准过的时间，格式是「年-月-日 时:分（星期）」。
         """
-        now = runtime.now()
-        return f"{now:%Y-%m-%d %H:%M}（星期{_WEEKDAYS[now.weekday()]}）"
+        return format_moment(runtime.now())
 
     @tool
     async def read_file(path: str, start_line: int = 1, max_lines: int = 80) -> str:

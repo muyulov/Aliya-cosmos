@@ -96,15 +96,15 @@ agent:
 
     # ---------- 通信终端（06-terminal.md） ----------
     terminal:
-      conversation_turns: 20 # 信封里携带的最近轮次
-      summary_chars: 400 # 更早内容的摘要长度上限
-      context_max_tokens: 4000 # 上下文预算；超限先摘要再裁剪
+      conversation_turns: 40 # 信封里携带的最近轮次
+      summary_chars: 800 # 更早内容的摘要长度上限
+      context_max_tokens: 16000 # 上下文预算；超限先摘要再裁剪
       summary_batch_turns: 4 # 每积累几轮旧内容压一次摘要
       session_ttl_hours: 72 # 空闲会话回收
       max_sessions: 200 # 会话数上限；超出按最久未活跃回收
       pinned_fact_ttl_days: 30 # 偏好/约束等固定事实保留天数
-      max_parts: 12 # 单条回复最多分段数
-      segment_hard_max_chars: 4000 # 代码块/URL 的硬上限
+      max_parts: 24 # 建议分段上限；超出仍完整投递，只记告警
+      segment_hard_max_chars: 8000 # 代码块/URL 的硬上限
       unanswered_notice: true # 是否向 Aliya 暴露 unanswered_count；false 时传 0
       delivery:
         retry: 3 # 出站投递失败后的重试次数

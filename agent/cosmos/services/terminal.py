@@ -39,7 +39,7 @@ from agent.cosmos.transport import BusService, MemoryUserChannel, UserChannelPor
 from core.config import AgentDeliverySettings, AgentProactiveSettings, AgentSettings
 from core.service import ClockService, Service
 
-#: 进入 `ConversationContext` 的消息类型：进度与结果只进任务摘要
+#: 进入 `ConversationContext` 的消息类型：进度、结果与系统提示都不进对话轮次
 CONVERSATION_KINDS: frozenset[str] = frozenset({"chat", "task", "query", "mixed"})
 
 
@@ -362,7 +362,10 @@ class TerminalService(Service):
     # ---------- 出口 ----------
 
     async def deliver(self, text: str, *, session_id: str, kind: MessageKind = "chat") -> None:
-        """回应用户：分段 → 脱敏扫描 → 投递 → 写入上下文。"""
+        """回应用户：分段 → 脱敏扫描 → 投递 → 写入上下文。
+
+        `kind="system"` 只投递：不写对话轮次，也不计入 Aliya 消息统计。
+        """
         if not text.strip():
             self.log.warning("空文本不投递", session_id=session_id, kind=kind)
             return

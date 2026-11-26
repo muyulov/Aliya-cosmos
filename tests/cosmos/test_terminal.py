@@ -204,6 +204,16 @@ async def test_历史不含进度与结果(env: Env) -> None:
     assert all(message.kind not in {"progress", "result"} for message in messages)
 
 
+async def test_系统提示不进对话历史与统计(env: Env) -> None:
+    """失败提示以 system 投递：用户看得到，但不算 Aliya 说过的话。"""
+    await env.terminal.deliver("回复失败，请稍后再试。", session_id="ses_1", kind="system")
+
+    messages = env.channel.drain()
+    assert [message.kind for message in messages] == ["system"]
+    assert await env.terminal.history("ses_1") == []
+    assert env.terminal.last_aliya_at() is None
+
+
 async def test_免打扰时段进入延迟队列(env: Env, settings: Settings) -> None:
     settings.agent.cosmos.terminal.proactive.quiet_hours = ["00:00-23:59"]
     receipt = await env.terminal.notify("还在弄")

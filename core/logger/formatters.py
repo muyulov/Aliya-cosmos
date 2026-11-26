@@ -5,13 +5,13 @@
 - 树形：时间 [级别] 颜文字 消息，结构化字段以 ├─ / └─ 缩进成树。
 - JSON：每行一个 JSON 对象，字段平铺，便于日志采集。
 
-参考样式：
-    2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队
+参考样式（`文件名:行号` 是调用点来源，由 `LogSettings.source` 控制）：
+    2026-08-27 23:09:52 [I] dispatcher.py:42 (^_^)/ 用户回合已入队
         ├─ 参与者: qq:6329133635628374381
         └─ 已取消旧计划: 0
 
 单行样式：
-    2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队 | 参与者=qq:6329133635628374381 | 已取消旧计划=0
+    2026-08-27 23:09:52 [I] dispatcher.py:42 (^_^)/ 用户回合已入队 | 参与者=qq:6329133635628374381 | 已取消旧计划=0
 
 着色由各 format_* 的 color 参数控制，关掉时输出与不带颜色时逐字节一致，
 因此文件 sink 复用同一套渲染逻辑而不必担心 ANSI 转义写进日志文件。
@@ -59,8 +59,13 @@ FIELD_INDENT = "    "
 #: 单行布局里字段之间的分隔符
 LINE_SEPARATOR = " | "
 
+#: 调用点来源在 extra 里的键：由 sink 的 filter 写入 `文件名:行号`
+SOURCE_KEY = "source"
+
 #: JSON 输出的保留键：由日志框架写入，业务字段同名时一律让位
-RESERVED_KEYS: frozenset[str] = frozenset({"time", "level", "message", "face", "exception"})
+RESERVED_KEYS: frozenset[str] = frozenset(
+    {"time", "level", "message", "face", "exception", SOURCE_KEY}
+)
 
 
 def _pick_face(face: object, level_name: str) -> str:
@@ -68,6 +73,16 @@ def _pick_face(face: object, level_name: str) -> str:
     if isinstance(face, str) and face:
         return face
     return faces_module.DEFAULT_BY_LEVEL.get(level_name, "")
+
+
+def _source_of(extra: dict[str, object]) -> str:
+    """取调用点来源；未启用或没有来源信息时返回空串。
+
+    extra 是 loguru 的绑定字段，sink 的 filter 会把 `文件名:行号` 写进
+    `SOURCE_KEY`。测试里手工构造的 record 没有这个键，自然退化成不渲染。
+    """
+    source = extra.get(SOURCE_KEY)
+    return source if isinstance(source, str) else ""
 
 
 def format_tree(record: Record, *, stack: str | None = None, color: bool = False) -> str:
@@ -83,7 +98,7 @@ def format_tree(record: Record, *, stack: str | None = None, color: bool = False
     face = _pick_face(extra.get("face"), level_name)
     fields = _fields_of(extra)
 
-    lines = [_head(record, level_name, face, color=color)]
+    lines = [_head(record, level_name, face, color=color, source=_source_of(extra))]
 
     items = list(fields.items())
     for index, (key, value) in enumerate(items):
@@ -108,7 +123,9 @@ def format_line(record: Record, *, stack: str | None = None, color: bool = False
     level_name = _level_name_of(record)
     face = _pick_face(extra.get("face"), level_name)
 
-    parts = [_head(record, level_name, face, color=color, one_line=True)]
+    parts = [
+        _head(record, level_name, face, color=color, one_line=True, source=_source_of(extra))
+    ]
     parts.extend(
         f"{_paint(key, ANSI_GRAY, color=color)}={_escape_newlines(render_value(value))}"
         for key, value in _fields_of(extra).items()
@@ -120,9 +137,18 @@ def format_line(record: Record, *, stack: str | None = None, color: bool = False
 
 
 def _head(
-    record: Record, level_name: str, face: str, *, color: bool, one_line: bool = False
+    record: Record,
+    level_name: str,
+    face: str,
+    *,
+    color: bool,
+    one_line: bool = False,
+    source: str = "",
 ) -> str:
-    """渲染首段：时间 [级别] 颜文字 消息。两种布局共用。
+    """渲染首段：时间 [级别] 来源 颜文字 消息。两种布局共用。
+
+    来源放在级别之后、消息之前：按模块过滤时它紧跟级别，而消息仍是行内
+    最后一段，既有的按消息前缀 grep 的习惯不受影响。
 
     one_line=True 时把消息里内嵌的换行一并转义，见 format_line 的约定。
     """
@@ -133,6 +159,8 @@ def _head(
         _paint(timestamp, ANSI_GRAY, color=color),
         _paint(f"[{LEVEL_TAGS.get(level_name, 'I')}]", level_color, color=color),
     ]
+    if source:
+        parts.append(_paint(source, ANSI_GRAY, color=color))
     if face:
         parts.append(_paint(face, level_color, color=color))
     parts.append(
@@ -190,6 +218,8 @@ def format_json(record: Record, *, stack: str | None = None) -> str:
         "level": level_name,
         "message": _message_of(record),
         "face": _pick_face(extra.get("face"), level_name),
+        # 始终输出该键（未启用来源时为空串）：采集端不必为「有没有这个字段」写分支
+        SOURCE_KEY: _source_of(extra),
     }
     # 逐键写入而不是 payload.update(...)：保留键不能被业务字段覆盖
     for key, value in _fields_of(extra).items():
@@ -254,6 +284,7 @@ __all__ = [
     "LEVEL_COLORS",
     "LEVEL_TAGS",
     "RESERVED_KEYS",
+    "SOURCE_KEY",
     "format_exception",
     "format_json",
     "format_line",

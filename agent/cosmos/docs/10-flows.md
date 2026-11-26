@@ -68,6 +68,11 @@ sequenceDiagram
 | 回传时改写 Aliya 的措辞 | 只做分段与脱敏，不改语义 |
 | 把这条消息写进 `DispatchContext` | 对话只写 `ConversationContext` |
 
+**失败分支**：Aliya 回合超时、异常、空回复或超轮次时，她不发对话消息，只上报一条
+`kind="system"` 的 `deliver`（文案来自 `reply.fallback_text`）；终端以系统提示投递，
+不写对话轮次、不计入 Aliya 消息统计，`unanswered_count` 保持原值。客户端应按系统提示渲染，
+而不是当成她的台词。
+
 ---
 
 ## 流程 ② Aliya 在桌面点击 Edit agent
