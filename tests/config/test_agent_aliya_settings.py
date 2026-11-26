@@ -7,6 +7,7 @@ def test_defaults() -> None:
     assert control.socket_path == "data/state/aliya.sock"
     assert control.max_clients == 1
     assert aliya.reply.max_rounds == 6
+    assert aliya.memory.dir == "data/Aliya"
     assert aliya.memory.anchors == []
     assert aliya.initiative.default_action == "wait"
 
@@ -28,4 +29,5 @@ def test_repo_yaml_has_control_and_aliya() -> None:
     settings = load_settings()
     assert settings.agent.control.socket_path == "data/state/aliya.sock"
     assert settings.agent.aliya.persona.source == "data/prompt/Aliya.md"
+    assert settings.agent.aliya.memory.dir == "data/Aliya"
     assert settings.agent.aliya.memory.anchors == ["风信子", "拉姆石", "高马尾", "兔子狗", "海獭号"]

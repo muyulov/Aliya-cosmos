@@ -19,7 +19,12 @@ from agent.cosmos.contracts import (
     DesktopMeta,
     ExecutionPolicy,
 )
-from core.agent.workspace import WorkspacePathError, is_sensitive, resolve_in_workspace
+from core.agent.workspace import (
+    WorkspacePathError,
+    aliya_workspace_root,
+    is_sensitive,
+    resolve_in_workspace,
+)
 
 #: 遍历时按目录名跳过
 SKIP_DIR_NAMES: frozenset[str] = frozenset(
@@ -48,9 +53,10 @@ CARD = AgentCard(
     id="search",
     name="检索台",
     icon="🔍",
-    summary="在仓库里找文件名或内容",
+    summary="在工作区里找文件或内容",
     description=(
-        "在仓库根目录内按文件名或正文查找：mode=files 匹配文件名，mode=content 匹配文件内容。"
+        "在 Aliya 的工作区（data/Aliya/workspace）内按文件名或正文查找："
+        "mode=files 匹配文件名，mode=content 匹配文件内容。"
         "只读，不改文件、不执行命令；跳过依赖、缓存与版本库目录，不返回二进制内容。"
     ),
     capabilities=["file_search", "code_search"],
@@ -63,15 +69,15 @@ CARD = AgentCard(
                 "enum": ["content", "files"],
                 "description": "content 找正文，files 找文件名",
             },
-            "path": {"type": "string", "description": "从哪个子目录开始，默认仓库根"},
+            "path": {"type": "string", "description": "从哪个子目录开始，默认工作区根"},
             "glob": {"type": "string", "description": "只查匹配的文件，如 *.py"},
             "max_results": {"type": "integer", "minimum": 1, "maximum": 100},
         },
         "required": ["query"],
     },
     examples=[
-        AgentExample(input="找一下哪里定义了 TurnRunner"),
-        AgentExample(input="列出所有 test_ 开头的文件"),
+        AgentExample(input="找一下笔记里提到的 TODO"),
+        AgentExample(input="列出所有 md 文件"),
     ],
     desktop=DesktopMeta(group="dev", order=20),
     execution=ExecutionPolicy(
@@ -91,10 +97,11 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
         return _failed(request, "缺少 query", "需要给出要找的词")
     if mode not in {"content", "files"}:
         return _failed(request, f"未知 mode：{mode}", "只能用 content 或 files")
+    base = aliya_workspace_root()
     try:
-        root = resolve_in_workspace(raw_path)
+        root = resolve_in_workspace(raw_path, root=base)
     except WorkspacePathError as exc:
-        return _failed(request, str(exc), "只能查仓库里的目录")
+        return _failed(request, str(exc), "只能查你工作区里的目录")
     if not root.exists():
         return _failed(request, f"路径不存在：{raw_path}", "目录可能被移动了")
     if not root.is_dir():
@@ -104,7 +111,7 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
         return AgentResult.cancelled(request_id=request.request_id)
     await ctx.report(progress=40, step="查找中")
 
-    hits = await asyncio.to_thread(_scan, root, query, mode, pattern, limit)
+    hits = await asyncio.to_thread(_scan, root, base, query, mode, pattern, limit)
 
     await ctx.report(progress=90, step="整理结果")
     if not hits:
@@ -123,12 +130,17 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
 
 def _scan(
     root: Path,
+    base: Path,
     query: str,
     mode: str,
     pattern: str | None,
     limit: int,
 ) -> list[str]:
-    """同步遍历：先按目录剪枝，再按 glob 与内容匹配。"""
+    """同步遍历：先按目录剪枝，再按 glob 与内容匹配。
+
+    `root` 是本次搜索起点，`base` 是工作区根：敏感判断必须相对工作区根，
+    否则从子目录起搜时，`.env` 这类规则会被当成普通文件名。
+    """
     needle = query.lower()
     hits: list[str] = []
     for current, dirs, files in os.walk(root):
@@ -138,11 +150,11 @@ def _scan(
             for name in dirs
             if name not in SKIP_DIR_NAMES
             and _relative(Path(current) / name, root).casefold() not in SKIP_RELATIVE
-            and not is_sensitive(Path(current) / name)
+            and not is_sensitive(Path(current) / name, root=base)
         ]
         for name in files:
             path = Path(current) / name
-            if is_sensitive(path):
+            if is_sensitive(path, root=base):
                 continue
             if pattern and not fnmatch.fnmatch(name, pattern):
                 continue

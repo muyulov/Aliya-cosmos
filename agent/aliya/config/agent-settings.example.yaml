@@ -25,7 +25,7 @@ agent:
     # ---------- 记忆 ----------
     memory:
       enabled: true
-      dir: agent/aliya/data # 不与 cosmos 的 data/state 混用
+      dir: data/Aliya # 不与 cosmos 的 data/state、data/memory 混用
       max_turns: 200
       summary_chars: 600
       open_topics_limit: 5

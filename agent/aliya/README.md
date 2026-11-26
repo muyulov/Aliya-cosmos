@@ -224,13 +224,15 @@ flowchart TD
 | 通信 | `send_message` | 用户唯一能看见她的途径 |
 | 调度 | `see_desktop` / `dispatch_task` / `task_status` / `cancel_task` / `retry_task` | 看平板、派活、查进度、改主意 |
 | 情境 | `refresh_world` / `current_time` | 重新感知世界；读控制面校准过的时间 |
-| 文件 | `read_file` | 只读，路径限定仓库内，敏感路径拒绝 |
+| 文件 | `read_file` | 只读，限定在 `data/Aliya/workspace`，敏感路径拒绝 |
 | 计算 | `calculate` | AST 白名单求值，不用 `eval` |
 | 记忆 | `remember` / `check_memory` / `resolve_topic` | 长期记忆的写、读、收尾 |
 | 时间 | `plan_followup` / `cancel_followup` / `defer_proactive` | 未来跟进与主动开口延后 |
 
 本地工具的运行时能力统一由 `RuntimePort` 提供（`send` / `describe_desktop` / `dispatch` / `now` 等），
 工具函数用闭包绑定 runtime，避免 `self` 被当成工具参数。
+文件与命令类工具（`read_file` 与子 agent 的 `edit` / `search` / `run`）的根都是
+`data/Aliya/workspace`，她要动的东西不会落到项目源码上。
 
 外部工具在 `AliyaRuntime.start()` 装配：
 
@@ -300,7 +302,7 @@ agent:
       interjections: [啊, 害, 嗯]  # 可用但不堆叠
     memory:
       enabled: true
-      dir: agent/aliya/data
+      dir: data/Aliya
       max_turns: 200
       summary_chars: 600
       anchors: [风信子, 拉姆石, 高马尾, 兔子狗] # 关系暗号，摘要时必须保留

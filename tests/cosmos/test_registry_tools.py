@@ -15,6 +15,7 @@ import pytest
 
 from agent.cosmos.contracts import AgentContext, AgentRequest, Artifact
 from agent.cosmos.registry import edit, run, search, web
+from core.agent import workspace as workspace_module
 
 
 class FakeContext:
@@ -65,8 +66,10 @@ def ctx() -> AgentContext:
 
 
 @pytest.fixture(autouse=True)
-def _cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """cwd 与 Aliya 工作区都指向 tmp_path：run 用 cwd，文件工具用工作区。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(workspace_module, "ALIYA_WORKSPACE", tmp_path)
 
 
 # ---------- 编辑台 ----------
@@ -207,6 +210,19 @@ async def test_run_executes_allowed_command() -> None:
     assert result.status == "ok"
     assert result.content is not None
     assert "退出码：0" in result.content
+
+
+async def test_run_defaults_to_aliya_workspace() -> None:
+    result = await run.handle(make_request("run", command="pwd"), ctx())
+    assert result.content is not None
+    assert workspace_module.aliya_workspace_root().as_posix() in result.content
+
+
+async def test_run_rejects_cwd_outside_workspace() -> None:
+    result = await run.handle(make_request("run", command="pwd", cwd="../"), ctx())
+    assert result.status == "failed"
+    assert result.error is not None
+    assert "超出工作区" in result.error.message
 
 
 async def test_run_rejects_unlisted_command() -> None:

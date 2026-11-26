@@ -136,10 +136,11 @@ agent:
         card:
           name: 编辑台          # 展示名用她的语言；工程名只留在 id 与文档正文里
           icon: "✏️"
-          summary: 改写仓库内的文件
+          summary: 改写工作区里的文件
           description: >-
-            在仓库根目录内修改文本文件：write 整文件覆盖、append 追加、replace 精确替换。
-            不做目录外操作，不执行命令，不提交 git。
+            在 Aliya 的工作区（data/Aliya/workspace）内修改文本文件：
+            write 整文件覆盖、append 追加、replace 精确替换。
+            不做工作区外操作，不执行命令，不提交 git。
           capabilities: [file_write, file_edit, code_edit]
           params_schema:
             type: object
@@ -152,7 +153,7 @@ agent:
               count: {type: integer, minimum: 1}
             required: [action, path]
           examples:
-            - input: "把 core/logger/base.py 里的 log 改成 logger"
+            - input: "新建 notes/todo.md，写上三条待办"
           desktop: {group: dev, order: 10}
           execution: {timeout_seconds: 60, max_concurrent: 1, queue: true, retryable: true}
           permissions: {read_presence: false, notify_user: false}
@@ -168,8 +169,8 @@ registry.register(
         id="edit",
         name="编辑台",
         icon="✏️",
-        summary="改写仓库内的文件",
-        description="在仓库根目录内修改文本文件：write / append / replace，不做目录外操作。",
+        summary="改写工作区里的文件",
+        description="在 Aliya 的工作区（data/Aliya/workspace）内修改文本文件，不做工作区外操作。",
         capabilities=["file_write", "file_edit"],
         params_schema={
             "type": "object",

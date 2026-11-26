@@ -15,7 +15,12 @@ from typing import Protocol
 
 from agent.aliya.memory import MemoryKind, MemoryScope
 from core.agent import ToolRegistry, tool
-from core.agent.workspace import WorkspacePathError, read_text, resolve_in_workspace
+from core.agent.workspace import (
+    WorkspacePathError,
+    aliya_workspace_root,
+    read_text,
+    resolve_in_workspace,
+)
 
 #: 一次最多回读的行数与单行长度，避免把整份文件塞进上下文
 MAX_READ_LINES = 200
@@ -171,13 +176,13 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
 
     @tool
     async def read_file(path: str, start_line: int = 1, max_lines: int = 80) -> str:
-        """读仓库里某个文件的一小段，带行号。
+        """读你工作区里某个文件的一小段，带行号。
 
-        想确认文件里到底写了什么时用；只能读仓库内的文本文件，敏感路径会被拒绝。
+        想确认文件里到底写了什么时用；只能读 data/Aliya/workspace 内的文本文件，敏感路径会被拒绝。
         返回带行号的片段与总行数；读不到时返回原因。
         """
         try:
-            target = resolve_in_workspace(path)
+            target = resolve_in_workspace(path, root=aliya_workspace_root())
         except WorkspacePathError as exc:
             return str(exc)
         if not target.is_file():

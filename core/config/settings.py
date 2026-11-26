@@ -580,7 +580,7 @@ class AgentAliyaPersonaSettings(_AgentConfigNode):
 
 class AgentAliyaMemorySettings(_AgentConfigNode):
     enabled: bool = True
-    dir: str = "agent/aliya/data"
+    dir: str = "data/Aliya"
     max_turns: int = Field(default=200, ge=1)
     summary_chars: int = Field(default=600, ge=100)
     open_topics_limit: int = Field(default=5, ge=1)

@@ -81,8 +81,8 @@ type AgentStatus = Literal["idle", "queued", "running", "stalled", "abnormal", "
 
 ```text
 ✏️  编辑台  ·  ● 忙
-改写仓库内的文件
-正在改写 logger，进度 60%
+改写工作区里的文件
+正在改写 notes/todo.md，进度 60%
 已用 1 分 12 秒 · 队列 1
 ```
 
@@ -197,7 +197,7 @@ type ReadableTone = Literal["calm", "busy", "strained", "alarming", "muted"]
 
 ```json
 {
-  "card": {"id": "edit", "name": "编辑台", "icon": "✏️", "summary": "改写仓库内的文件"},
+  "card": {"id": "edit", "name": "编辑台", "icon": "✏️", "summary": "改写工作区里的文件"},
   "status": "running",
   "task": {
     "task_id": "tsk_01H...",

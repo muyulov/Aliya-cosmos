@@ -255,7 +255,7 @@ AgentResult.cancelled(summary="用户取消了任务")
 | 访问 `agent/cosmos` 的内部状态 | 只依赖 `contracts` 与 `AgentContext` |
 | 把敏感内容写日志 | 文件内容、用户数据、密钥一律不进日志 |
 
-文件系统、网络、命令执行的权限由子 agent 自身实现决定（例如 Edit agent 限定在仓库根目录内），cosmos 不做路径级沙箱——它看不到 `params` 的语义，也负不了这个责。**权限边界必须在子 agent 内部实现，并在 `description` 里写清楚。**
+文件系统、网络、命令执行的权限由子 agent 自身实现决定（例如编辑台与检索台限定在 `data/Aliya/workspace` 内），cosmos 不做路径级沙箱——它看不到 `params` 的语义，也负不了这个责。**权限边界必须在子 agent 内部实现，并在 `description` 里写清楚。**
 
 ---
 
@@ -408,14 +408,16 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
 
 | id | 展示名 | 模块 | 职责 | 关键边界 |
 | --- | --- | --- | --- | --- |
-| `edit` | 编辑台 | `registry/edit.py` | `write` / `append` / `replace` 改文件 | 路径限定仓库内；拒绝 `.git`、`.env`、`data/state`、`logs`、`data/mcp.json`；单次写入 ≤ 200k 字、目标文件 ≤ 2MB；临时文件 + `os.replace` 原子写 |
-| `search` | 检索台 | `registry/search.py` | 按文件名或正文检索 | 只读；跳过依赖、缓存、版本库与敏感目录；跳过二进制与大文件 |
-| `run` | 运行台 | `registry/run.py` | 执行 pytest / ruff check / python -m / uv run / git 只读查询 | 无 shell；命令名不能带路径；参数不能指向工作区外；不接受 `--fix`、`format` 与任意脚本；超时/取消 kill 整个进程组 |
+| `edit` | 编辑台 | `registry/edit.py` | `write` / `append` / `replace` 改文件 | 路径限定 `data/Aliya/workspace`；拒绝 `.git`、`.env`、`data/state`、`logs`、`data/mcp.json`；单次写入 ≤ 200k 字、目标文件 ≤ 2MB；临时文件 + `os.replace` 原子写 |
+| `search` | 检索台 | `registry/search.py` | 按文件名或正文检索 | 只读，限定 `data/Aliya/workspace`；跳过依赖、缓存、版本库与敏感目录；跳过二进制与大文件 |
+| `run` | 运行台 | `registry/run.py` | 执行 pytest / ruff check / python -m / uv run / git 只读查询 | cwd 限定 `data/Aliya/workspace`；无 shell；命令名不能带路径；参数不能指向工作区外；不接受 `--fix`、`format` 与任意脚本；超时/取消 kill 整个进程组 |
 | `web` | 联网台 | `registry/web.py` | 抓取公开网页转纯文本 | 仅 http/https；DNS 解析后必须是公网地址；拒绝本机与内网 |
 | `echo` | 回声台 | `registry/echo.py` | 原样返回指令 | 联调用，不做任何文件与网络操作 |
 
 四个业务工具的安全边界都在各自 handler 内实现（见第 7 节：cosmos 不做路径级沙箱），
 并统一复用 `core/agent/workspace.py` 的路径解析与敏感路径判断。
+`edit` / `search` / `run` 的根都是 Aliya 的工作区 `data/Aliya/workspace`，不是仓库根：
+她要动的文件、要跑的命令都留在自己的工作区里，避免误改项目源码。
 
 ### 11.1 最小示例：echo
 

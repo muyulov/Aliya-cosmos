@@ -27,7 +27,11 @@ from agent.cosmos.contracts import (
     DesktopMeta,
     ExecutionPolicy,
 )
-from core.agent.workspace import WorkspacePathError, resolve_in_workspace
+from core.agent.workspace import (
+    WorkspacePathError,
+    aliya_workspace_root,
+    resolve_in_workspace,
+)
 
 #: 允许执行的可执行文件名
 ALLOWED_COMMANDS: frozenset[str] = frozenset(
@@ -99,11 +103,11 @@ CARD = AgentCard(
     id="run",
     name="运行台",
     icon="⚙️",
-    summary="跑测试与只读命令",
+    summary="在工作区里跑测试与命令",
     description=(
-        "在仓库内执行白名单命令并返回输出："
+        "在 Aliya 的工作区（data/Aliya/workspace）内执行白名单命令并返回输出："
         "pytest、ruff check、python -m 测试模块、uv run 与 git 只读查询。"
-        "不接受安装、发布、推送、删除类操作；参数不能指向工作区外，超时会终止整个进程组。"
+        "不接受安装、发布、推送、删除类操作；参数与 cwd 都不能指向工作区外，超时会终止整个进程组。"
         "不提供文件查看（用检索台或 read_file），也不执行任意脚本。"
     ),
     capabilities=["run_tests", "run_command", "lint"],
@@ -111,14 +115,14 @@ CARD = AgentCard(
         "type": "object",
         "properties": {
             "command": {"type": "string", "description": "要执行的命令，含参数"},
-            "cwd": {"type": "string", "description": "相对仓库根的工作目录，默认仓库根"},
+            "cwd": {"type": "string", "description": "相对工作区的目录，默认工作区根"},
             "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
         },
         "required": ["command"],
     },
     examples=[
-        AgentExample(input="跑一下 tests/aliya 的测试"),
-        AgentExample(input="对改过的文件跑 ruff 检查"),
+        AgentExample(input="跑一下工作区里的测试"),
+        AgentExample(input="对工作区里的文件跑 ruff 检查"),
     ],
     desktop=DesktopMeta(group="dev", order=30),
     execution=ExecutionPolicy(
@@ -145,7 +149,7 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
         return _failed(request, problem, "运行台只做测试、检查与只读查询")
 
     try:
-        cwd = resolve_in_workspace(raw_cwd)
+        cwd = resolve_in_workspace(raw_cwd, root=aliya_workspace_root())
     except WorkspacePathError as exc:
         return _failed(request, str(exc), "只能在工作区里运行")
     if not cwd.is_dir():

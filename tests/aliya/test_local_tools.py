@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 
 from agent.aliya.turn.tools import RuntimePort, build_tools
+from core.agent import workspace as workspace_module
 from core.llm import ToolCall
 
 
@@ -32,8 +33,9 @@ async def call(runtime: FakeRuntime, name: str, arguments: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(workspace_module, "ALIYA_WORKSPACE", tmp_path)
 
 
 async def test_current_time_uses_runtime_clock() -> None:

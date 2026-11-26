@@ -192,10 +192,11 @@ agent:
         card:
           name: 编辑台 # 展示名用 Aliya 的语言，工程名只留在 id 与文档正文里
           icon: "✏️"
-          summary: 改写仓库内的文件
+          summary: 改写工作区里的文件
           description: >-
-            在仓库根目录内修改文本文件：write 整文件覆盖、append 追加、replace 精确替换。
-            不做目录外操作，不执行命令，不提交 git；replace 找不到原文时不写入任何内容。
+            在 Aliya 的工作区（data/Aliya/workspace）内修改文本文件：
+            write 整文件覆盖、append 追加、replace 精确替换。
+            不做工作区外操作，不执行命令，不提交 git；replace 找不到原文时不写入任何内容。
           capabilities: [file_write, file_edit, code_edit]
           params_schema:
             type: object
@@ -205,7 +206,7 @@ agent:
                 enum: [write, append, replace]
               path:
                 type: string
-                description: 相对仓库根的路径
+                description: 相对工作区的路径
               content:
                 type: string
                 description: write/append 要写入的正文
@@ -220,8 +221,8 @@ agent:
                 minimum: 1
             required: [action, path]
           examples:
-            - input: 把 core/logger/base.py 里的 log 改成 logger
             - input: 新建一个 notes/todo.md，写上三条待办
+            - input: 把笔记里那句过时的话改掉
           desktop: {group: dev, order: 10, pinned: false, visible: true}
           execution:
             timeout_seconds: 60

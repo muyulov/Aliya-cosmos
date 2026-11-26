@@ -1,7 +1,7 @@
 """编辑台：在工作区内新建、追加、精确替换文本文件。
 
 安全边界在本模块内实现（08 章 7 节）：
-- 路径限制在仓库根目录内，`..` 与软链接逃逸都会被拒绝；
+- 路径限制在 Aliya 工作区（`data/Aliya/workspace`）内，`..` 与软链接逃逸都会被拒绝；
 - 敏感路径（`.git`、`.env`、`data/state` 等）不读写；
 - 单次写入上限，超限返回 `invalid_params` 而不是截断后落盘。
 """
@@ -24,7 +24,12 @@ from agent.cosmos.contracts import (
     DesktopMeta,
     ExecutionPolicy,
 )
-from core.agent.workspace import WorkspacePathError, is_sensitive, resolve_in_workspace
+from core.agent.workspace import (
+    WorkspacePathError,
+    aliya_workspace_root,
+    is_sensitive,
+    resolve_in_workspace,
+)
 
 #: 单次写入上限（字符）；再大应改用检索台分批处理
 MAX_WRITE_CHARS = 200_000
@@ -35,10 +40,11 @@ CARD = AgentCard(
     id="edit",
     name="编辑台",
     icon="✏️",
-    summary="改写仓库内的文件",
+    summary="改写工作区里的文件",
     description=(
-        "在仓库根目录内修改文本文件：write 整文件覆盖、append 追加、replace 精确替换。"
-        "不做目录外操作，不执行命令，不提交 git；replace 找不到原文时不写入任何内容。"
+        "在 Aliya 的工作区（data/Aliya/workspace）内修改文本文件："
+        "write 整文件覆盖、append 追加、replace 精确替换。"
+        "不做工作区外操作，不执行命令，不提交 git；replace 找不到原文时不写入任何内容。"
     ),
     capabilities=["file_write", "file_edit", "code_edit"],
     params_schema={
@@ -49,7 +55,7 @@ CARD = AgentCard(
                 "enum": ["write", "append", "replace"],
                 "description": "write 覆盖、append 追加、replace 精确替换",
             },
-            "path": {"type": "string", "description": "相对仓库根的路径"},
+            "path": {"type": "string", "description": "相对工作区的路径"},
             "content": {"type": "string", "description": "write/append 要写入的正文"},
             "old": {"type": "string", "description": "replace 要被替换的原文"},
             "new": {"type": "string", "description": "replace 替换后的文本，缺省为空串"},
@@ -58,8 +64,8 @@ CARD = AgentCard(
         "required": ["action", "path"],
     },
     examples=[
-        AgentExample(input="把 README 里那句过时的话改掉"),
         AgentExample(input="新建一个 notes/todo.md，写上三条待办"),
+        AgentExample(input="把笔记里那句过时的话改掉"),
     ],
     desktop=DesktopMeta(group="dev", order=10),
     execution=ExecutionPolicy(
@@ -103,10 +109,11 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
             "内容太长，先拆成几段再写",
         )
 
+    root = aliya_workspace_root()
     try:
-        target = resolve_in_workspace(raw_path)
+        target = resolve_in_workspace(raw_path, root=root)
     except WorkspacePathError as exc:
-        return _failed(request, str(exc), "只能改仓库里的文件")
+        return _failed(request, str(exc), "只能改你工作区里的文件")
 
     if ctx.cancelled:
         return AgentResult.cancelled(request_id=request.request_id)
@@ -114,7 +121,7 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
 
     try:
         summary, detail = await asyncio.to_thread(
-            _apply, action, target, text_content, text_old, text_new, count
+            _apply, action, target, text_content, text_old, text_new, count, root
         )
     except FileNotFoundError as exc:
         return _failed(request, str(exc), "文件可能被移动或删除了", code="not_found")
@@ -134,7 +141,7 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
     await ctx.report(progress=90, step="登记结果")
     artifact = Artifact(
         kind="file",
-        name=_display(target),
+        name=_display(target, root),
         uri=target.as_uri(),
         size=target.stat().st_size if target.exists() else None,
     )
@@ -162,11 +169,12 @@ def _apply(
     old: str,
     new: str,
     count: int,
+    root: Path,
 ) -> tuple[str, str]:
     """真正落盘的同步部分，由 `asyncio.to_thread` 调用。"""
-    if is_sensitive(target):
+    if is_sensitive(target, root=root):
         raise OSError("这个路径不允许访问")
-    shown = _display(target)
+    shown = _display(target, root)
 
     if action == "write":
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -221,10 +229,10 @@ def _atomic_write(target: Path, text: str) -> None:
         raise
 
 
-def _display(target: Path) -> str:
-    """展示与产物名用相对路径，避免把主机绝对路径回给模型。"""
+def _display(target: Path, root: Path) -> str:
+    """展示与产物名用相对工作区的路径，避免把主机绝对路径回给模型。"""
     try:
-        return target.relative_to(Path.cwd().resolve()).as_posix()
+        return target.relative_to(root).as_posix()
     except ValueError:
         return target.name
 

@@ -1,18 +1,24 @@
-"""工作区沙箱：把文件访问限制在仓库根目录内，并挡住敏感路径。
+"""工作区沙箱：把文件访问限制在指定根目录内，并挡住敏感路径。
 
 约定：
-- 根目录在调用时取 `Path.cwd()`，不做模块级常量：测试与部署可能切换工作目录。
+- 两个根：`workspace_root()` 是进程工作目录（命令执行等场景），
+  `aliya_workspace_root()` 是 Aliya 文件工具的工作区（`data/Aliya/workspace`）。
+- 根目录在调用时计算，不做模块级常量：测试与部署可能切换工作目录或覆盖路径。
 - 只负责「路径能不能碰」，不负责业务语义；读取上限、编码错误由调用方处理。
 - 敏感路径按相对根的路径段判断，不跟随软链接逃逸（`resolve()` 之后比较）。
 """
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
+
+#: Aliya 文件工具的工作区，相对进程工作目录；测试可 monkeypatch 覆盖
+ALIYA_WORKSPACE = Path("data/Aliya/workspace")
 
 #: 整段禁区：目录名或目录相对路径命中即拒绝
 SENSITIVE_DIRS: frozenset[str] = frozenset(
-    {".git", ".env", "data/state", "data/memory", "agent/aliya/data", "logs"}
+    {".git", ".env", "data/state", "data/memory", "data/Aliya", "agent/aliya/data", "logs"}
 )
 #: 具体文件命中即拒绝（可含相对路径）
 SENSITIVE_FILES: frozenset[str] = frozenset({"data/mcp.json", ".git-credentials"})
@@ -32,8 +38,19 @@ class WorkspacePathError(ValueError):
 
 
 def workspace_root() -> Path:
-    """当前工作目录的绝对路径，也是所有相对路径的基准。"""
+    """当前工作目录的绝对路径，供命令执行类工具使用。"""
     return Path.cwd().resolve()
+
+
+def aliya_workspace_root() -> Path:
+    """Aliya 文件工具的根：`data/Aliya/workspace`。
+
+    首次调用时顺手建目录；建不了也不在这里报错，后续读写会给出更具体的错误。
+    """
+    root = (Path.cwd() / ALIYA_WORKSPACE).resolve()
+    with contextlib.suppress(OSError):
+        root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def resolve_in_workspace(raw: str, *, root: Path | None = None) -> Path:

@@ -7,10 +7,13 @@ description: 把查文件、改文件、跑测试、读网页交给平板上对�
 
 先看一遍平板上有什么（`see_desktop`），再决定用哪个；参数写清楚比写得短重要。
 
+文件类工具（检索台、编辑台）只看得到你的工作区 `data/Aliya/workspace`，
+路径都写相对它的路径（如 `notes/todo.md`）；工作区外的东西碰不到。
+
 ## 找东西
 
-- 找文件名：`dispatch_task(agent_id="search", params={query: "test_", mode: "files"})`
-- 找正文：`dispatch_task(agent_id="search", params={query: "TurnRunner", mode: "content", glob: "*.py"})`
+- 找文件名：`dispatch_task(agent_id="search", params={query: "notes", mode: "files"})`
+- 找正文：`dispatch_task(agent_id="search", params={query: "TODO", mode: "content"})`
 - 结果里是 `路径:行号: 内容`，要读上下文再用 `read_file` 取那一段。
 
 ## 改东西
@@ -23,8 +26,15 @@ description: 把查文件、改文件、跑测试、读网页交给平板上对�
 
 ## 跑命令
 
-- 只用于测试、检查、查看：`pytest tests/aliya`、`ruff check core`、`git status`、`cat pyproject.toml`。
-- 运行台不接受安装、发布、推送、删除；遇到这类需求直接告诉对方做不了。
+运行台在你的工作区 `data/Aliya/workspace` 里执行命令，只能看到工作区里的文件：
+
+- 测试：`pytest`、`pytest tests/`
+- 检查：`ruff check .`
+- 模块：`python -m pytest`、`uv run pytest`
+- 查询：`git status`、`git log --oneline -5`、`git diff`
+
+运行台不接受安装、发布、推送、删除、改文件（`--fix`、`ruff format`）与任意脚本；
+命令名和参数都不能带工作区外的路径；遇到这类需求直接告诉对方做不了。
 
 ## 读网页
 

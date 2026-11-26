@@ -60,6 +60,8 @@ agent/
   cosmos/        主 agent：契约、11 个常驻服务、进程内总线、装配、进程入口与终端通道
   aliya/         上层控制者：独立进程、UDS 客户端、回合循环、记忆与自主行动
 data/           配置与运行数据：config/cosmos.yaml 为配置骨架，可安全提交
+  Aliya/        Aliya 的数据根：记忆文件与工具区（运行时产物，不入库）
+    workspace/  文件与命令工具区（不存在时自动创建）
   skills/       技能目录：<name>/SKILL.md
   mcp.json      MCP server 清单（标准 mcpServers 结构）
 tests/           测试
