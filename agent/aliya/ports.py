@@ -100,7 +100,7 @@ class InProcessControl:
     """测试与同进程演练用：直接转给 ControlService。"""
 
     def __init__(self, control: ControlService) -> None:
-        self._control = control
+        self._control: ControlService = control
 
     async def handshake(self) -> CosmosCapabilities:
         return await self._control.handshake()
@@ -113,6 +113,7 @@ class InProcessControl:
 
     async def ack_inbound(self, message_id: str) -> None:
         """同进程没有待确认队列，确认是空操作。"""
+        _ = message_id
 
     def subscribe(
         self,
