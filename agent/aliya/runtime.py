@@ -13,7 +13,7 @@ from uuid import uuid4
 from openai.types.chat import ChatCompletionMessageParam
 
 from agent.aliya.initiative import Initiative, PreferenceGate, TimeSignals
-from agent.aliya.memory.store import MemoryStore
+from agent.aliya.memory import MemoryKind, MemoryStore
 from agent.aliya.ports import ControlPort
 from agent.aliya.prompt.builder import PromptBuilder
 from agent.aliya.prompt.loader import load_charter, load_persona
@@ -40,6 +40,10 @@ from core.logger import log
 type Phase = Literal["daily", "maintenance", "crisis", "rest"]
 
 _REPORT_TOPICS = {"agent.result", "dispatch.finished", "agent.abnormal"}
+#: see_desktop 一次最多列出的工具数；超出的只报数量，避免刷爆上下文。
+_DESKTOP_LIMIT = 12
+#: task_status 的查询窗口；指定 id 查不到时据此提示「可能不在最近 N 条」。
+_TASK_QUERY_LIMIT = 20
 _EVENT_TOPICS = [
     "agent.progress",
     "agent.result",
@@ -356,12 +360,16 @@ class AliyaRuntime:
     async def describe_desktop(self) -> str:
         snapshot = await self._control.describe_desktop()
         lines = [snapshot.summary]
-        for entry in snapshot.entries[:12]:
+        # 带上 id：dispatch_task 的 agent_id 只能从这里获得，缺了模型就没法精确指定工具。
+        for entry in snapshot.entries[:_DESKTOP_LIMIT]:
             capabilities = "、".join(entry.card.capabilities[:3])
-            line = f"{entry.card.name}（{entry.status}）：{entry.readable.summary}"
+            line = f"{entry.card.id}｜{entry.card.name}（{entry.status}）：{entry.readable.summary}"
             if capabilities:
                 line += f"；能做：{capabilities}"
             lines.append(line)
+        hidden = len(snapshot.entries) - _DESKTOP_LIMIT
+        if hidden > 0:
+            lines.append(f"（还有 {hidden} 个工具未列出）")
         return "\n".join(lines)
 
     async def dispatch(
@@ -395,30 +403,38 @@ class AliyaRuntime:
         handle = await self._control.execute_plan(plan)
         if not handle.task_ids:
             return "没派成"
+        # 任务 id 必须回给模型，否则后续 task_status / cancel_task / retry_task 无从指定。
+        done = "、".join(
+            f"{task.label}（{task_id}）"
+            for task, task_id in zip(plan.tasks, handle.task_ids, strict=False)
+        ) or "、".join(handle.task_ids)
         if handle.status == "partial" and handle.rejected:
             reasons = "；".join(item.reason for item in handle.rejected[:3])
-            return f"已经派人去做了：{plan.tasks[0].label}（有些没派成：{reasons}）"
-        return f"已经派人去做了：{plan.tasks[0].label}"
+            return f"已经派人去做了：{done}（有些没派成：{reasons}）"
+        return f"已经派人去做了：{done}"
 
     async def task_status(self, task_id: str | None = None) -> str:
-        tasks = await self._control.list_tasks(None, 20)
+        tasks = await self._control.list_tasks(None, _TASK_QUERY_LIMIT)
         if task_id is not None:
-            tasks = [task for task in tasks if task.task_id == task_id]
+            matched = [task for task in tasks if task.task_id == task_id]
+            if not matched:
+                return f"没找到任务 {task_id}，可能已经结束，或者不在最近 {_TASK_QUERY_LIMIT} 条里"
+            tasks = matched
         if not tasks:
             return "现在没有在做的任务"
         lines: list[str] = []
         for task in tasks[:5]:
             progress = f"（{int(task.progress * 100)}%）" if task.progress is not None else ""
-            lines.append(f"{task.label}：{task.status}{progress}")
+            lines.append(f"{task.task_id}｜{task.label}：{task.status}{progress}")
         return "\n".join(lines)
 
     async def cancel(self, task_id: str) -> str:
         await self._control.cancel_task(task_id)
-        return "已取消"
+        return f"已取消任务 {task_id}"
 
     async def retry(self, task_id: str) -> str:
-        _ = await self._control.retry_task(task_id)
-        return "已重试"
+        handle = await self._control.retry_task(task_id)
+        return f"已重试，新任务 {handle.task_id}：{handle.label}"
 
     async def refresh_world(self) -> str:
         view = await self._control.refresh_world()
@@ -427,7 +443,7 @@ class AliyaRuntime:
         _ = self._accept_world(view)
         return self._world_text() or view.snapshot
 
-    async def remember(self, note: str, kind: str) -> str:
+    async def remember(self, note: str, kind: MemoryKind) -> str:
         if not self._config.memory.enabled:
             return "这件事先不记"
         return "记住了" if self._memory.remember(note, kind) else "这件事先不记"

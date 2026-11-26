@@ -1,26 +1,48 @@
+"""Aliya 运行时测试。
+
+测试桩刻意只实现被测路径需要的控制面能力：签名与协议一致，未被调用的方法
+保持 NotImplementedError 或空返回。私有成员访问与忽略返回值是测试的既定用法。
+"""
+
+# pyright: reportPrivateUsage=false, reportUnusedParameter=false, reportUnusedCallResult=false
+
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast, override
 
 import pytest
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 
 from agent.aliya.memory.store import MemoryStore
 from agent.aliya.runtime import AliyaRuntime, event_brief
 from agent.aliya.turn.context import TurnContext
 from agent.cosmos.contracts import (
+    AgentCard,
+    AgentDetail,
     AgentProgress,
     AgentRuntimeState,
     AliyaContext,
     ConversationContext,
     CosmosCapabilities,
     CosmosEvent,
+    DesktopEntry,
+    DesktopLayoutPatch,
     DesktopSnapshot,
+    DispatchHandle,
+    DispatchIntent,
     DispatchPlan,
+    Hypothesis,
     InboundEnvelope,
+    LinkState,
+    PresenceField,
     PresenceSnapshot,
     ProactiveReceipt,
     ReadablePresence,
+    ReadableState,
+    TaskBrief,
+    TaskHandle,
     TerminalMessage,
     WorldInference,
 )
@@ -31,11 +53,14 @@ from core.config.settings import (
     AgentAliyaReplySettings,
     AgentAliyaSettings,
     AgentAliyaToolsSettings,
+    LLMSettings,
 )
-from core.llm import AssistantReply
+from core.llm import AssistantReply, LLMService
 
 
 class FakeControl:
+    """ControlPort 的测试桩：只实现被测路径，其余方法保持未实现。"""
+
     def __init__(self) -> None:
         self.inbound_queue: asyncio.Queue[InboundEnvelope] = asyncio.Queue()
         self.event_queue: asyncio.Queue[CosmosEvent] = asyncio.Queue()
@@ -45,25 +70,39 @@ class FakeControl:
         self.acked: list[str] = []
         self.contexts: list[AliyaContext] = []
         self.since: int | None = None
-        self.cursors: dict[str, int] | None = None
-        self.intents: list[object] = []
+        self.cursors: Mapping[str, int] | None = None
+        self.intents: list[DispatchIntent] = []
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)
 
     async def handshake(self) -> CosmosCapabilities:
         return CosmosCapabilities(api_version="1.0", contract_version="1.0.0")
 
-    async def inbound(self) -> AsyncIterator[InboundEnvelope]:
+    def inbound(self) -> AsyncIterator[InboundEnvelope]:
+        return self._inbound()
+
+    async def _inbound(self) -> AsyncIterator[InboundEnvelope]:
         while True:
             yield await self.inbound_queue.get()
 
     async def ack_inbound(self, message_id: str) -> None:
         self.acked.append(message_id)
 
-    async def subscribe(
+    def subscribe(
         self,
-        topics: list[str],
+        topics: Sequence[str],
         *,
         since_sequence: int | None = None,
-        cursors: dict[str, int] | None = None,
+        cursors: Mapping[str, int] | None = None,
+    ) -> AsyncIterator[CosmosEvent]:
+        return self._subscribe(since_sequence=since_sequence, cursors=cursors)
+
+    async def _subscribe(
+        self,
+        *,
+        since_sequence: int | None = None,
+        cursors: Mapping[str, int] | None = None,
     ) -> AsyncIterator[CosmosEvent]:
         self.since = since_sequence
         self.cursors = cursors
@@ -81,26 +120,67 @@ class FakeControl:
         self.proactive.append(text)
         return ProactiveReceipt(accepted=True, reason="ok")
 
+    async def history(self, session_id: str, limit: int = 20) -> list[TerminalMessage]:
+        return []
+
     async def set_aliya_context(self, ctx: AliyaContext) -> None:
         self.contexts.append(ctx)
 
     async def describe_desktop(self) -> DesktopSnapshot:
         return DesktopSnapshot(generated_at=datetime.now(UTC), summary="桌面")
 
-    async def plan(self, intent: object) -> DispatchPlan:
+    async def get_agent(self, agent_id: str) -> AgentDetail:
+        raise NotImplementedError
+
+    async def open_agent(self, agent_id: str) -> AgentDetail:
+        raise NotImplementedError
+
+    async def patch_layout(self, patch: DesktopLayoutPatch) -> DesktopSnapshot:
+        raise NotImplementedError
+
+    async def plan(self, intent: DispatchIntent) -> DispatchPlan:
         self.intents.append(intent)
         return DispatchPlan(decision="reply_only", rationale="ok")
 
-    async def list_tasks(self, agent_id: str | None = None, limit: int = 20) -> list:
-        return []
+    async def invoke_agent(
+        self, agent_id: str, params: dict[str, object], *, session_id: str
+    ) -> TaskHandle:
+        raise NotImplementedError
+
+    async def execute_plan(self, plan: DispatchPlan) -> DispatchHandle:
+        raise NotImplementedError
 
     async def cancel_task(self, task_id: str) -> None:
         return None
 
-    async def retry_task(self, task_id: str) -> None:
+    async def cancel_dispatch(self, dispatch_id: str) -> None:
         return None
 
-    async def refresh_world(self) -> None:
+    async def retry_task(self, task_id: str) -> TaskHandle:
+        raise NotImplementedError
+
+    async def list_tasks(self, agent_id: str | None = None, limit: int = 20) -> list[TaskBrief]:
+        return []
+
+    def get_presence(self) -> PresenceSnapshot:
+        return PresenceSnapshot(
+            captured_at=datetime.now(UTC),
+            readable=ReadablePresence(summary="在电脑前"),
+        )
+
+    async def fetch_presence(self) -> PresenceSnapshot:
+        return self.get_presence()
+
+    async def set_presence_visibility(self, fields: Sequence[PresenceField]) -> None:
+        return None
+
+    async def get_link_state(self) -> LinkState:
+        return "up"
+
+    async def get_world_view(self, force: bool = False) -> WorldInference | None:
+        return None
+
+    async def refresh_world(self) -> WorldInference | None:
         return None
 
 
@@ -109,55 +189,82 @@ class StatefulControl(FakeControl):
 
     def __init__(self) -> None:
         super().__init__()
-        self.desktop = DesktopSnapshot(
+        self.desktop: DesktopSnapshot = DesktopSnapshot(
             generated_at=datetime.now(UTC),
             summary="桌面上有两张卡",
         )
-        self.world = WorldInference(
+        self.world: WorldInference = WorldInference(
             inference_id="i1",
             generated_at=datetime.now(UTC),
             snapshot="夜里很安静",
-            hypotheses=[
-                {"statement": "她可能失眠", "confidence": 0.8, "basis": "时间"}
-            ],
+            hypotheses=[Hypothesis(statement="她可能失眠", confidence=0.8, basis="时间")],
         )
 
+    @override
     async def describe_desktop(self) -> DesktopSnapshot:
         return self.desktop
 
+    @override
     async def get_world_view(self, force: bool = False) -> WorldInference | None:
         return self.world
 
-    async def get_link_state(self) -> str:
+    @override
+    async def get_link_state(self) -> LinkState:
         return "up"
 
-    def get_presence(self) -> PresenceSnapshot:
-        return PresenceSnapshot(
-            captured_at=datetime.now(UTC),
-            readable=ReadablePresence(summary="在电脑前"),
-        )
 
+class FakeLLM(LLMService):
+    """LLMService 的测试桩：只覆写回合用到的两个入口，不建客户端。"""
 
-class FakeLLM:
     def __init__(
         self,
         content: str = "在。",
         delay: float = 0.0,
         chat_reply: str = "滚动摘要",
     ) -> None:
-        self.content = content
-        self.delay = delay
-        self.chat_reply = chat_reply
-        self.messages: object = None
-        self.chat_calls: list[object] = []
+        super().__init__(LLMSettings())
+        self.content: str = content
+        self.delay: float = delay
+        self.chat_reply: str = chat_reply
+        self.messages: list[ChatCompletionMessageParam] = []
+        self.chat_calls: list[Sequence[ChatCompletionMessageParam]] = []
 
-    async def chat_tools(self, messages: object, tools: object) -> AssistantReply:
-        self.messages = messages
+    @property
+    def system_text(self) -> str:
+        """首条消息的正文，供断言系统提示用。"""
+        if not self.messages:
+            return ""
+        content = cast("dict[str, object]", cast("object", self.messages[0])).get("content")
+        return content if isinstance(content, str) else ""
+
+    def text_of(self, role: str) -> list[str]:
+        """按角色取出消息正文，供断言上下文注入用。"""
+        texts: list[str] = []
+        for message in self.messages:
+            data = cast("dict[str, object]", cast("object", message))
+            content = data.get("content")
+            if data.get("role") == role and isinstance(content, str):
+                texts.append(content)
+        return texts
+
+    @override
+    async def chat_tools(
+        self,
+        messages: Sequence[ChatCompletionMessageParam],
+        tools: Sequence[ChatCompletionToolParam],
+        **_kwargs: object,
+    ) -> AssistantReply:
+        self.messages = list(messages)
         if self.delay:
             await asyncio.sleep(self.delay)
         return AssistantReply(content=self.content, tool_calls=())
 
-    async def chat(self, messages: object) -> str:
+    @override
+    async def chat(
+        self,
+        messages: Sequence[ChatCompletionMessageParam],
+        **_kwargs: object,
+    ) -> str:
         self.chat_calls.append(messages)
         return self.chat_reply
 
@@ -187,8 +294,8 @@ async def test_inbound_turn_is_serial(tmp_path: Path) -> None:
     control = FakeControl()
     llm = FakeLLM()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=control,
+        llm=llm,
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -197,7 +304,7 @@ async def test_inbound_turn_is_serial(tmp_path: Path) -> None:
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
         assert control.delivered == ["在。"]
         assert control.acked == ["m1"]
-        system = llm.messages[0]["content"]  # type: ignore[index]
+        system = llm.system_text
         assert "send_message" in system
         assert "dispatch_task" in system
         turns = MemoryStore(tmp_path).recent_turns()
@@ -212,8 +319,8 @@ async def test_inbound_turn_is_serial(tmp_path: Path) -> None:
 async def test_turn_timeout_falls_back(tmp_path: Path) -> None:
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(delay=1.0),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(delay=1.0),
         config=make_config(tmp_path, timeout=0.05),
     )
     await runtime.start()
@@ -233,8 +340,8 @@ async def test_event_subscription_resumes_from_min_cursor(tmp_path: Path) -> Non
 
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -260,15 +367,15 @@ async def test_long_term_memory_is_injected(tmp_path: Path) -> None:
     control = FakeControl()
     llm = FakeLLM()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=control,
+        llm=llm,
         config=make_config(tmp_path),
     )
     await runtime.start()
     try:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
-        system = llm.messages[0]["content"]  # type: ignore[index]
+        system = llm.system_text
         assert "她最近在整理旧照片" in system
         assert "风信子" in system
         assert "海边的约定" in system
@@ -284,8 +391,8 @@ async def test_startup_recovers_unanswered_turn(tmp_path: Path) -> None:
 
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -307,8 +414,8 @@ async def test_replayed_persisted_turn_is_acked_once(tmp_path: Path) -> None:
 
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -393,8 +500,8 @@ async def test_world_inference_is_cached_and_injected(tmp_path: Path) -> None:
     control = FakeControl()
     llm = FakeLLM()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=control,
+        llm=llm,
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -431,7 +538,7 @@ async def test_world_inference_is_cached_and_injected(tmp_path: Path) -> None:
         await asyncio.sleep(0.05)
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
-        system = llm.messages[0]["content"]  # type: ignore[index]
+        system = llm.system_text
         assert "夜里很安静" in system
         assert "她可能失眠" in system
         assert "轻声问候" in system
@@ -444,8 +551,8 @@ async def test_event_report_uses_notify_with_real_payload(tmp_path: Path) -> Non
     control = FakeControl()
     llm = FakeLLM()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=control,
+        llm=llm,
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -469,11 +576,7 @@ async def test_event_report_uses_notify_with_real_payload(tmp_path: Path) -> Non
                 break
             await asyncio.sleep(0.01)
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
-        user_messages = [
-            message["content"]
-            for message in llm.messages  # type: ignore[union-attr]
-            if isinstance(message, dict) and message.get("role") == "user"
-        ]
+        user_messages = llm.text_of("user")
         assert "任务完成：登录修好了" in user_messages
         assert control.notified == ["在。"]
         assert control.delivered == []
@@ -486,15 +589,15 @@ async def test_start_primes_desktop_presence_and_world(tmp_path: Path) -> None:
     control = StatefulControl()
     llm = FakeLLM()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=control,
+        llm=llm,
         config=make_config(tmp_path),
     )
     await runtime.start()
     try:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
-        system = llm.messages[0]["content"]  # type: ignore[index]
+        system = llm.system_text
         assert "平板：桌面上有两张卡" in system
         assert "在电脑前" in system
         assert "夜里很安静" in system
@@ -502,10 +605,41 @@ async def test_start_primes_desktop_presence_and_world(tmp_path: Path) -> None:
         await runtime.stop()
 
 
+@pytest.mark.asyncio
+async def test_describe_desktop_exposes_agent_id(tmp_path: Path) -> None:
+    """dispatch_task 的 agent_id 只能从 see_desktop 获得，输出必须带 id。"""
+    control = StatefulControl()
+    control.desktop = DesktopSnapshot(
+        generated_at=datetime.now(UTC),
+        summary="桌上有一张卡",
+        entries=[
+            DesktopEntry(
+                card=AgentCard(
+                    id="echo",
+                    name="回声",
+                    summary="复述内容",
+                    description="把给定内容复述一遍",
+                    capabilities=["repeat"],
+                ),
+                status="idle",
+                readable=ReadableState(summary="闲着"),
+            )
+        ],
+    )
+    runtime = AliyaRuntime(
+        control=control,
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    text = await runtime.describe_desktop()
+    assert "echo｜回声" in text
+    assert "能做：repeat" in text
+
+
 def test_event_caches_feed_task_and_desktop_context(tmp_path: Path) -> None:
     runtime = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     now = datetime.now(UTC)
@@ -561,8 +695,8 @@ def test_event_caches_feed_task_and_desktop_context(tmp_path: Path) -> None:
 async def test_dispatch_hint_includes_tool_preferences(tmp_path: Path) -> None:
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(),
         config=AgentAliyaSettings(
             memory=AgentAliyaMemorySettings(dir=str(tmp_path)),
             tools=AgentAliyaToolsSettings(prefer_agents=["echo"], max_parallel_dispatch=1),
@@ -570,7 +704,7 @@ async def test_dispatch_hint_includes_tool_preferences(tmp_path: Path) -> None:
     )
     await runtime.dispatch("看看登录")
     intent = control.intents[0]
-    assert intent.hint == "优先使用：echo；最多并行 1 个"  # type: ignore[attr-defined]
+    assert intent.hint == "优先使用：echo；最多并行 1 个"
 
 
 @pytest.mark.asyncio
@@ -584,8 +718,8 @@ async def test_outbound_check_and_limit_follow_config(tmp_path: Path) -> None:
     )
     llm = FakeLLM(chat_reply="这是一句很长的改写结果")
     runtime = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=llm,
         config=config,
     )
     prepared = await runtime._prepare_outbound("（笑）123456")
@@ -598,8 +732,8 @@ async def test_outbound_check_and_limit_follow_config(tmp_path: Path) -> None:
 async def test_outbound_check_rewrites_before_sending(tmp_path: Path) -> None:
     llm = FakeLLM(chat_reply="好的")
     runtime = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=llm,
         config=make_config(tmp_path),
     )
     prepared = await runtime._prepare_outbound("（笑）好啊")
@@ -610,8 +744,8 @@ async def test_outbound_check_rewrites_before_sending(tmp_path: Path) -> None:
 async def test_crisis_phase_is_reported(tmp_path: Path) -> None:
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -626,8 +760,8 @@ async def test_crisis_phase_is_reported(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_default_anchors_are_seeded(tmp_path: Path) -> None:
     runtime = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=FakeLLM(),
         config=AgentAliyaSettings(
             memory=AgentAliyaMemorySettings(
                 dir=str(tmp_path),
@@ -648,8 +782,8 @@ async def test_ticker_requires_semantic_preference(tmp_path: Path) -> None:
     llm = FakeLLM()
     MemoryStore(tmp_path).save_open_topics(["上次没说完的排障"])
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=control,
+        llm=llm,
         config=AgentAliyaSettings(
             memory=AgentAliyaMemorySettings(dir=str(tmp_path)),
             initiative=AgentAliyaInitiativeSettings(
@@ -680,8 +814,8 @@ async def test_ticker_requires_semantic_preference(tmp_path: Path) -> None:
 async def test_ticker_skips_when_preference_not_matched(tmp_path: Path) -> None:
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(),
         config=AgentAliyaSettings(
             memory=AgentAliyaMemorySettings(dir=str(tmp_path)),
             initiative=AgentAliyaInitiativeSettings(
@@ -702,8 +836,8 @@ async def test_ticker_skips_when_preference_not_matched(tmp_path: Path) -> None:
 async def test_proactive_reply_is_persisted(tmp_path: Path) -> None:
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(content="嗯。"),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(content="嗯。"),
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -734,8 +868,8 @@ async def test_memory_compresses_when_turns_exceed_limit(tmp_path: Path) -> None
     control = FakeControl()
     llm = FakeLLM(chat_reply="滚动摘要")
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=control,
+        llm=llm,
         config=AgentAliyaSettings(
             memory=AgentAliyaMemorySettings(
                 dir=str(tmp_path),
@@ -760,8 +894,8 @@ async def test_memory_compresses_when_turns_exceed_limit(tmp_path: Path) -> None
 
 def test_world_inference_drops_older_revision(tmp_path: Path) -> None:
     runtime = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     now = datetime.now(UTC)
@@ -772,9 +906,7 @@ def test_world_inference_drops_older_revision(tmp_path: Path) -> None:
             generated_at=now,
             revision=revision,
             snapshot=snapshot,
-            hypotheses=[
-                {"statement": "她可能失眠", "confidence": 0.8, "basis": "时间"}
-            ],
+            hypotheses=[Hypothesis(statement="她可能失眠", confidence=0.8, basis="时间")],
         )
         return CosmosEvent(
             event_id=f"e{revision}",
@@ -792,8 +924,8 @@ def test_world_inference_drops_older_revision(tmp_path: Path) -> None:
 
 def test_user_active_cancels_pending_proactive(tmp_path: Path) -> None:
     runtime = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     turn = TurnContext(user_text="（现在没有人说话。）", proactive=True, origin="proactive")
@@ -815,8 +947,8 @@ def test_user_active_cancels_pending_proactive(tmp_path: Path) -> None:
 async def test_canceled_proactive_turn_is_skipped(tmp_path: Path) -> None:
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     await runtime.start()
@@ -837,8 +969,8 @@ async def test_canceled_proactive_turn_is_skipped(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_event_turn_is_dropped_when_queue_full(tmp_path: Path) -> None:
     runtime = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     for _ in range(32):
@@ -850,8 +982,8 @@ async def test_event_turn_is_dropped_when_queue_full(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_wake_event_waits_for_queue_space(tmp_path: Path) -> None:
     runtime = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=FakeLLM(),
         config=make_config(tmp_path),
     )
     for _ in range(32):
@@ -873,16 +1005,16 @@ def test_progress_forwarding_follows_config(tmp_path: Path) -> None:
         payload={},
     )
     never = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=FakeLLM(),
         config=AgentAliyaSettings(
             memory=AgentAliyaMemorySettings(dir=str(tmp_path)),
             reply=AgentAliyaReplySettings(progress_forwarding="never"),
         ),
     )
     always = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=FakeLLM(),
         config=AgentAliyaSettings(
             memory=AgentAliyaMemorySettings(dir=str(tmp_path)),
             reply=AgentAliyaReplySettings(progress_forwarding="always"),
@@ -892,8 +1024,8 @@ def test_progress_forwarding_follows_config(tmp_path: Path) -> None:
     assert always._should_report(event) is True
 
     on_wait = AliyaRuntime(
-        control=FakeControl(),  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=FakeControl(),
+        llm=FakeLLM(),
         config=AgentAliyaSettings(
             memory=AgentAliyaMemorySettings(dir=str(tmp_path)),
             reply=AgentAliyaReplySettings(progress_forwarding="on_wait"),
@@ -913,8 +1045,8 @@ async def test_persona_includes_are_loaded(tmp_path: Path) -> None:
     control = FakeControl()
     llm = FakeLLM()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=llm,  # type: ignore[arg-type]
+        control=control,
+        llm=llm,
         config=AgentAliyaSettings(
             persona=AgentAliyaPersonaSettings(
                 source=str(base),
@@ -927,7 +1059,7 @@ async def test_persona_includes_are_loaded(tmp_path: Path) -> None:
     try:
         control.inbound_queue.put_nowait(make_envelope("m1"))
         await asyncio.wait_for(runtime.wait_idle(), timeout=2)
-        system = llm.messages[0]["content"]  # type: ignore[index]
+        system = llm.system_text
         assert "基础人格" in system
         assert "附加人格" in system
     finally:
@@ -938,8 +1070,8 @@ async def test_persona_includes_are_loaded(tmp_path: Path) -> None:
 async def test_memory_disabled_skips_long_term_storage(tmp_path: Path) -> None:
     control = FakeControl()
     runtime = AliyaRuntime(
-        control=control,  # type: ignore[arg-type]
-        llm=FakeLLM(),  # type: ignore[arg-type]
+        control=control,
+        llm=FakeLLM(),
         config=AgentAliyaSettings(
             memory=AgentAliyaMemorySettings(dir=str(tmp_path), enabled=False),
         ),

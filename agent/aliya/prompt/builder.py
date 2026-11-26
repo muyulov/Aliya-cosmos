@@ -25,10 +25,10 @@ class PromptBuilder:
         tools: Sequence[Tool],
         max_chars: int | None = None,
     ) -> None:
-        self._persona = persona
-        self._charter = charter
-        self._tools = tools
-        self._max_chars = max_chars or DEFAULT_CONTEXT_MAX_CHARS
+        self._persona: str = persona
+        self._charter: str = charter
+        self._tools: Sequence[Tool] = tools
+        self._max_chars: int = max_chars or DEFAULT_CONTEXT_MAX_CHARS
 
     def build(self, *, turn: TurnContext) -> list[ChatCompletionMessageParam]:
         tool_help = self._tool_help()
@@ -69,8 +69,15 @@ class PromptBuilder:
         return kept
 
     def _tool_help(self) -> str | None:
+        """只放名称与描述首行。
+
+        完整描述已经在工具声明的 schema 里，这里再抄一遍会重复占用上下文预算；
+        首行足以让模型在系统提示里建立工具索引。
+        """
         if not self._tools:
             return None
         lines = ["## 平板上的工具"]
-        lines.extend(f"- {item.name}：{item.description}" for item in self._tools)
+        for item in self._tools:
+            summary = item.description.strip().splitlines()[0].strip() if item.description else ""
+            lines.append(f"- {item.name}：{summary}" if summary else f"- {item.name}")
         return "\n".join(lines)

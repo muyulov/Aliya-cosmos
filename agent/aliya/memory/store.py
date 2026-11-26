@@ -9,9 +9,12 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from core.logger import log
+
+#: 记忆类型：决定落到哪个 JSON 文件，同时也是 remember 工具的枚举约束。
+MemoryKind = Literal["anchor", "open_topic", "unspoken", "fact"]
 
 #: 落盘前拒绝的敏感信息：API key、GitHub token、身份证、银行卡。
 _PII = (
@@ -218,7 +221,11 @@ class MemoryStore:
         return cursors
 
     def remember(self, note: str, kind: str) -> bool:
-        """按 kind 落盘；疑似敏感信息直接拒绝。"""
+        """按 kind 落盘；未知类型与疑似敏感信息直接拒绝。
+
+        kind 在工具层已由 Literal 约束，这里再做一次运行时兜底：
+        把未知类型静默写进 facts 会让错误的分类长期污染记忆。
+        """
         if not note.strip():
             return False
         if any(pattern.search(note) for pattern in _PII):
@@ -236,10 +243,13 @@ class MemoryStore:
             values = self.load_unspoken()
             values.append(note)
             self.save_unspoken(values)
-        else:
+        elif kind == "fact":
             values = self.load_facts()
             values.append(note)
             self.save_facts(values)
+        else:
+            log.warning("未知的记忆类型，已拒绝落盘", 类型=kind, 字数=len(note))
+            return False
         log.debug("记忆已写入", 类型=kind, 字数=len(note), 同类条目数=len(values))
         return True
 

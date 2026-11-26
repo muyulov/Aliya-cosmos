@@ -23,6 +23,7 @@ class FakeRuntime:
         params: dict[str, object] | None = None,
         hint: str | None = None,
     ) -> str:
+        _ = (agent_id, params, hint)  # 协议参数名必须保留
         return f"已派：{task_text}"
 
     async def task_status(self, task_id: str | None = None) -> str:
@@ -85,7 +86,7 @@ def test_normal_toolset_has_eight(runtime: FakeRuntime) -> None:
 @pytest.mark.asyncio
 async def test_remember_records_kind(runtime: FakeRuntime) -> None:
     registry = build_tools(runtime)  # type: ignore[arg-type]
-    await registry.execute(
+    _ = await registry.execute(
         ToolCall(
             id="2",
             name="remember",
@@ -93,3 +94,14 @@ async def test_remember_records_kind(runtime: FakeRuntime) -> None:
         )
     )
     assert runtime.remembered == [("她说风信子开了", "anchor")]
+
+
+@pytest.mark.asyncio
+async def test_remember_rejects_unknown_kind(runtime: FakeRuntime) -> None:
+    """kind 在工具层就该被枚举挡住，不能等到落盘时才兜底。"""
+    registry = build_tools(runtime)  # type: ignore[arg-type]
+    result = await registry.execute(
+        ToolCall(id="3", name="remember", arguments='{"note":"随便记点什么","kind":"misc"}')
+    )
+    assert "参数校验失败" in result
+    assert runtime.remembered == []
