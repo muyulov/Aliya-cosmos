@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -63,6 +63,8 @@ class Env:
     runtime: AgentRuntimeService
     registry: AgentRegistryService
     channel: MemoryUserChannel
+    #: 用同一批依赖重建终端，模拟进程重启
+    new_terminal: Callable[[], TerminalService]
 
     async def close(self) -> None:
         await self.terminal.stop()
@@ -91,13 +93,17 @@ async def env(
         bus,
         settings.agent,
     )
-    terminal = TerminalService(conversation, presence, runtime, bus, clock, settings.agent)
+
+    def new_terminal() -> TerminalService:
+        return TerminalService(conversation, presence, runtime, bus, clock, settings.agent)
+
+    terminal = new_terminal()
     channel = MemoryUserChannel()
     terminal.set_user_channel(channel)
     await terminal.start()
     registry.register(make_card("echo", "echo"), ok_handler)
     registry.register(make_card("editor", "code_edit"), ok_handler)
-    env = Env(terminal, runtime, registry, channel)
+    env = Env(terminal, runtime, registry, channel, new_terminal)
     yield env
     await env.close()
 
@@ -121,6 +127,51 @@ async def test_纯聊天信封与发布(env: Env, bus: BusService) -> None:
         assert received.message.text == "在吗，今天有点累"
     finally:
         await iterator.aclose()
+
+
+async def test_信封历史不重复携带当前消息(env: Env) -> None:
+    """当前消息只由 envelope.message 携带；留在 conversation.turns 里会让提示词出现两遍。"""
+    first = await env.terminal.ingest(user_message("第一句"))
+    assert [turn.text for turn in first.conversation.turns] == []
+
+    second = await env.terminal.ingest(user_message("第二句"))
+    assert [turn.text for turn in second.conversation.turns] == ["第一句"]
+    assert second.message.text == "第二句"
+
+
+async def test_同一客户端幂等键只入站一次(env: Env) -> None:
+    """客户端断线重发同一条消息时，不能重复记账、重复发布。"""
+    message = user_message("在吗").model_copy(update={"client_msg_id": "c1"})
+    first = await env.terminal.ingest(message)
+    again = await env.terminal.ingest(message)
+
+    assert again.message.message_id == first.message.message_id
+    assert again.conversation.turns == first.conversation.turns == []
+
+
+async def test_幂等键跨重启仍生效(env: Env) -> None:
+    """幂等键落盘：重启后客户端重发同一条消息，仍然只入站一次。"""
+    message = user_message("在吗").model_copy(update={"client_msg_id": "c1"})
+    first = await env.terminal.ingest(message)
+    await env.terminal.stop()
+
+    restarted = env.new_terminal()
+    await restarted.start()
+    try:
+        again = await restarted.ingest(message)
+    finally:
+        await restarted.stop()
+
+    assert again.message.message_id == first.message.message_id
+    assert again.conversation.turns == []
+
+
+async def test_幂等键按会话隔离(env: Env) -> None:
+    message = user_message("在吗").model_copy(update={"client_msg_id": "c1"})
+    first = await env.terminal.ingest(message)
+    other = await env.terminal.ingest(message.model_copy(update={"session_id": "ses_2"}))
+
+    assert other.message.message_id != first.message.message_id
 
 
 async def test_连发短句逐条投递(env: Env) -> None:

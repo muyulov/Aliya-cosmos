@@ -237,11 +237,19 @@ class ConversationService(Service):
         for key, _ in ordered[: len(self._sessions) - self._terminal.max_sessions + 1]:
             _ = self._sessions.pop(key, None)
 
-    async def build_context(self, session_id: str) -> ConversationContext:
-        """组装发给 Aliya 的上下文；超出预算时先摘要，再裁剪最旧轮次。"""
+    async def build_context(
+        self, session_id: str, *, exclude_message_id: str | None = None
+    ) -> ConversationContext:
+        """组装发给 Aliya 的上下文；超出预算时先摘要，再裁剪最旧轮次。
+
+        `exclude_message_id` 用于排除当前这条消息：它已由 `InboundEnvelope.message`
+        单独携带，若同时留在 turns 里，提示词会把它当成两句话重复发给模型。
+        """
         session = self._session(session_id)
         await self._maybe_compress(session)
         turns = list(session.turns)
+        if exclude_message_id:
+            turns = [turn for turn in turns if turn.message_id != exclude_message_id]
         truncated = False
         while (
             self._estimate_tokens(turns, session.summary) > self._terminal.context_max_tokens

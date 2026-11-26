@@ -13,7 +13,7 @@ import asyncio
 import json
 import os
 import uuid
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
@@ -41,6 +41,9 @@ from core.service import ClockService, Service
 
 #: 进入 `ConversationContext` 的消息类型：进度、结果与系统提示都不进对话轮次
 CONVERSATION_KINDS: frozenset[str] = frozenset({"chat", "task", "query", "mixed"})
+
+#: 客户端幂等键的保留条数；超出后淘汰最旧记录，避免无界增长
+INBOUND_DEDUPE_LIMIT = 500
 
 
 @dataclass
@@ -137,6 +140,7 @@ class TerminalService(Service):
         self._delivery_config: AgentDeliverySettings = config.cosmos.terminal.delivery
         self._state_dir: Path = Path(config.cosmos.contract.state_dir)
         self._stats_path: Path = self._state_dir / "terminal_stats.json"
+        self._dedupe_path: Path = self._state_dir / "inbound_dedupe.json"
         self._dead_letter_path: Path = self._state_dir / "dead_letters.jsonl"
         self._dead_letters: deque[TerminalMessage] = deque(maxlen=config.cosmos.link.queue_limit)
 
@@ -151,6 +155,8 @@ class TerminalService(Service):
         self._pending: deque[TerminalMessage] = deque(maxlen=config.cosmos.link.queue_limit)
         self._pending_inbound: deque[InboundEnvelope] = deque(maxlen=config.cosmos.link.queue_limit)
         self._history: dict[str, deque[TerminalMessage]] = {}
+        #: (会话, 客户端幂等键) → 首次入站消息；重发时据此重建信封，不再入站
+        self._inbound_dedupe: OrderedDict[tuple[str, str], TerminalMessage] = OrderedDict()
         self._last_session_id: str = "default"
         self._last_user_speech: datetime | None = None
 
@@ -187,6 +193,7 @@ class TerminalService(Service):
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._load_proactive()
         self._load_stats()
+        self._load_inbound_dedupe()
         self._spawn(self._link_loop())
 
     @override
@@ -291,7 +298,23 @@ class TerminalService(Service):
     # ---------- 入口 ----------
 
     async def ingest(self, message: TerminalMessage) -> InboundEnvelope:
-        """接收用户消息：刷新链路与状态 → 组装信封 → 发布给 Aliya。"""
+        """接收用户消息：刷新链路与状态 → 组装信封 → 发布给 Aliya。
+
+        带 `client_msg_id` 时按「会话 + 幂等键」去重：客户端断线重发只会入站一次，
+        重发请求沿用首次入站的消息标识，不重复记账、不重复发布。幂等键落盘，
+        进程重启后仍能识别重发。
+        """
+        key = (message.session_id, message.client_msg_id) if message.client_msg_id else None
+        if key is not None:
+            cached = self._inbound_dedupe.get(key)
+            if cached is not None:
+                self._inbound_dedupe.move_to_end(key)
+                self.log.info(
+                    "命中客户端幂等键，跳过重复入站",
+                    message_id=cached.message_id,
+                    session_id=message.session_id,
+                )
+                return await self._assemble_envelope(cached)
         now = self._clock.now()
         normalized = message.model_copy(
             update={
@@ -324,26 +347,14 @@ class TerminalService(Service):
         )
         if mood_messages:
             self._spawn(self._presence.update_mood(mood_messages))
-        context = await self._conversation.build_context(normalized.session_id)
-        snapshot = self._presence.snapshot()
-        tasks = await self._runtime.list_tasks(limit=5)
-        presence_pending = sum(
-            1 for task in tasks if task.status in {"running", "queued", "stalled"}
-        )
-        self._presence.set_pending(presence_pending)
-
-        envelope = InboundEnvelope(
-            message=normalized,
-            conversation=context,
-            presence=snapshot.readable if snapshot.readable.tone != "unknown" else None,
-            tasks=tasks,
-        )
+        envelope = await self._assemble_envelope(normalized)
 
         if self._link == "down":
             limit = self._pending_inbound.maxlen
             if limit is not None and len(self._pending_inbound) >= limit:
                 self.log.warning("链路中断期用户消息积压已满，丢弃最旧消息", 上限=limit)
             self._pending_inbound.append(envelope)
+            self._remember_inbound(key, normalized)
             self.log.info(
                 "链路中断，消息进入待发队列",
                 message_id=normalized.message_id,
@@ -352,12 +363,82 @@ class TerminalService(Service):
             return envelope
 
         await self._bus.messages.publish("aliya", envelope)
+        self._remember_inbound(key, normalized)
         self.log.info(
             "消息已接收",
             message_id=normalized.message_id,
             session_id=normalized.session_id,
         )
         return envelope
+
+    async def _assemble_envelope(self, message: TerminalMessage) -> InboundEnvelope:
+        """按当前状态组装信封；重复入站时也用它重建，不产生副作用。"""
+        # 当前消息由 envelope.message 单独携带，历史里必须排除，否则模型会看到两遍。
+        context = await self._conversation.build_context(
+            message.session_id, exclude_message_id=message.message_id
+        )
+        snapshot = self._presence.snapshot()
+        tasks = await self._runtime.list_tasks(limit=5)
+        presence_pending = sum(
+            1 for task in tasks if task.status in {"running", "queued", "stalled"}
+        )
+        self._presence.set_pending(presence_pending)
+        return InboundEnvelope(
+            message=message,
+            conversation=context,
+            presence=snapshot.readable if snapshot.readable.tone != "unknown" else None,
+            tasks=tasks,
+        )
+
+    def _remember_inbound(self, key: tuple[str, str] | None, message: TerminalMessage) -> None:
+        """登记幂等键并落盘；超出窗口淘汰最旧记录。"""
+        if key is None:
+            return
+        self._inbound_dedupe[key] = message
+        self._inbound_dedupe.move_to_end(key)
+        while len(self._inbound_dedupe) > INBOUND_DEDUPE_LIMIT:
+            _ = self._inbound_dedupe.popitem(last=False)
+        self._persist_inbound_dedupe()
+
+    def _load_inbound_dedupe(self) -> None:
+        """读取上次进程留下的幂等键；损坏时按空窗口启动。"""
+        try:
+            payload = cast("object", json.loads(self._dedupe_path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError) as exc:
+            self.log.warning("幂等键记录读取失败", 路径=str(self._dedupe_path), 原因=str(exc))
+            return
+        if not isinstance(payload, dict):
+            return
+        entries = cast("dict[str, object]", payload).get("entries")
+        if not isinstance(entries, list):
+            return
+        for entry in cast("list[object]", entries):
+            try:
+                message = TerminalMessage.model_validate(entry)
+            except ValueError:
+                continue
+            if not message.client_msg_id:
+                continue
+            key = (message.session_id, message.client_msg_id)
+            self._inbound_dedupe[key] = message
+        while len(self._inbound_dedupe) > INBOUND_DEDUPE_LIMIT:
+            _ = self._inbound_dedupe.popitem(last=False)
+
+    def _persist_inbound_dedupe(self) -> None:
+        payload = {
+            "entries": [
+                message.model_dump(mode="json") for message in self._inbound_dedupe.values()
+            ]
+        }
+        try:
+            self._state_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._dedupe_path.with_suffix(".tmp")
+            _ = tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._dedupe_path)
+        except OSError as exc:
+            self.log.warning("幂等键记录写盘失败", 原因=str(exc))
 
     # ---------- 出口 ----------
 
