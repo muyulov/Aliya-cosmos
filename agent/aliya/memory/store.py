@@ -16,6 +16,12 @@ from core.logger import log
 #: 记忆类型：决定落到哪个 JSON 文件，同时也是 remember 工具的枚举约束。
 MemoryKind = Literal["anchor", "open_topic", "unspoken", "fact"]
 
+#: 可查询的记忆范围：四种长期记忆 + 滚动摘要 + 未来意图。
+MemoryScope = Literal["anchor", "open_topic", "unspoken", "fact", "summary", "intent"]
+
+#: 意图列表的硬上限：去重后仍异常时按写入顺序丢弃最早的。
+_MAX_INTENTS = 50
+
 #: 落盘前拒绝的敏感信息：API key、GitHub token、身份证、银行卡。
 _PII = (
     re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
@@ -37,6 +43,17 @@ class Turn:
     text: str
     at: str = ""
     session_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Intent:
+    """一条未来要主动做的事：Aliya 自己排的跟进。"""
+
+    text: str
+    due_at: datetime
+
+    def is_due(self, now: datetime) -> bool:
+        return self.due_at <= now
 
 
 class MemoryStore:
@@ -252,6 +269,125 @@ class MemoryStore:
             return False
         log.debug("记忆已写入", 类型=kind, 字数=len(note), 同类条目数=len(values))
         return True
+
+    def resolve_open_topic(self, topic: str) -> bool:
+        """收尾一条未收尾话题；按原文或片段做保守匹配。"""
+        target = topic.strip()
+        if len(target) < 2:
+            return False
+        topics = self.load_open_topics()
+        for index, item in enumerate(topics):
+            matched = item == target or target in item or (len(item) >= 2 and item in target)
+            if not matched:
+                continue
+            del topics[index]
+            self.save_open_topics(topics)
+            log.debug("未收尾话题已收尾", 话题=item, 剩余=len(topics))
+            return True
+        return False
+
+    # ---------- 未来意图 ----------
+
+    def add_intent(self, text: str, *, due_at: datetime) -> bool:
+        """写入一条到期后由 ticker 触发的主动意图。"""
+        note = text.strip()
+        if not note:
+            return False
+        if any(pattern.search(note) for pattern in _PII):
+            log.warning("意图内容疑似包含敏感信息，已拒绝落盘", 字数=len(note))
+            return False
+        records = self._read_json("intents.json", [])
+        items = list(cast("list[object]", records)) if isinstance(records, list) else []
+        entry = {
+            "text": note,
+            "due_at": due_at.isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        # 同一句话重复安排视为改期，避免重复叮嘱把意图堆满。
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            if str(cast("dict[str, object]", item).get("text", "")).strip() == note:
+                items[index] = entry
+                break
+        else:
+            items.append(entry)
+        # 极端情况下也只保留最近的若干条，防止文件无限增长。
+        if len(items) > _MAX_INTENTS:
+            items = items[-_MAX_INTENTS:]
+        self._write_json("intents.json", items)
+        log.debug("未来意图已写入", 到期=due_at.isoformat(), 字数=len(note))
+        return True
+
+    def load_intents(self) -> list[Intent]:
+        records = self._read_json("intents.json", [])
+        if not isinstance(records, list):
+            return []
+        intents: list[Intent] = []
+        for item in cast("list[object]", records):
+            if not isinstance(item, dict):
+                continue
+            record = cast("dict[str, object]", item)
+            text = str(record.get("text", "")).strip()
+            raw = record.get("due_at")
+            if not text or not isinstance(raw, str):
+                continue
+            try:
+                due_at = datetime.fromisoformat(raw)
+            except ValueError:
+                continue
+            if due_at.tzinfo is None:
+                due_at = due_at.replace(tzinfo=UTC)
+            intents.append(Intent(text=text, due_at=due_at))
+        intents.sort(key=lambda intent: intent.due_at)
+        return intents
+
+    def due_intents(self, now: datetime, limit: int = 3) -> list[Intent]:
+        """到期的意图按时间先后返回；只读取，不删除。"""
+        if limit <= 0:
+            return []
+        due = [intent for intent in self.load_intents() if intent.is_due(now)]
+        due.sort(key=lambda intent: intent.due_at)
+        return due[:limit]
+
+    def cancel_intent(self, text: str) -> bool:
+        """按原文或片段取消一条未来意图；用户说「不用提醒了」时用。"""
+        target = text.strip()
+        if len(target) < 2:
+            return False
+        records = self._read_json("intents.json", [])
+        if not isinstance(records, list):
+            return False
+        items = list(cast("list[object]", records))
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            note = str(cast("dict[str, object]", item).get("text", "")).strip()
+            matched = note == target or target in note or (len(note) >= 2 and note in target)
+            if not matched:
+                continue
+            del items[index]
+            self._write_json("intents.json", items)
+            log.debug("未来意图已取消", 内容=note, 剩余=len(items))
+            return True
+        return False
+
+    def pop_intent(self, text: str) -> bool:
+        """按正文移除一条意图，避免到期触发后重复执行。"""
+        target = text.strip()
+        records = self._read_json("intents.json", [])
+        if not isinstance(records, list):
+            return False
+        items = list(cast("list[object]", records))
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            if str(cast("dict[str, object]", item).get("text", "")).strip() != target:
+                continue
+            del items[index]
+            self._write_json("intents.json", items)
+            return True
+        return False
 
     # ---------- 原子文件 ----------
 

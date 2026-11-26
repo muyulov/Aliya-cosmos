@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from agent.aliya.memory.store import MemoryStore
@@ -78,3 +79,41 @@ def test_prune_turns_keeps_latest(tmp_path: Path) -> None:
         store.append_turn(f"m{index}", "user", str(index))
     assert store.prune_turns(2) == 3
     assert [turn.text for turn in store.recent_turns()] == ["3", "4"]
+
+
+def test_intent_roundtrip_and_due(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    now = datetime.now(UTC)
+    assert store.add_intent("问她面试怎么样", due_at=now + timedelta(minutes=30)) is True
+    assert store.add_intent("提醒她吃药", due_at=now - timedelta(minutes=1)) is True
+    assert [item.text for item in store.due_intents(now)] == ["提醒她吃药"]
+    assert store.pop_intent("提醒她吃药") is True
+    assert [item.text for item in store.load_intents()] == ["问她面试怎么样"]
+
+
+def test_resolve_open_topic_by_fragment(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    store.save_open_topics(["海边的约定", "旧照片"])
+    assert store.resolve_open_topic("海边") is True
+    assert store.load_open_topics() == ["旧照片"]
+    assert store.resolve_open_topic("不存在的") is False
+
+
+def test_intent_dedupes_and_sorts_by_due(tmp_path: Path) -> None:
+    """同一句话再次安排应当改期，而不是堆出两条。"""
+    store = MemoryStore(tmp_path)
+    now = datetime.now(UTC)
+    assert store.add_intent("晚点问她面试", due_at=now + timedelta(hours=2))
+    assert store.add_intent("提醒她吃药", due_at=now + timedelta(hours=1))
+    assert store.add_intent("晚点问她面试", due_at=now + timedelta(hours=3))
+    intents = store.load_intents()
+    assert [item.text for item in intents] == ["提醒她吃药", "晚点问她面试"]
+    assert intents[1].due_at == now + timedelta(hours=3)
+
+
+def test_cancel_intent_by_fragment(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    assert store.add_intent("问她面试怎么样", due_at=datetime.now(UTC) + timedelta(hours=1))
+    assert store.cancel_intent("面试") is True
+    assert store.load_intents() == []
+    assert store.cancel_intent("不存在") is False

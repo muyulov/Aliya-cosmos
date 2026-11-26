@@ -8,7 +8,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast, override
 
@@ -1064,6 +1064,132 @@ async def test_persona_includes_are_loaded(tmp_path: Path) -> None:
         assert "附加人格" in system
     finally:
         await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_due_intent_wakes_proactive_turn(tmp_path: Path) -> None:
+    """到期的跟进意图要绕过常规时间门控，主动排一个回合。"""
+    store = MemoryStore(tmp_path)
+    assert store.add_intent("问她面试怎么样", due_at=datetime.now(UTC) - timedelta(minutes=1))
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    await runtime._tick_once()
+    assert len(runtime._pending_proactive) == 1
+    turn = runtime._pending_proactive[0]
+    assert "问她面试怎么样" in turn.user_text
+    # 触发时不删除，等回合正常结束后再结算；否则取消或失败会丢掉跟进。
+    assert [item.text for item in store.load_intents()] == ["问她面试怎么样"]
+    runtime._settle_intent(turn)
+    assert store.load_intents() == []
+
+
+@pytest.mark.asyncio
+async def test_canceled_intent_turn_is_rescheduled(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    assert store.add_intent("问她面试", due_at=datetime.now(UTC) - timedelta(minutes=1))
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    await runtime._tick_once()
+    turn = runtime._pending_proactive[0]
+    runtime._cancel_pending_proactive()
+    assert turn.canceled is True
+    runtime._retry_intent(turn)
+    intents = store.load_intents()
+    assert [item.text for item in intents] == ["问她面试"]
+    assert intents[0].due_at > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_cancel_followup_removes_intent(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    assert store.add_intent("问她面试", due_at=datetime.now(UTC) + timedelta(hours=1))
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    assert await runtime.cancel_followup("面试") == "已经取消了"
+    assert store.load_intents() == []
+
+
+@pytest.mark.asyncio
+async def test_canceled_intent_does_not_revive_after_explicit_cancel(tmp_path: Path) -> None:
+    """用户已取消的跟进，不能因为回合被取消又被重排回来。"""
+    store = MemoryStore(tmp_path)
+    assert store.add_intent("问她面试", due_at=datetime.now(UTC) - timedelta(minutes=1))
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    await runtime._tick_once()
+    turn = runtime._pending_proactive[0]
+    assert store.cancel_intent("面试") is True
+    runtime._retry_intent(turn)
+    assert store.load_intents() == []
+
+
+@pytest.mark.asyncio
+async def test_defer_silences_current_proactive_turn(tmp_path: Path) -> None:
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    turn = TurnContext(user_text="", proactive=True, origin="proactive")
+    runtime._current_turn = turn
+    result = await runtime.defer(30, "她在忙")
+    assert turn.silent is True
+    assert "30 分钟" in result
+    assert runtime._defer_until is not None
+
+
+@pytest.mark.asyncio
+async def test_check_memory_lists_sections(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path)
+    store.save_anchors(["风信子"])
+    store.save_open_topics(["海边的约定"])
+    assert store.add_intent("问她面试", due_at=datetime.now(UTC) + timedelta(hours=1))
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    text = await runtime.check_memory()
+    assert "锚点：风信子" in text
+    assert "未收尾：海边的约定" in text
+    assert "待跟进：" in text
+
+
+@pytest.mark.asyncio
+async def test_plan_followup_persists_intent(tmp_path: Path) -> None:
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    result = await runtime.plan_followup("问她面试", 30)
+    assert "记下了" in result
+    intents = MemoryStore(tmp_path).load_intents()
+    assert [item.text for item in intents] == ["问她面试"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_topic_removes_open_topic(tmp_path: Path) -> None:
+    MemoryStore(tmp_path).save_open_topics(["海边的约定"])
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    assert await runtime.resolve_topic("海边") == "已经收尾了"
+    assert MemoryStore(tmp_path).load_open_topics() == []
 
 
 @pytest.mark.asyncio

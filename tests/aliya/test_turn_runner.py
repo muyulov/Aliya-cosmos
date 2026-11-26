@@ -43,6 +43,23 @@ class FakeRuntime:
         _ = note, kind  # 协议参数名必须保留，用占位赋值消除未使用告警
         return "记住了"
 
+    async def check_memory(self, scope: str | None = None) -> str:
+        _ = scope
+        return "锚点：风信子"
+
+    async def resolve_topic(self, topic: str) -> str:
+        return f"已经收尾了：{topic}"
+
+    async def plan_followup(self, text: str, after_minutes: int) -> str:
+        return f"记下了：{text}（{after_minutes} 分钟后）"
+
+    async def cancel_followup(self, text: str) -> str:
+        return f"已经取消了：{text}"
+
+    async def defer(self, minutes: int, reason: str = "") -> str:
+        _ = reason
+        return f"延后 {minutes} 分钟"
+
 
 class FakeLLM:
     def __init__(self) -> None:
@@ -111,3 +128,21 @@ async def test_empty_reply_falls_back(runtime: FakeRuntime) -> None:
     runtime.turn = turn
     await runner.run(turn=turn)
     assert runtime.delivered == [AgentAliyaSettings().reply.fallback_text]
+
+
+@pytest.mark.asyncio
+async def test_silent_turn_skips_fallback(runtime: FakeRuntime) -> None:
+    """主动回合已决定不开口时，空回复不能再补一条兜底消息。"""
+    llm = FakeLLM()
+    llm.replies = [AssistantReply(content=None, tool_calls=())]
+    runner = make_runner(llm, runtime)
+    turn = TurnContext(
+        user_text="",
+        sender=runtime.send,
+        proactive=True,
+        origin="proactive",
+        silent=True,
+    )
+    runtime.turn = turn
+    await runner.run(turn=turn)
+    assert runtime.delivered == []

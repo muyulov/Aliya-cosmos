@@ -1,4 +1,4 @@
-"""Aliya 的工具面：8 个工具，主动回合只给 5 个无副作用的。
+"""Aliya 的工具面：13 个工具，主动回合给 10 个可自行安排的。
 
 用闭包把 runtime 绑进工具，避免 `self` 被当成工具参数。
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from agent.aliya.memory import MemoryKind
+from agent.aliya.memory import MemoryKind, MemoryScope
 from core.agent import ToolRegistry, tool
 
 
@@ -37,6 +37,16 @@ class RuntimePort(Protocol):
     async def refresh_world(self) -> str: ...
 
     async def remember(self, note: str, kind: MemoryKind) -> str: ...
+
+    async def check_memory(self, scope: MemoryScope | None = None) -> str: ...
+
+    async def resolve_topic(self, topic: str) -> str: ...
+
+    async def plan_followup(self, text: str, after_minutes: int) -> str: ...
+
+    async def cancel_followup(self, text: str) -> str: ...
+
+    async def defer(self, minutes: int, reason: str = "") -> str: ...
 
 
 def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistry:
@@ -145,9 +155,83 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
         """
         return await runtime.remember(note, kind)
 
+    @tool
+    async def check_memory(scope: MemoryScope | None = None) -> str:
+        """查看自己的长期记忆，确认自己记得什么。
+
+        想回顾锚点、未收尾话题或待跟进安排时用；只读，不会改动记忆。
+        返回各分类的内容，空分类不显示。
+
+        Args:
+            scope: 只看某一类；不填则返回所有非空分类。
+        """
+        return await runtime.check_memory(scope)
+
+    @tool
+    async def resolve_topic(topic: str) -> str:
+        """把一条已经聊完的未收尾话题标记为收尾。
+
+        用户明确说这件事过去了、或你判断已经聊完时用；收尾后主动判断不再把它当成未完成。
+        返回是否找到并收尾。
+
+        Args:
+            topic: 话题原文或其中一段，取自 check_memory 的「未收尾」。
+        """
+        return await runtime.resolve_topic(topic)
+
+    @tool
+    async def plan_followup(text: str, after_minutes: int) -> str:
+        """把一件事排进未来，到时间后主动唤醒自己去处理。
+
+        用户提到之后要发生的事（面试、复查、约定），或你想过一阵再问时用。
+        到点后会叫醒你，但不会替你执行任务；要不要动手届时再决定。
+        返回约定的提醒时间；即使没人说话，你也会被叫醒。
+
+        Args:
+            text: 到时要做什么，写成一句完整的话。
+            after_minutes: 多少分钟后跟进，1 到 10080（7 天）之间。
+        """
+        return await runtime.plan_followup(text, after_minutes)
+
+    @tool
+    async def cancel_followup(text: str) -> str:
+        """取消一条已经排好的未来跟进。
+
+        用户说不用提醒了、或这件事已经不需要再做时用；只影响待跟进，不动长期记忆。
+        返回是否找到并取消。
+
+        Args:
+            text: 要取消的跟进内容或其中一段，取自 check_memory 的「待跟进」。
+        """
+        return await runtime.cancel_followup(text)
+
+    @tool
+    async def defer_proactive(minutes: int, reason: str = "") -> str:
+        """把下一次主动开口往后推，这次先不说话。
+
+        现在不适合打扰、但过一会儿可能合适时用；主动回合调用后本回合保持静默。
+        返回新的检查时间。
+
+        Args:
+            minutes: 多少分钟后再考虑，1 到 1440（24 小时）之间。
+            reason: 为什么现在不说，只写给自己看。
+        """
+        return await runtime.defer(minutes, reason)
+
     registry = ToolRegistry()
     if proactive:
-        registry.register(send_message, see_desktop, task_status, refresh_world, remember)
+        registry.register(
+            send_message,
+            see_desktop,
+            task_status,
+            refresh_world,
+            check_memory,
+            resolve_topic,
+            plan_followup,
+            cancel_followup,
+            defer_proactive,
+            remember,
+        )
     else:
         registry.register(
             send_message,
@@ -157,6 +241,11 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
             cancel_task,
             retry_task,
             refresh_world,
+            check_memory,
+            resolve_topic,
+            plan_followup,
+            cancel_followup,
+            defer_proactive,
             remember,
         )
     return registry

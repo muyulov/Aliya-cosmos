@@ -7,6 +7,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import cast
 
 from agent.cosmos.contracts import LinkState, ReadablePresence
 from core.config.settings import AgentAliyaInitiativeSettings
@@ -75,7 +76,7 @@ class PreferenceGate:
     """
 
     def __init__(self, conditions: Sequence[str]) -> None:
-        self._conditions = [item.strip() for item in conditions if item.strip()]
+        self._conditions: list[str] = [item.strip() for item in conditions if item.strip()]
 
     def match(self, signals: TimeSignals) -> PreferenceDecision:
         if not self._conditions:
@@ -170,7 +171,7 @@ def _is_night(now: datetime) -> bool:
 
 def _lexical_match(condition: str, context: str) -> bool:
     """自定义条件的兜底：用 2–4 字中文片段做保守匹配。"""
-    for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", condition):
+    for chunk in cast("list[str]", re.findall(r"[\u4e00-\u9fff]{2,}", condition)):
         for size in range(2, min(4, len(chunk)) + 1):
             for start in range(0, len(chunk) - size + 1):
                 term = chunk[start : start + size]
@@ -178,27 +179,30 @@ def _lexical_match(condition: str, context: str) -> bool:
                     return True
     return any(
         word.lower() in context.lower()
-        for word in re.findall(r"[A-Za-z]{3,}", condition)
+        for word in cast("list[str]", re.findall(r"[A-Za-z]{3,}", condition))
     )
 
 
 class Initiative:
     def __init__(self, config: AgentAliyaInitiativeSettings) -> None:
-        self._config = config
+        self._config: AgentAliyaInitiativeSettings = config
         self._last_proactive_at: datetime | None = None
-        self._daily_count = 0
+        self._daily_count: int = 0
         self._day: date | None = None
-        self._unanswered = 0
-        self._awaiting_reply = False
+        self._unanswered: int = 0
+        self._awaiting_reply: bool = False
 
-    def should_speak(
+    def allows(
         self,
         *,
         now: datetime,
         presence: ReadablePresence | None,
         link: LinkState,
-        last_user_at: datetime | None,
     ) -> InitiativeDecision:
+        """只检查「现在能不能打扰」：配置、链路、状态、间隔与日限额。
+
+        不含长期沉默与默认动作：到期跟进要绕过时间条件，但仍受打扰预算约束。
+        """
         if not self._config.enabled:
             return InitiativeDecision(False, "disabled")
         if self._config.respect_link_state and link != "up":
@@ -216,6 +220,19 @@ class Initiative:
                 return InitiativeDecision(False, "min_gap")
         if self._daily_count >= self._config.daily_soft_limit:
             return InitiativeDecision(False, "daily_limit")
+        return InitiativeDecision(True, "allowed")
+
+    def should_speak(
+        self,
+        *,
+        now: datetime,
+        presence: ReadablePresence | None,
+        link: LinkState,
+        last_user_at: datetime | None,
+    ) -> InitiativeDecision:
+        allowed = self.allows(now=now, presence=presence, link=link)
+        if not allowed.should_speak:
+            return allowed
         if last_user_at is None or (now - last_user_at).total_seconds() >= LONG_GAP_SECONDS:
             return InitiativeDecision(True, "long_gap")
         if self._config.default_action == "speak":

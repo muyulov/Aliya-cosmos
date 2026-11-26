@@ -6,14 +6,14 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from uuid import uuid4
 
 from openai.types.chat import ChatCompletionMessageParam
 
 from agent.aliya.initiative import Initiative, PreferenceGate, TimeSignals
-from agent.aliya.memory import MemoryKind, MemoryStore
+from agent.aliya.memory import MemoryKind, MemoryScope, MemoryStore
 from agent.aliya.ports import ControlPort
 from agent.aliya.prompt.builder import PromptBuilder
 from agent.aliya.prompt.loader import load_charter, load_persona
@@ -44,6 +44,12 @@ _REPORT_TOPICS = {"agent.result", "dispatch.finished", "agent.abnormal"}
 _DESKTOP_LIMIT = 12
 #: task_status 的查询窗口；指定 id 查不到时据此提示「可能不在最近 N 条」。
 _TASK_QUERY_LIMIT = 20
+#: 跟进意图最长可预约 7 天；越界输入在工具边界收敛。
+_MAX_FOLLOWUP_MINUTES = 7 * 24 * 60
+#: 主动开口最长可延后 24 小时。
+_MAX_DEFER_MINUTES = 24 * 60
+#: 到期跟进被取消或失败后，延后多久再试。
+_INTENT_RETRY_MINUTES = 30
 _EVENT_TOPICS = [
     "agent.progress",
     "agent.result",
@@ -187,6 +193,8 @@ class AliyaRuntime:
         self._agent_states: dict[str, AgentRuntimeState] = {}
         self._progress: dict[str, AgentProgress] = {}
         self._pending_proactive: list[TurnContext] = []
+        #: 主动开口的延后窗口；到点后清空并恢复常规判断。
+        self._defer_until: datetime | None = None
         self._link: LinkState = "up"
         self._last_user_at: datetime | None = None
         self._last_session_id: str = ""
@@ -448,6 +456,78 @@ class AliyaRuntime:
             return "这件事先不记"
         return "记住了" if self._memory.remember(note, kind) else "这件事先不记"
 
+    async def check_memory(self, scope: MemoryScope | None = None) -> str:
+        """查看长期记忆；不传范围时返回所有非空分类。"""
+        if not self._config.memory.enabled:
+            return "记忆没有开"
+        lines: list[str] = []
+        if scope in (None, "summary"):
+            summary = self._memory.load_summary().strip()
+            if summary:
+                lines.append("摘要：" + summary)
+        if scope in (None, "anchor"):
+            anchors = self._memory.load_anchors()
+            if anchors:
+                lines.append("锚点：" + "、".join(anchors))
+        if scope in (None, "open_topic"):
+            topics = self._memory.load_open_topics()
+            if topics:
+                lines.append("未收尾：" + "、".join(topics))
+        if scope in (None, "unspoken"):
+            unspoken = self._memory.load_unspoken()
+            if unspoken:
+                lines.append("未说出口：" + "；".join(unspoken))
+        if scope in (None, "fact"):
+            facts = self._memory.load_facts()
+            if facts:
+                lines.append("事实：" + "；".join(facts[-10:]))
+        if scope in (None, "intent"):
+            intents = self._memory.load_intents()
+            if intents:
+                lines.append(
+                    "待跟进："
+                    + "；".join(
+                        f"{item.due_at:%m-%d %H:%M} {item.text}" for item in intents[:10]
+                    )
+                )
+        return "\n".join(lines) or "记忆里还是空的"
+
+    async def resolve_topic(self, topic: str) -> str:
+        """收尾一条未收尾话题，避免主动判断一直把它当成未完成。"""
+        if not self._config.memory.enabled:
+            return "记忆没有开"
+        if self._memory.resolve_open_topic(topic):
+            return "已经收尾了"
+        return f"没找到未收尾的话题：{topic}"
+
+    async def plan_followup(self, text: str, after_minutes: int) -> str:
+        """把一件事排进未来，到期后由 ticker 主动唤醒。"""
+        if not self._config.memory.enabled:
+            return "记忆没有开，安排不了"
+        minutes = max(1, min(after_minutes, _MAX_FOLLOWUP_MINUTES))
+        due = self._now() + timedelta(minutes=minutes)
+        if not self._memory.add_intent(text, due_at=due):
+            return "这件事先不记"
+        return f"记下了，{due:%m-%d %H:%M} 左右提醒你"
+
+    async def cancel_followup(self, text: str) -> str:
+        """取消一条未来意图；用户说「不用提醒了」时调用。"""
+        if not self._config.memory.enabled:
+            return "记忆没有开"
+        if self._memory.cancel_intent(text):
+            return "已经取消了"
+        return f"没找到这条跟进：{text}"
+
+    async def defer(self, minutes: int, reason: str = "") -> str:
+        """把下一次主动开口往后推；主动回合里同时让本回合静默。"""
+        minutes = max(1, min(minutes, _MAX_DEFER_MINUTES))
+        self._defer_until = self._now() + timedelta(minutes=minutes)
+        turn = self._current_turn
+        if turn is not None and turn.proactive:
+            turn.silent = True
+        log.info("主动开口已延后", 分钟=minutes, 原因=reason or "-")
+        return f"好，{minutes} 分钟后再考虑"
+
     # ---------- 消费循环 ----------
 
     async def _consume_inbound(self) -> None:
@@ -658,6 +738,8 @@ class AliyaRuntime:
                 with contextlib.suppress(ValueError):
                     self._pending_proactive.remove(turn)
                 if turn.canceled:
+                    # 意图在触发时没有删除；被用户活动取消后推后重试。
+                    self._retry_intent(turn)
                     self._queue.task_done()
                     continue
             self._current_turn = turn
@@ -682,9 +764,13 @@ class AliyaRuntime:
                     超时秒=self._config.reply.turn_timeout_seconds,
                 )
                 await self._fallback(turn)
+                self._retry_intent(turn)
             except Exception:
                 log.exception("回合执行失败", 来源=turn.origin, 消息=turn.message_id or "-")
                 await self._fallback(turn)
+                self._retry_intent(turn)
+            else:
+                self._settle_intent(turn)
             finally:
                 # task_done 必须最先执行：后续清理失败不能把 queue.join() 卡死。
                 self._queue.task_done()
@@ -723,7 +809,7 @@ class AliyaRuntime:
                     )
 
     async def _fallback(self, turn: TurnContext) -> None:
-        if turn.sent:
+        if turn.sent or turn.silent:
             return
         try:
             _ = await turn.send(self._config.reply.fallback_text)
@@ -739,10 +825,71 @@ class AliyaRuntime:
                 # 单轮失败不能让主动行为永久停摆。
                 log.exception("主动行为检查失败，跳过本轮")
 
+    async def _fire_due_intent(self, now: datetime) -> bool:
+        """到期意图优先于常规主动判断；仍受链路、状态与打扰预算约束。"""
+        if not self._config.memory.enabled:
+            return False
+        due = self._memory.due_intents(now, limit=1)
+        if not due:
+            return False
+        allowed = self._initiative.allows(now=now, presence=self._presence, link=self._link)
+        if not allowed.should_speak:
+            log.debug("到期跟进暂缓", 原因=allowed.reason)
+            return False
+        intent = due[0]
+        turn = TurnContext(
+            user_text=(
+                f"你之前给自己安排了一件事：{intent.text}"
+                f"\n现在是 {now:%H:%M}，到时间了，而且没有人说话。"
+                "要不要说、说什么由你决定。"
+            ),
+            session_id=self._last_session_id,
+            presence=self._presence.summary if self._presence else None,
+            tasks=self._tasks_text(),
+            desktop=self._desktop_text(),
+            world=self._world_text(),
+            proactive=True,
+            origin="proactive",
+            intent_text=intent.text,
+        )
+        turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+        self._pending_proactive.append(turn)
+        _ = await self._enqueue(turn)
+        log.info("到期跟进已排队", 内容=intent.text[:40], 到期=intent.due_at.isoformat())
+        return True
+
+    def _settle_intent(self, turn: TurnContext) -> None:
+        """回合正常结束：到期意图视为已处理，从队列里移除。"""
+        if not turn.intent_text:
+            return
+        _ = self._memory.pop_intent(turn.intent_text)
+        log.debug("到期跟进已处理", 内容=turn.intent_text[:40])
+
+    def _retry_intent(self, turn: TurnContext) -> None:
+        """回合被取消或失败：把意图推后重试，不能静默丢掉。
+
+        条目已被显式取消时不再复活：用户可能恰好在同一时间说了「不用提醒了」。
+        """
+        if not turn.intent_text:
+            return
+        if not any(item.text == turn.intent_text for item in self._memory.load_intents()):
+            log.debug("到期跟进已被取消，不再重排", 内容=turn.intent_text[:40])
+            return
+        due = self._now() + timedelta(minutes=_INTENT_RETRY_MINUTES)
+        _ = self._memory.add_intent(turn.intent_text, due_at=due)
+        log.info("到期跟进稍后重试", 内容=turn.intent_text[:40], 分钟=_INTENT_RETRY_MINUTES)
+
     async def _tick_once(self) -> None:
         if not self._config.initiative.enabled or self._pending_proactive:
             return
         now = self._now()
+        if self._defer_until is not None:
+            if now < self._defer_until:
+                return
+            self._defer_until = None
+            log.debug("延后窗口结束，恢复主动判断")
+        if await self._fire_due_intent(now):
+            return
         decision = self._initiative.should_speak(
             now=now,
             presence=self._presence,

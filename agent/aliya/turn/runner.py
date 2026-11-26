@@ -72,6 +72,11 @@ class TurnRunner:
                     _ = await turn.send(reply.content)
                 return
 
+            # 主动回合可能主动选择这次不开口（例如 defer_proactive）；此时不兜底。
+            if turn.silent:
+                log.debug("回合选择静默，不发送兜底回复", 轮次=round_index, 来源=turn.origin)
+                return
+
             # 空回复既没有工具调用也没有内容：用户会收不到任何消息，按失败兜底。
             log.warning("模型返回空回复，发送兜底回复", 轮次=round_index, 来源=turn.origin)
             if not turn.sent:
@@ -83,5 +88,5 @@ class TurnRunner:
             轮次上限=self._config.reply.max_rounds,
             来源=turn.origin,
         )
-        if not turn.sent:
+        if not turn.sent and not turn.silent:
             _ = await turn.send(self._config.reply.fallback_text)

@@ -180,7 +180,7 @@ async def run(control) -> None:
 ```mermaid
 flowchart TD
     E(["收信封"]) --> M["组装上下文<br/>cosmos 轮次 + Aliya 记忆"]
-    M --> L["LLM chat_tools<br/>8 个工具"]
+    M --> L["LLM chat_tools<br/>普通 13 个 / 主动 10 个工具"]
     L --> T{"有 tool_calls?"}
     T -->|"有"| X["顺序执行工具<br/>结果回填"]
     X --> R{"未超 6 轮?"}

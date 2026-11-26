@@ -32,6 +32,10 @@ class TurnContext:
     origin: Literal["user", "proactive", "event"] = "user"
     #: 排队中的主动回合被用户活动取消后置位，工作循环直接跳过。
     canceled: bool = False
+    #: 主动回合决定这次不开口：空回复不再触发兜底消息。
+    silent: bool = False
+    #: 这个回合由哪条未来意图触发；回合结束后据此结算或重试。
+    intent_text: str = ""
     #: 队列满时是否允许丢弃；只有进度类汇报可以丢。
     droppable: bool = False
     replies: list[str] = field(default_factory=list)

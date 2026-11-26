@@ -42,6 +42,23 @@ class FakeRuntime:
         self.remembered.append((note, kind))
         return "记住了"
 
+    async def check_memory(self, scope: str | None = None) -> str:
+        _ = scope
+        return "锚点：风信子"
+
+    async def resolve_topic(self, topic: str) -> str:
+        return f"已经收尾了：{topic}" if topic else "没找到"
+
+    async def plan_followup(self, text: str, after_minutes: int) -> str:
+        return f"记下了：{text}（{after_minutes} 分钟后）"
+
+    async def cancel_followup(self, text: str) -> str:
+        return f"已经取消了：{text}"
+
+    async def defer(self, minutes: int, reason: str = "") -> str:
+        _ = reason
+        return f"延后 {minutes} 分钟"
+
 
 @pytest.fixture
 def runtime() -> FakeRuntime:
@@ -65,11 +82,16 @@ def test_proactive_toolset_is_small(runtime: FakeRuntime) -> None:
         "see_desktop",
         "task_status",
         "refresh_world",
+        "check_memory",
+        "resolve_topic",
+        "plan_followup",
+        "cancel_followup",
+        "defer_proactive",
         "remember",
     }
 
 
-def test_normal_toolset_has_eight(runtime: FakeRuntime) -> None:
+def test_normal_toolset_has_all_tools(runtime: FakeRuntime) -> None:
     registry = build_tools(runtime)  # type: ignore[arg-type]
     assert set(registry.names) == {
         "send_message",
@@ -79,6 +101,11 @@ def test_normal_toolset_has_eight(runtime: FakeRuntime) -> None:
         "cancel_task",
         "retry_task",
         "refresh_world",
+        "check_memory",
+        "resolve_topic",
+        "plan_followup",
+        "cancel_followup",
+        "defer_proactive",
         "remember",
     }
 
