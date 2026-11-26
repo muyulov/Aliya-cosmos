@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.aliya.transport import RemoteControl
+from agent.aliya.transport import RemoteControl, RemoteError
 from agent.cosmos.contracts import (
     ConversationContext,
     CosmosEvent,
@@ -20,6 +20,7 @@ from agent.cosmos.contracts.rpc import (
     Hello,
     HelloOk,
     Inbound,
+    RpcError,
     RpcRequest,
     RpcResponse,
     Subscribe,
@@ -33,6 +34,8 @@ class FakeServer:
         self.socket_path = socket_path
         self.delivered: list[str] = []
         self.subscriptions: list[dict[str, int]] = []
+        #: 置位后下一次 deliver 返回业务错误，用于验证 outbox 不无限重放
+        self.reject_deliver: bool = False
         self._seen: set[str] = set()
         self._server: asyncio.AbstractServer | None = None
         self._writers: set[asyncio.StreamWriter] = set()
@@ -97,6 +100,18 @@ class FakeServer:
 
     async def _handle_request(self, writer: asyncio.StreamWriter, message: RpcRequest) -> None:
         if message.method == "deliver":
+            if self.reject_deliver:
+                self.reject_deliver = False
+                await self._send(
+                    writer,
+                    RpcResponse(
+                        id=message.id,
+                        ok=False,
+                        type="error",
+                        error=RpcError(code="invalid_params", message="参数不足"),
+                    ),
+                )
+                return
             client_msg_id = str(message.params.get("client_msg_id", ""))
             if client_msg_id and client_msg_id in self._seen:
                 await self._send(writer, RpcResponse(id=message.id, result=None))
@@ -250,4 +265,17 @@ async def test_subscribe_resumes_from_latest_topic_cursor(fake_server: FakeServe
     assert fake_server.subscriptions[-1] == {"agent.result": 5}
 
     await stream.aclose()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rejected_deliver_is_not_replayed(fake_server: FakeServer) -> None:
+    """业务拒绝是终态：消息必须移出 outbox，否则重连会无限补发。"""
+    client = RemoteControl(str(fake_server.socket_path), token="t")
+    await client.connect()
+    fake_server.reject_deliver = True
+    with pytest.raises(RemoteError):
+        await client.deliver("在吗", session_id="s1")
+    assert len(client._outbox) == 0
+    assert fake_server.delivered == []
     await client.close()

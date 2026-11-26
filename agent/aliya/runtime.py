@@ -250,9 +250,7 @@ class AliyaRuntime:
         try:
             self._desktop = await self._control.describe_desktop()
             self._task_count = sum(
-                1
-                for entry in self._desktop.entries
-                if entry.status in {"running", "queued"}
+                1 for entry in self._desktop.entries if entry.status in {"running", "queued"}
             )
         except Exception as exc:
             log.debug(
@@ -439,89 +437,105 @@ class AliyaRuntime:
     async def _consume_inbound(self) -> None:
         async for envelope in self._control.inbound():
             message_id = envelope.message.message_id
-            if message_id in self._seen:
-                # 已落盘但上次确认失败：重放时补确认，不重复入队。
-                await self._ack(message_id)
-                continue
-            at = envelope.message.at.isoformat() if envelope.message.at else ""
-            if self._config.memory.enabled:
-                try:
-                    _ = self._memory.record_inbound(
-                        message_id,
-                        envelope.message.text,
-                        session_id=envelope.message.session_id,
-                        at=at,
-                    )
-                except OSError:
-                    log.exception("入站消息落盘失败，暂不回执", 消息=message_id)
-                    continue
-            self._seen.add(message_id)
-            await self._ack(message_id)
-            log.debug(
-                "收到用户消息",
-                消息=message_id,
-                会话=envelope.message.session_id,
-                字数=len(envelope.message.text),
-                历史条数=len(envelope.conversation.turns),
-            )
-            self._last_session_id = envelope.message.session_id
-            self._last_user_at = envelope.message.at or self._now()
-            self._initiative.record_user_reply()
-            self._cancel_pending_proactive()
-            self._task_count = len(envelope.tasks)
-            self._crisis = _is_crisis(envelope.message.text)
-            if envelope.presence is not None:
-                self._presence = envelope.presence
-            turn = TurnContext.from_envelope(envelope)
-            turn.presence = turn.presence or (
-                self._presence.summary if self._presence else None
-            )
-            turn.tasks = turn.tasks or self._tasks_text()
-            turn.desktop = self._desktop_text()
-            turn.world = self._world_text()
-            turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
-            self._pending_inbound += 1
             try:
-                _ = await self._enqueue(turn)
-            finally:
-                self._pending_inbound -= 1
+                if message_id in self._seen:
+                    # 已落盘但上次确认失败：重放时补确认，不重复入队。
+                    await self._ack(message_id)
+                    continue
+                at = envelope.message.at.isoformat() if envelope.message.at else ""
+                if self._config.memory.enabled:
+                    try:
+                        _ = self._memory.record_inbound(
+                            message_id,
+                            envelope.message.text,
+                            session_id=envelope.message.session_id,
+                            at=at,
+                        )
+                    except OSError:
+                        log.exception("入站消息落盘失败，暂不回执", 消息=message_id)
+                        continue
+                self._seen.add(message_id)
+                await self._ack(message_id)
+                log.debug(
+                    "收到用户消息",
+                    消息=message_id,
+                    会话=envelope.message.session_id,
+                    字数=len(envelope.message.text),
+                    历史条数=len(envelope.conversation.turns),
+                )
+                self._last_session_id = envelope.message.session_id
+                self._last_user_at = envelope.message.at or self._now()
+                self._initiative.record_user_reply()
+                self._cancel_pending_proactive()
+                self._task_count = len(envelope.tasks)
+                self._crisis = _is_crisis(envelope.message.text)
+                if envelope.presence is not None:
+                    self._presence = envelope.presence
+                turn = TurnContext.from_envelope(envelope)
+                turn.presence = turn.presence or (
+                    self._presence.summary if self._presence else None
+                )
+                turn.tasks = turn.tasks or self._tasks_text()
+                turn.desktop = self._desktop_text()
+                turn.world = self._world_text()
+                turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+                self._pending_inbound += 1
+                try:
+                    _ = await self._enqueue(turn)
+                finally:
+                    self._pending_inbound -= 1
+            except Exception:
+                # 单条消息处理失败不能让入站消费永久停摆。
+                log.exception("处理入站消息失败，跳过该条", 消息=message_id)
 
     async def _consume_events(self) -> None:
-        cursors = self._memory.load_cursors()
+        try:
+            cursors = self._memory.load_cursors()
+        except OSError:
+            log.exception("读取事件游标失败，本次从头订阅")
+            cursors = {}
         since = min(cursors.values()) if cursors else None
         async for event in self._control.subscribe(
             _EVENT_TOPICS, since_sequence=since, cursors=cursors
         ):
-            self._cache_event(event)
-            report = self._should_report(event)
-            log.debug(
-                "收到控制面事件",
-                主题=event.topic,
-                序号=event.sequence,
-                触发回合=report,
-            )
-            if report:
-                turn = TurnContext(
-                    user_text=event_brief(event),
-                    session_id=self._last_session_id,
-                    presence=self._presence.summary if self._presence else None,
-                    tasks=self._tasks_text(),
-                    desktop=self._desktop_text(),
-                    world=self._world_text(),
-                    origin="event",
-                    droppable=event.topic == "agent.progress",
-                )
-                turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
-                _ = await self._enqueue(turn)
             try:
-                self._memory.save_cursor(event.sequence, topic=event.topic)
-            except OSError as exc:
-                log.warning(
-                    "事件游标落盘失败，重启后可能重复消费",
+                self._cache_event(event)
+                report = self._should_report(event)
+                log.debug(
+                    "收到控制面事件",
                     主题=event.topic,
                     序号=event.sequence,
-                    错误类型=type(exc).__name__,
-                    错误消息=str(exc),
+                    触发回合=report,
+                )
+                if report:
+                    turn = TurnContext(
+                        user_text=event_brief(event),
+                        session_id=self._last_session_id,
+                        presence=self._presence.summary if self._presence else None,
+                        tasks=self._tasks_text(),
+                        desktop=self._desktop_text(),
+                        world=self._world_text(),
+                        origin="event",
+                        droppable=event.topic == "agent.progress",
+                    )
+                    turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+                    _ = await self._enqueue(turn)
+                try:
+                    self._memory.save_cursor(event.sequence, topic=event.topic)
+                except OSError as exc:
+                    log.warning(
+                        "事件游标落盘失败，重启后可能重复消费",
+                        主题=event.topic,
+                        序号=event.sequence,
+                        错误类型=type(exc).__name__,
+                        错误消息=str(exc),
+                    )
+            except Exception:
+                # 单条事件处理失败不能让事件消费永久停摆。
+                log.exception(
+                    "处理控制面事件失败，跳过该条",
+                    主题=event.topic,
+                    序号=event.sequence,
                 )
 
     def _should_report(self, event: CosmosEvent) -> bool:
@@ -642,7 +656,8 @@ class AliyaRuntime:
             )
             try:
                 runner = self._proactive_runner if turn.proactive else self._runner
-                assert runner is not None
+                if runner is None:
+                    raise RuntimeError("回合执行器未初始化")
                 await runner.run(turn=turn)
             except TimeoutError:
                 log.warning(
@@ -655,33 +670,41 @@ class AliyaRuntime:
                 log.exception("回合执行失败", 来源=turn.origin, 消息=turn.message_id or "-")
                 await self._fallback(turn)
             finally:
-                if self._config.memory.enabled and turn.replies:
-                    prefix = (
-                        f"{turn.message_id}:reply"
-                        if turn.message_id
-                        else f"{turn.origin}:{uuid4().hex}:reply"
-                    )
-                    for reply in turn.replies:
-                        self._memory.append_turn(
-                            prefix,
-                            "aliya",
-                            reply,
-                            session_id=turn.session_id or self._last_session_id,
-                        )
-                await self._maybe_compress_memory()
-                self._current_turn = None
+                # task_done 必须最先执行：后续清理失败不能把 queue.join() 卡死。
                 self._queue.task_done()
-                fields = {
-                    "来源": turn.origin,
-                    "耗时毫秒": round((time.monotonic() - started) * 1000),
-                    "回复条数": len(turn.replies),
-                    "已发送": turn.sent,
-                }
-                if turn.origin == "event":
-                    log.debug("回合结束", face=None, **fields)
-                else:
-                    log.info("回合结束", face=None, **fields)
-                await self._publish_context()
+                self._current_turn = None
+                try:
+                    if self._config.memory.enabled and turn.replies:
+                        prefix = (
+                            f"{turn.message_id}:reply"
+                            if turn.message_id
+                            else f"{turn.origin}:{uuid4().hex}:reply"
+                        )
+                        for reply in turn.replies:
+                            self._memory.append_turn(
+                                prefix,
+                                "aliya",
+                                reply,
+                                session_id=turn.session_id or self._last_session_id,
+                            )
+                    await self._maybe_compress_memory()
+                    fields = {
+                        "来源": turn.origin,
+                        "耗时毫秒": round((time.monotonic() - started) * 1000),
+                        "回复条数": len(turn.replies),
+                        "已发送": turn.sent,
+                    }
+                    if turn.origin == "event":
+                        log.debug("回合结束", face=None, **fields)
+                    else:
+                        log.info("回合结束", face=None, **fields)
+                    await self._publish_context()
+                except Exception:
+                    log.exception(
+                        "回合收尾失败",
+                        来源=turn.origin,
+                        消息=turn.message_id or "-",
+                    )
 
     async def _fallback(self, turn: TurnContext) -> None:
         if turn.sent:
@@ -694,62 +717,65 @@ class AliyaRuntime:
     async def _run_ticker(self) -> None:
         while True:
             await asyncio.sleep(self._config.initiative.tick_seconds)
-            if not self._config.initiative.enabled or self._pending_proactive:
-                continue
-            now = self._now()
-            decision = self._initiative.should_speak(
-                now=now,
-                presence=self._presence,
-                link=self._link,
-                last_user_at=self._last_user_at,
+            try:
+                await self._tick_once()
+            except Exception:
+                # 单轮失败不能让主动行为永久停摆。
+                log.exception("主动行为检查失败，跳过本轮")
+
+    async def _tick_once(self) -> None:
+        if not self._config.initiative.enabled or self._pending_proactive:
+            return
+        now = self._now()
+        decision = self._initiative.should_speak(
+            now=now,
+            presence=self._presence,
+            link=self._link,
+            last_user_at=self._last_user_at,
+        )
+        if not decision.should_speak:
+            return
+        preference = self._preference_gate.match(self._time_signals(now))
+        if not preference.matched:
+            log.debug(
+                "主动时间门控未命中",
+                原因=preference.reason,
+                距上次对话秒=(
+                    None
+                    if self._last_user_at is None
+                    else round((now - self._last_user_at).total_seconds())
+                ),
             )
-            if not decision.should_speak:
-                continue
-            preference = self._preference_gate.match(self._time_signals(now))
-            if not preference.matched:
-                log.debug(
-                    "主动时间门控未命中",
-                    原因=preference.reason,
-                    距上次对话秒=(
-                        None
-                        if self._last_user_at is None
-                        else round((now - self._last_user_at).total_seconds())
-                    ),
-                )
-                continue
-            user_text = (
-                f"现在是 {now:%H:%M}，距上次对话 {_gap_text(now, self._last_user_at)}。"
-                "\n（现在没有人说话。）"
-            )
-            if preference.condition:
-                user_text += f"\n可以考虑：{preference.condition}"
-            turn = TurnContext(
-                user_text=user_text,
-                session_id=self._last_session_id,
-                presence=self._presence.summary if self._presence else None,
-                tasks=self._tasks_text(),
-                desktop=self._desktop_text(),
-                world=self._world_text(),
-                proactive=True,
-                origin="proactive",
-            )
-            turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
-            self._pending_proactive.append(turn)
-            _ = await self._enqueue(turn)
-            log.info(
-                "主动回合已排队",
-                触发原因=decision.reason,
-                偏好条件=preference.condition or "-",
-                时间=f"{now:%H:%M}",
-            )
+            return
+        user_text = (
+            f"现在是 {now:%H:%M}，距上次对话 {_gap_text(now, self._last_user_at)}。"
+            "\n（现在没有人说话。）"
+        )
+        if preference.condition:
+            user_text += f"\n可以考虑：{preference.condition}"
+        turn = TurnContext(
+            user_text=user_text,
+            session_id=self._last_session_id,
+            presence=self._presence.summary if self._presence else None,
+            tasks=self._tasks_text(),
+            desktop=self._desktop_text(),
+            world=self._world_text(),
+            proactive=True,
+            origin="proactive",
+        )
+        turn.sender = lambda text, turn=turn: self._send_for_turn(turn, text)
+        self._pending_proactive.append(turn)
+        _ = await self._enqueue(turn)
+        log.info(
+            "主动回合已排队",
+            触发原因=decision.reason,
+            偏好条件=preference.condition or "-",
+            时间=f"{now:%H:%M}",
+        )
 
     def _time_signals(self, now: datetime | None = None) -> TimeSignals:
         """收集时间层可用的语义信号；只读缓存，不触发额外拉取。"""
-        topics = (
-            tuple(self._memory.load_open_topics())
-            if self._config.memory.enabled
-            else ()
-        )
+        topics = tuple(self._memory.load_open_topics()) if self._config.memory.enabled else ()
         return TimeSignals(
             now=now or self._now(),
             last_user_at=self._last_user_at,
@@ -854,9 +880,7 @@ class AliyaRuntime:
             if not detail:
                 continue
             percent = (
-                f"（{int(progress.progress * 100)}%）"
-                if progress.progress is not None
-                else ""
+                f"（{int(progress.progress * 100)}%）" if progress.progress is not None else ""
             )
             lines.append(f"{progress.label}{percent}：{detail}")
         return "\n".join(lines[:8]) or None
@@ -879,16 +903,12 @@ class AliyaRuntime:
             if hypotheses:
                 parts.append(
                     "可能："
-                    + "；".join(
-                        f"{item.statement}（{item.confidence:.0%}）" for item in hypotheses
-                    )
+                    + "；".join(f"{item.statement}（{item.confidence:.0%}）" for item in hypotheses)
                 )
         if view.action_windows:
             parts.append(
                 "时机："
-                + "；".join(
-                    f"{item.window} {item.suggestion}" for item in view.action_windows[:2]
-                )
+                + "；".join(f"{item.window} {item.suggestion}" for item in view.action_windows[:2])
             )
         return "\n".join(parts)
 

@@ -70,6 +70,12 @@ class TurnRunner:
                 messages.append(assistant(reply.content))
                 if not turn.sent:
                     _ = await turn.send(reply.content)
+                return
+
+            # 空回复既没有工具调用也没有内容：用户会收不到任何消息，按失败兜底。
+            log.warning("模型返回空回复，发送兜底回复", 轮次=round_index, 来源=turn.origin)
+            if not turn.sent:
+                _ = await turn.send(self._config.reply.fallback_text)
             return
 
         log.warning(

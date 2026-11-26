@@ -108,6 +108,7 @@ class FlowEnv:
 
 def build_settings(tmp_path: Path) -> Settings:
     settings = Settings()
+    settings.agent.control.socket_path = str(tmp_path / "aliya.sock")
     settings.agent.cosmos.contract.state_dir = str(tmp_path)
     settings.agent.cosmos.presence.push.typing_settle_seconds = 0.05
     settings.agent.cosmos.world.enabled = True
@@ -134,7 +135,8 @@ def build_settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture
-async def flow(tmp_path: Path) -> AsyncIterator[FlowEnv]:
+async def flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[FlowEnv]:
+    monkeypatch.setenv("ALIYA_CONTROL_TOKEN", "test-token")
     settings = build_settings(tmp_path)
     manager = build_cosmos_manager(settings)
     world = manager.get(WorldBridgeService)

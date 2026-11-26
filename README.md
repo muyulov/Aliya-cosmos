@@ -73,9 +73,9 @@ tests/           测试
 
 ```yaml
 app:
-  env: ${APP_ENV:dev}        # 部署时可用环境变量顶掉
+  env: dev                   # 部署时可改成 ${APP_ENV:dev}，由环境变量顶掉
 log:
-  level: INFO
+  level: DEBUG               # 仓库骨架用 DEBUG；代码内置默认是 INFO
   json: false
   layout: line               # line（默认，字段内联成一行）/ tree（字段成树）
   color: auto                # auto（仅终端）/ always / never
@@ -101,12 +101,14 @@ log:
 
 ### 配置项
 
-| YAML 路径 | 默认值 | 说明 |
+下表取 `data/config/cosmos.yaml` 的**当前值**（即进程实际生效的配置）；没有列出的字段回落到 `core/config/settings.py` 的内置默认。两者语义不同：删掉 YAML 里的某项后，取的是代码内置默认，而不是下表的值（例如 `log.level` 的代码默认是 `INFO`，仓库骨架覆盖成了 `DEBUG`）。
+
+| YAML 路径 | 仓库当前值 | 说明 |
 | --- | --- | --- |
 | `app.app_name` | `aliya-cosmos` | 应用名 |
 | `app.env` | `dev` | 环境，只能是 dev / test / prod |
 | `app.debug` | `true` | 调试开关 |
-| `log.level` | `INFO` | 日志级别 |
+| `log.level` | `DEBUG` | 日志级别；代码内置默认 `INFO` |
 | `log.json` | `false` | 是否输出 JSON 日志 |
 | `log.layout` | `line` | 输出布局：`line`（字段内联成一行，便于 grep 与按行采集）/ `tree`（字段缩进成树） |
 | `log.color` | `auto` | 控制台着色：`auto`（仅终端）/ `always` / `never`；日志文件永远不带颜色 |
@@ -118,15 +120,15 @@ log:
 | `log.compression` | `zip` | 归档压缩方式 |
 | `service.start_timeout` | `30` | 单个服务 `start()` 的超时秒数，必须为正数；写 `null` 表示不限制 |
 | `service.stop_timeout` | `30` | 单个服务 `stop()` 的超时秒数，必须为正数；同上 |
-| `clock.tz` | `UTC` | 时钟服务的时区，如 `Asia/Shanghai` |
+| `clock.tz` | `Asia/Shanghai` | 时钟服务的时区；代码内置默认 `UTC` |
 
 `embedding` 是独立的向量化端点，与 llm 分开配（DeepSeek 没有 embedding 端点，两家通常不是同一个服务）：
 
-| 字段 | 默认 | 说明 |
+| 字段 | 仓库当前值 | 说明 |
 | --- | --- | --- |
-| `base_url` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI 兼容端点地址 |
-| `api_key` | 空 | 密钥，YAML 里写 `${DASHSCOPE_API_KEY:}` 由 `.env` 提供；留空则该端点不可用（只警告，不影响启动） |
-| `model` | `text-embedding-v3` | 向量化模型 |
+| `base_url` | `http://127.0.0.1:9080/v1` | OpenAI 兼容端点地址（仓库骨架指向本地 llama.cpp）；代码内置默认是阿里云 compatible-mode |
+| `api_key` | `local` | YAML 里写 `${EMBEDDING_API_KEY:local}`；本地端点不校验鉴权，只是需要一个非空占位。留空则该端点不可用（只警告，不影响启动） |
+| `model` | `Qwen3-Embedding-4B-Q4_K_M` | 向量化模型；代码内置默认是 `text-embedding-v3` |
 | `timeout` | `60` | 单次请求超时秒数，必须为正数 |
 | `retries` | `2` | SDK 重试次数，`0` 关闭 |
 | `batch_size` | `10` | 单次请求最多几条文本；阿里 v3 上限就是 10（v1/v2 为 25、OpenAI 为 2048），超了会 400 |
@@ -134,14 +136,14 @@ log:
 
 `llm.chat` / `llm.vision` 是两个端点，字段完全相同（可指向同一服务，也可分开接不同供应商）：
 
-| 端点字段 | 默认 | 说明 |
+| 端点字段 | 仓库当前值 | 说明 |
 | --- | --- | --- |
-| `base_url` | `https://api.openai.com/v1` | 端点地址，接 DeepSeek 等兼容端点时改成对应地址 |
+| `base_url` | `https://api.deepseek.com/v1` | 端点地址，chat 与 vision 相同；换供应商时改这里。代码内置默认是 OpenAI 官方端点 |
 | `api_key` | 空 | 密钥，YAML 里写 `${DEEPSEEK_API_KEY:}` 由 `.env` 提供；留空则该端点不可用（只警告，不影响启动） |
-| `model` | `gpt-4o-mini` | 该端点的模型；走 vision 端点需显式传 `endpoint="vision"` |
+| `model` | `deepseek-flash` | 该端点的模型；走 vision 端点需显式传 `endpoint="vision"`。代码内置默认是 `gpt-4o-mini` |
 | `timeout` | `60` | 单次请求超时秒数，必须为正数 |
 | `retries` | `2` | SDK 重试次数，`0` 关闭 |
-| `structured_mode` | `json_schema` | 结构化输出模式，兼容端点不支持时改 `json_object` |
+| `structured_mode` | `json_object` | 结构化输出模式。仓库骨架用 `json_object`（DeepSeek 不支持 `json_schema`），该模式要求提示词里出现 json 字样；换成支持 `json_schema` 的端点时可改回 |
 | `temperature` | `null` | 温度，`null` 表示不传该参数（用服务端默认） |
 | `max_tokens` | `null` | 最大输出 token，`null` 表示不传该参数 |
 

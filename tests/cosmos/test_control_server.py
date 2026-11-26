@@ -267,9 +267,7 @@ async def test_subscribe_passes_per_topic_cursors(
     try:
         await hello(reader, writer)
         writer.write(
-            Subscribe(topics={"agent.result": 3, "presence.changed": 1})
-            .model_dump_json()
-            .encode()
+            Subscribe(topics={"agent.result": 3, "presence.changed": 1}).model_dump_json().encode()
             + b"\n"
         )
         await writer.drain()
@@ -388,3 +386,40 @@ async def test_unacked_inbound_is_replayed_on_reconnect(
     finally:
         writer2.close()
         await writer2.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_empty_token_is_rejected(
+    control_server: ControlServerService, socket_path: Path
+) -> None:
+    """服务端配了令牌时，空令牌客户端必须被拒绝（不能 fail-open）。"""
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        writer.write(
+            Hello(token="", contract_version="1.0", client_id="attacker").model_dump_json().encode()
+            + b"\n"
+        )
+        await writer.drain()
+        response = parse_rpc_line((await reader.readline()).decode())
+        assert response.type == "error"
+        assert response.error is not None
+        assert response.error.code == "unauthorized"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_start_without_token_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """未配置令牌时服务端 fail fast，而不是以无认证状态启动。"""
+    monkeypatch.delenv("ALIYA_CONTROL_TOKEN", raising=False)
+    settings = Settings()
+    settings.agent.control.socket_path = str(tmp_path / "aliya.sock")
+    service = ControlServerService(
+        FakeControl(),  # type: ignore[arg-type]
+        ClockService(ClockSettings()),
+        settings.agent,
+    )
+    with pytest.raises(RuntimeError):
+        await service.start()
+    assert not Path(settings.agent.control.socket_path).exists()

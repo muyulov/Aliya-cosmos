@@ -318,7 +318,17 @@ class RemoteControl:
         for client_msg_id, method, params in list(self._outbox):
             try:
                 _ = await self.call(method, params)
-            except (RemoteError, ConnectionError, TimeoutError) as exc:
+            except RemoteError as exc:
+                # 业务拒绝是终态：重放只会得到同样结果，继续重试会无限循环。
+                self._remove_outbox(client_msg_id)
+                log.warning(
+                    "补发的出站消息被业务拒绝，已丢弃",
+                    方法=method,
+                    错误码=exc.code,
+                    错误消息=str(exc),
+                )
+                continue
+            except (ConnectionError, TimeoutError) as exc:
                 log.debug(
                     "出站补发中断，等待下次重连",
                     方法=method,
@@ -341,7 +351,19 @@ class RemoteControl:
         if limit is not None and len(self._outbox) >= limit:
             log.warning("出站补发队列已满，将丢弃最旧消息", 上限=limit, 方法=method)
         self._outbox.append((client_msg_id, method, payload))
-        result = await self.call(method, payload)
+        try:
+            result = await self.call(method, payload)
+        except RemoteError as exc:
+            # 服务端已明确拒绝，消息不再是「未确认」状态，不能留在补发队列。
+            self._remove_outbox(client_msg_id)
+            log.warning(
+                "出站消息被业务拒绝，不再补发",
+                方法=method,
+                错误码=exc.code,
+                错误消息=str(exc),
+            )
+            raise
+        # 连接中断 / 超时：保留在队列里，等重连后由 _replay_outbox 补发。
         self._remove_outbox(client_msg_id)
         return result
 

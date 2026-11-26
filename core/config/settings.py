@@ -563,7 +563,9 @@ class AgentControlSettings(_AgentConfigNode):
     """控制面共享配置：服务端与客户端读同一份。"""
 
     socket_path: str = "data/state/aliya.sock"
+    #: 存放控制面令牌的环境变量名；令牌缺失时服务端拒绝启动
     token_env: str = "ALIYA_CONTROL_TOKEN"
+    #: 当前实现按单客户端设计：大于 1 时入站消息会广播给所有会话
     max_clients: int = Field(default=1, ge=1)
     request_timeout: float = Field(default=15, gt=0)
     outbox_limit: int = Field(default=200, ge=1)
