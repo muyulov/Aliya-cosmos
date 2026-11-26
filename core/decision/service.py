@@ -27,6 +27,7 @@ from core.decision.client import SYSTEMONE_PATH, build_client
 from core.decision.errors import (
     DecisionConfigError,
     DecisionConnectionError,
+    DecisionError,
     DecisionRequestError,
     DecisionResponseError,
     DecisionRetryError,
@@ -219,6 +220,11 @@ class DecisionService(Service):
         self._clients = {
             name: build_client(settings) for name, settings in self._endpoints() if settings.enabled
         }
+        self.log.info(
+            "判断端点已启用",
+            后端="、".join(self._clients) or "无",
+            数量=len(self._clients),
+        )
 
     @override
     async def stop(self) -> None:
@@ -259,8 +265,20 @@ class DecisionService(Service):
         payload: dict[str, object] = {"state": state, "questions": dict(questions)}
         if settings.model:
             payload["model"] = settings.model
+        # 只记问题 id，不记 state 与问题正文：正文该不该记由调用方决定
+        self.log.debug(
+            "判断调用开始",
+            face=None,
+            后端=name,
+            端点=settings.base_url,
+            模型=settings.model,
+            问题数=len(questions),
+            问题=sorted(questions),
+        )
         begin = time.perf_counter()
-        result = self._parse(await self._request(name, client, settings, payload), name)
+        result = self._parse(
+            await self._request(name, client, settings, payload, len(questions)), name
+        )
         self._log_done(begin, name, settings, result, len(questions))
         return result
 
@@ -393,31 +411,54 @@ class DecisionService(Service):
         client: httpx2.AsyncClient,
         settings: DecisionEndpointSettings,
         payload: dict[str, object],
+        question_count: int,
     ) -> dict[str, object]:
-        """发一次请求，可重试状态码按指数退避 + 抖动重试。"""
+        """发一次请求，可重试状态码按指数退避 + 抖动重试。
+
+        失败统一在这里收一条错误日志：重试过程中的每次失败已由「判断调用重试」
+        记录，最终失败还要有一条带尝试次数与总耗时的收口，否则日志会停在
+        「重试第 N 次」而没有结论。
+        """
         attempt = 0
-        while True:
-            async with _wrap_errors(settings.base_url, settings.model):
-                response = await client.post(SYSTEMONE_PATH, json=payload)
-            retryable = response.status_code in RETRY_STATUS
-            if not retryable or attempt >= settings.retries:
-                # 重试耗尽（仍是可重试状态码）时换子类：调用方可据此区分「限流 / 过载持续」
-                # 与普通 4xx / 5xx；非可重试状态码原样走 DecisionRequestError。
-                return self._body(response, settings, retry_exhausted=retryable)
-            delay = _backoff_delay(attempt)
-            # 端点取 settings.base_url，与成功日志同一个取值：同一个字段在两条日志里
-            # 值不同（一头是裸名 "laya"、另一头是 URL）会让采集端按端点聚合时分叉。
-            # 是哪一头由后端的 后端=name 表达。
-            self.log.warning(
-                "判断调用重试",
-                端点=settings.base_url,
-                后端=name,
-                状态码=response.status_code,
-                第几次=attempt + 1,
-                等待毫秒=round(delay * 1000, 1),
-            )
-            await asyncio.sleep(delay)
-            attempt += 1
+        begin = time.perf_counter()
+        try:
+            while True:
+                async with _wrap_errors(settings.base_url, settings.model):
+                    response = await client.post(SYSTEMONE_PATH, json=payload)
+                retryable = response.status_code in RETRY_STATUS
+                if not retryable or attempt >= settings.retries:
+                    # 重试耗尽（仍是可重试状态码）时换子类：调用方可据此区分「限流 / 过载持续」
+                    # 与普通 4xx / 5xx；非可重试状态码原样走 DecisionRequestError。
+                    return self._body(response, settings, retry_exhausted=retryable)
+                delay = _backoff_delay(attempt)
+                # 端点取 settings.base_url，与成功日志同一个取值：同一个字段在两条日志里
+                # 值不同（一头是裸名 "laya"、另一头是 URL）会让采集端按端点聚合时分叉。
+                # 是哪一头由后端的 后端=name 表达。
+                self.log.warning(
+                    "判断调用重试",
+                    端点=settings.base_url,
+                    后端=name,
+                    状态码=response.status_code,
+                    第几次=attempt + 1,
+                    等待毫秒=round(delay * 1000, 1),
+                )
+                await asyncio.sleep(delay)
+                attempt += 1
+        except DecisionError as exc:
+            fields: dict[str, object] = {
+                "后端": name,
+                "端点": settings.base_url,
+                "模型": settings.model,
+                "问题数": question_count,
+                "尝试次数": attempt + 1,
+                "耗时毫秒": _elapsed_ms(begin),
+            }
+            if isinstance(exc, DecisionRequestError):
+                fields["状态码"] = exc.status_code
+                if exc.request_id:
+                    fields["请求id"] = exc.request_id
+            self.log_error("判断调用失败", exc, face=None, **fields)
+            raise
 
     @staticmethod
     def _body(

@@ -391,6 +391,13 @@ class ServiceManager:
             try:
                 results.append(await service.health())
             except Exception as exc:
+                # 健康检查本身抛错不是「服务不健康」而是实现有问题，单独留痕：
+                # 结果里只有一行 detail，聚合接口的调用方未必会翻
+                service.log.warning(
+                    "健康检查抛错",
+                    错误类型=type(exc).__name__,
+                    错误消息=str(exc),
+                )
                 results.append(
                     HealthStatus(
                         name=service.label,
@@ -465,6 +472,14 @@ class ServiceManager:
         # 因此 services / names 的展示顺序与 stop_all 的关闭顺序都不用改
         self._order = [service_type for level in levels for service_type in level]
         self._built = True
+        # 装配摘要放在 DEBUG：默认 INFO 下启动日志已经有逐服务的「已启动」，
+        # 这里补的是「谁和谁同层、一共几层」——排查启动顺序时先看它
+        log.debug(
+            "服务装配完成",
+            服务数=len(self._order),
+            层数=len(levels),
+            分层=" / ".join("、".join(item.__name__ for item in level) for level in levels),
+        )
 
     @staticmethod
     def _index_config_nodes(settings: Settings) -> dict[type[BaseModel], BaseModel]:

@@ -97,6 +97,12 @@ class EmbeddingService(Service):
             self.log.warning(NO_API_KEY, 端点=self._config.base_url)
             return
         self._encoder = build_encoder(self._config)
+        self.log.info(
+            "向量化端点已就绪",
+            模型=self._config.model,
+            地址=self._config.base_url,
+            批大小=self._config.batch_size,
+        )
 
     @override
     async def stop(self) -> None:
@@ -130,12 +136,12 @@ class EmbeddingService(Service):
         self._check_texts((text,))
         resolved = _pick(dimensions, self._config.dimensions)
         encoder = self._require_encoder()
-        begin = time.perf_counter()
-        async with _wrap_errors(self._config.base_url, self._config.model):
+        self._log_start("embed", 1, resolved)
+        async with self._guard("embed", self._config.model) as begin:
             result = await encoder.encode([text], dimensions=resolved)
         vectors = self._reorder(result.items, 1)
         self._check_vectors(vectors, resolved)
-        self._log_batch(begin, 1, len(vectors[0]), result.prompt_tokens)
+        self._log_batch(begin, 1, len(vectors[0]), result.prompt_tokens, operation="embed")
         return vectors[0]
 
     async def embed_many(
@@ -157,16 +163,22 @@ class EmbeddingService(Service):
         encoder = self._require_encoder()
         size = self._config.batch_size
         batches = [texts[start : start + size] for start in range(0, len(texts), size)]
+        self._log_start("embed_many", len(texts), resolved, 批数=len(batches), 批大小=size)
         begin = time.perf_counter()
         vectors: list[list[float]] = []
         for batch in batches:
-            batch_begin = time.perf_counter()
-            async with _wrap_errors(self._config.base_url, self._config.model):
+            async with self._guard("embed_many", self._config.model) as batch_begin:
                 result = await encoder.encode(batch, dimensions=resolved)
             batch_vectors = self._reorder(result.items, len(batch))
             self._check_vectors(batch_vectors, resolved)
             vectors.extend(batch_vectors)
-            self._log_batch(batch_begin, len(batch), len(batch_vectors[0]), result.prompt_tokens)
+            self._log_batch(
+                batch_begin,
+                len(batch),
+                len(batch_vectors[0]),
+                result.prompt_tokens,
+                operation="embed_many",
+            )
         if len(batches) > 1:
             self.log.info(
                 "批量向量化完成",
@@ -215,15 +227,62 @@ class EmbeddingService(Service):
                     f"端点返回 {len(vector)} 维向量，与声明的 {dimensions} 维不符"
                 )
 
-    def _log_batch(
-        self, begin: float, count: int, dimension: int, prompt_tokens: int | None
+    @asynccontextmanager
+    async def _guard(self, operation: str, model: str) -> AsyncGenerator[float, None]:
+        """包住一次请求：yield 开始时间，失败时记一条可对账的错误日志后原样抛出。"""
+        begin = time.perf_counter()
+        try:
+            async with _wrap_errors(self._config.base_url, model):
+                yield begin
+        except EmbeddingError as exc:
+            fields: dict[str, object] = {
+                "操作": operation,
+                "模型": model,
+                "端点": self._config.base_url,
+                "耗时毫秒": _elapsed_ms(begin),
+            }
+            if isinstance(exc, EmbeddingRequestError):
+                fields["状态码"] = exc.status_code
+                if exc.request_id:
+                    fields["请求id"] = exc.request_id
+            self.log_error("向量化失败", exc, face=None, **fields)
+            raise
+
+    def _log_start(
+        self, operation: str, count: int, dimensions: int | None, **extra: object
     ) -> None:
-        """每批一条成功日志：只记模型 / 端点 / 条数 / 维度 / 耗时，不记正文。
+        """请求开始日志（DEBUG）：记本次的规模与目标维度。
+
+        `dimensions` 为 None 表示用模型原始维度，不记该字段，避免把「未指定」
+        渲染成 null。
+        """
+        fields: dict[str, object] = {
+            "操作": operation,
+            "模型": self._config.model,
+            "端点": self._config.base_url,
+            "文本数": count,
+        }
+        if dimensions is not None:
+            fields["目标维度"] = dimensions
+        fields.update(extra)
+        self.log.debug("向量化开始", face=None, **fields)
+
+    def _log_batch(
+        self,
+        begin: float,
+        count: int,
+        dimension: int,
+        prompt_tokens: int | None,
+        *,
+        operation: str = "embed",
+    ) -> None:
+        """每批一条成功日志：只记操作 / 模型 / 端点 / 条数 / 维度 / 耗时，不记正文。
 
         维度记的是实际返回的维数（未声明 dimensions 时它就是模型原始维度）；
         端点没返回用量时省略 输入token，不因为没得记而报错。
         """
         fields: dict[str, object] = {
+            "操作": operation,
             "模型": self._config.model,
             "端点": self._config.base_url,
             "文本数": count,

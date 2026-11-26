@@ -16,6 +16,7 @@ log:
   json: false # true 则输出 JSON 行，便于采集端直接解析
   layout: line # line（默认，字段内联成一行，便于 grep 与按行采集）/ tree（字段缩进成树）
   color: auto # 控制台着色：auto（仅终端）/ always / never；日志文件永远不带颜色
+  source: true # 是否在每条日志里带上调用点「文件名:行号」；压体积或对接固定格式时关掉
   dir: logs # 日志目录，相对当前工作目录
   # 文件名支持 loguru 时间模板，装配时求值 → 每次启动写一组独立文件。
   # 保留 {…} 占位符不只是命名方便：loguru 的 retention 靠它识别同族文件，

@@ -123,9 +123,7 @@ def format_line(record: Record, *, stack: str | None = None, color: bool = False
     level_name = _level_name_of(record)
     face = _pick_face(extra.get("face"), level_name)
 
-    parts = [
-        _head(record, level_name, face, color=color, one_line=True, source=_source_of(extra))
-    ]
+    parts = [_head(record, level_name, face, color=color, one_line=True, source=_source_of(extra))]
     parts.extend(
         f"{_paint(key, ANSI_GRAY, color=color)}={_escape_newlines(render_value(value))}"
         for key, value in _fields_of(extra).items()

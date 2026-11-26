@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -388,6 +389,22 @@ def test_日志带上调用点来源(tmp_path: Path) -> None:
 
     text = files.app.read_text(encoding="utf-8")
     assert "test_logger_sinks.py:" in text
+
+
+def test_stacklevel_把来源落在包装层的调用者(tmp_path: Path) -> None:
+    """回归：Service.log_error 这类包装层要多跳一层，来源才是业务代码。"""
+    from core.logger import log
+
+    def wrapper() -> None:
+        log.stacklevel().info("经包装层")
+
+    files = setup_logging(_cfg(tmp_path))
+    line = inspect.currentframe().f_lineno + 1
+    wrapper()
+    logger.remove()
+
+    text = files.app.read_text(encoding="utf-8")
+    assert f"test_logger_sinks.py:{line}" in text
 
 
 def test_关闭来源后不输出调用点(tmp_path: Path) -> None:

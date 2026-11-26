@@ -5,6 +5,9 @@
 - 主日志文件：级别跟随配置，按天轮转，文件名带启动时间戳。
 - 错误日志文件：级别固定 ERROR，按天轮转，便于运维只翻错误。
 
+调用点来源（`文件名:行号`）由 filter 从 record 的 `file` / `line` 提取一次并写进
+extra，三个 sink 共用；`LogSettings.source` 关闭时写入空串，渲染层据此省略。
+
 着色的边界：只有控制台可能带 ANSI 转义，文件永远不带（`colorize=False`），
 否则 `cat` / `less` 看到的是满屏乱码。
 
@@ -70,7 +73,7 @@ def _source_of(record: Record) -> str:
     """
     name = getattr(record.get("file"), "name", "")
     line = record.get("line")
-    if not isinstance(name, str) or not name or not isinstance(line, int):
+    if not isinstance(name, str) or not name:
         return ""
     return f"{name}:{line}"
 

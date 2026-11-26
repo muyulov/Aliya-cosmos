@@ -148,6 +148,7 @@ log:
 | `log.json` | `false` | 是否输出 JSON 日志 |
 | `log.layout` | `line` | 输出布局：`line`（字段内联成一行，便于 grep 与按行采集）/ `tree`（字段缩进成树） |
 | `log.color` | `auto` | 控制台着色：`auto`（仅终端）/ `always` / `never`；日志文件永远不带颜色 |
+| `log.source` | `true` | 是否在每条日志里带上调用点 `文件名:行号` |
 | `log.dir` | `logs` | 日志目录 |
 | `log.file_name` | `cosmos-main-{time:%Y%m%d-%H%M%S}.log` | 主日志文件名，支持 loguru 时间模板（装配时求值，故每次启动一个独立文件） |
 | `log.error_file_name` | `cosmos-error-{time:%Y%m%d-%H%M%S}.log` | 错误日志文件名，同上。两个名字的前缀不能互为包含关系 |
@@ -224,18 +225,20 @@ log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消�
 默认布局是单行（`log.layout: line`）：字段内联成 `键=值`，一条记录（除堆栈外）只占一行，便于 grep 与按行采集：
 
 ```text
-2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队 | 参与者=qq:6329133635628374381 | 已取消旧计划=0
+2026-08-27 23:09:52 [I] dispatcher.py:42 (^_^)/ 用户回合已入队 | 参与者=qq:6329133635628374381 | 已取消旧计划=0
 ```
 
 `log.layout: tree` 换成缩进树，人读更清楚：
 
 ```text
-2026-08-27 23:09:52 [I] (^_^)/ 用户回合已入队
+2026-08-27 23:09:52 [I] dispatcher.py:42 (^_^)/ 用户回合已入队
     ├─ 参与者: qq:6329133635628374381
     └─ 已取消旧计划: 0
 ```
 
-颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集；`time` / `level` / `message` / `face` / `exception` 是保留键，业务字段与它们同名时以保留键为准（单行与树形格式没有这个限制——业务字段独立于元数据，不与之混排）。
+级别后面的 `dispatcher.py:42` 是调用点来源（文件:行号），由 `log.source` 控制，默认开启。它由日志门面自动跳过自身与包装层得到，不需要调用点手写；`Service.log_error` 这类包装也会把来源落在真正调用它的业务代码上。压日志体积或对接固定格式采集时设 `log.source: false`。
+
+颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集；`time` / `level` / `message` / `face` / `exception` / `source` 是保留键，业务字段与它们同名时以保留键为准（单行与树形格式没有这个限制——业务字段独立于元数据，不与之混排）。
 
 `log.color` 控制控制台着色（时间戳暗灰、级别与消息按级别上色、字段名暗灰），`always` 可在 IDE 输出窗、CI 面板这类拿不到 `isatty` 的地方强制打开。**颜色只进控制台**：文件 sink 永远不写着 ANSI 转义序列。
 
@@ -326,7 +329,7 @@ async def main(svc: LLMService, picture_url: str) -> None:
 
 | 约定 | 说明 |
 | --- | --- |
-| 不记正文 | 日志只记模型 / 端点 / 耗时 / token 用量；消息正文该不该记由调用方自己决定并自己打 |
+| 不记正文 | 日志记调用开始（操作 / 模型 / 端点 / 消息数 / 采样参数，DEBUG）与完成（操作 / 模型 / 端点 / 耗时 / token），失败记错误类型与状态码；消息正文该不该记由调用方自己决定并自己打 |
 | 不自动多轮 | `chat_tools` 只发一轮并返回 `tool_calls`，回传用 `assistant(tool_calls=...)` + `tool_result(...)`，循环由调用方写 |
 | chat / vision 两端点 | 两个端点各自带连接与采样参数，可指向同一服务也可分开接；端点只按 `endpoint=` 显式选（多模态传 `"vision"`），不给就走 chat——不按模型名自动切换。用 Chat Completions 而非 Responses API，因为兼容端点普遍只实现前者 |
 | 缺密钥不 fail fast | 端点没配 `api_key` 时只警告、不建客户端；两个端点全没配健康检查才 unhealthy，调用时才抛 `LLMConfigError` |
@@ -372,7 +375,7 @@ async def main(svc: EmbeddingService, texts: list[str]) -> None:
 | `embed_many` 只收序列 | 传裸字符串（`str` 本身就是 `Sequence[str]`）会抛 `EmbeddingInputError`，否则会被静默按字符拆成 N 条向量；单个字符串请用 `embed()` |
 | 缺密钥不 fail fast | 没配 `api_key` 时只警告、不建内核，健康检查 unhealthy，调用时才抛 `EmbeddingConfigError` |
 | 重试交给 SDK | 超时与重试由端点的 `timeout` / `retries` 控制 |
-| 不记正文 | 日志只记模型 / 端点 / 文本数 / 维度 / 耗时 / 输入 token |
+| 不记正文 | 日志记调用开始（操作 / 模型 / 端点 / 文本数 / 目标维度，DEBUG）与每批完成（操作 / 文本数 / 维度 / 耗时 / 输入 token），失败记错误类型与状态码；文本正文不记 |
 
 错误全部继承 `EmbeddingError`，原始 SDK 异常挂在 `__cause__`：
 
@@ -431,7 +434,7 @@ async def main(svc: DecisionService, message: str) -> None:
 
 | 约定 | 说明 |
 | --- | --- |
-| 不记正文 | 日志只记模型 / 端点 / 后端 / 问题数 / 耗时 / token；`state` 与 `questions` 的正文由调用方决定要不要自己记 |
+| 不记正文 | 日志记调用开始（后端 / 模型 / 端点 / 问题数 / 问题 id，DEBUG）与完成（后端 / 问题数 / 耗时 / token），失败记尝试次数与状态码；`state` 与 `questions` 的正文由调用方决定要不要自己记 |
 | `confidence` 不能跨后端比较 | Jev 的 `confidence` 是 `(n·p_max−1)/(n−1)`，Laya 是 `1−归一化熵`，两个数不是同一个量；阈值要按当前 `backend` 单独校准 |
 | 零样本质量很差 | 官方 model card 自述「Laya 是便于特化的基座，不是零样本决策引擎」（零样本准确率接近随机），判断结果必须配阈值或人工兜底 |
 | 两端点同协议 | jev 与 laya 走同一套 `/systemone` 协议、字段完全相同，换 `base_url` 即可切换供应商 |

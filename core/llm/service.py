@@ -145,6 +145,18 @@ class LLMService(Service):
             return
         self._chat = self._build("chat", self._config.chat, self._chat)
         self._vision = self._build("vision", self._config.vision, self._vision)
+        # 逐个端点报「已就绪」：只打一条汇总看不出缺的是哪一头，排查配置时还得回翻
+        for name, endpoint, client in (
+            ("chat", self._config.chat, self._chat),
+            ("vision", self._config.vision, self._vision),
+        ):
+            if client is not None:
+                self.log.info(
+                    "LLM 端点已就绪",
+                    端点=name,
+                    模型=endpoint.model,
+                    地址=endpoint.base_url,
+                )
 
     @override
     async def stop(self) -> None:
@@ -197,8 +209,15 @@ class LLMService(Service):
         `endpoint` 显式选端点（多模态传 `vision`）；不给则走 chat。
         """
         client, slot, resolved = self._resolve_endpoint(model, endpoint)
-        begin = time.perf_counter()
-        async with _wrap_errors(slot.base_url, resolved):
+        self._log_start(
+            "chat",
+            slot,
+            resolved,
+            len(messages),
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        async with self._guard("chat", slot, resolved) as begin:
             response = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
@@ -212,6 +231,7 @@ class LLMService(Service):
             resolved,
             usage.prompt_tokens if usage else None,
             usage.completion_tokens if usage else None,
+            operation="chat",
         )
         return self._content(response)
 
@@ -229,8 +249,17 @@ class LLMService(Service):
         SDK 明确「流已消费则不重试」，中途断流会直接抛错，是否重放由调用方决定。
         """
         client, slot, resolved = self._resolve_endpoint(model, endpoint)
-        begin = time.perf_counter()
-        async with _wrap_errors(slot.base_url, resolved):
+        self._log_start(
+            "stream",
+            slot,
+            resolved,
+            len(messages),
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        first_chunk_ms: float | None = None
+        chunk_count = 0
+        async with self._guard("stream", slot, resolved) as begin:
             chunks = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
@@ -241,8 +270,19 @@ class LLMService(Service):
             async for chunk in chunks:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 if delta:
+                    if first_chunk_ms is None:
+                        first_chunk_ms = _elapsed_ms(begin)
+                    chunk_count += 1
                     yield delta
-        self._log_done(begin, slot, resolved, None)
+        self._log_done(
+            begin,
+            slot,
+            resolved,
+            None,
+            None,
+            operation="stream",
+            extra={"首包毫秒": first_chunk_ms, "片段数": chunk_count},
+        )
 
     async def chat_structured(
         self,
@@ -259,8 +299,16 @@ class LLMService(Service):
         不传 strict：strict 要求所有字段 required，默认关掉更不容易踩坑。
         """
         client, slot, resolved = self._resolve_endpoint(model, endpoint)
-        begin = time.perf_counter()
-        async with _wrap_errors(slot.base_url, resolved):
+        self._log_start(
+            "structured",
+            slot,
+            resolved,
+            len(messages),
+            temperature=temperature,
+            max_tokens=max_tokens,
+            结构类型=schema.__name__,
+        )
+        async with self._guard("structured", slot, resolved) as begin:
             response = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
@@ -275,6 +323,8 @@ class LLMService(Service):
             resolved,
             usage.prompt_tokens if usage else None,
             usage.completion_tokens if usage else None,
+            operation="structured",
+            extra={"结构类型": schema.__name__},
         )
         content = self._content(response)
         try:
@@ -294,8 +344,16 @@ class LLMService(Service):
     ) -> AssistantReply:
         """工具调用（单轮）：返回正文与 tool_calls，不自动发起第二轮。"""
         client, slot, resolved = self._resolve_endpoint(model, endpoint)
-        begin = time.perf_counter()
-        async with _wrap_errors(slot.base_url, resolved):
+        self._log_start(
+            "tools",
+            slot,
+            resolved,
+            len(messages),
+            temperature=temperature,
+            max_tokens=max_tokens,
+            工具数=len(tools),
+        )
+        async with self._guard("tools", slot, resolved) as begin:
             response = await client.chat.completions.create(
                 model=resolved,
                 messages=list(messages),
@@ -310,6 +368,8 @@ class LLMService(Service):
             resolved,
             usage.prompt_tokens if usage else None,
             usage.completion_tokens if usage else None,
+            operation="tools",
+            extra={"工具数": len(tools)},
         )
         if not response.choices:
             raise LLMResponseError("LLM 返回体没有 choices")
@@ -393,6 +453,56 @@ class LLMService(Service):
             raise LLMResponseError("LLM 返回的消息内容为 None（可能被工具调用占用）")
         return content
 
+    @asynccontextmanager
+    async def _guard(
+        self, operation: str, endpoint: LLMEndpointSettings, model: str
+    ) -> AsyncGenerator[float, None]:
+        """包住一次调用：yield 开始时间，失败时记一条可对账的错误日志后原样抛出。
+
+        错误日志与成功日志共用 操作 / 模型 / 端点 / 耗时毫秒 四个字段，成功与
+        失败能在同一组维度上聚合；状态码与请求 id 只在端点返回错误时才出现。
+        """
+        begin = time.perf_counter()
+        try:
+            async with _wrap_errors(endpoint.base_url, model):
+                yield begin
+        except LLMError as exc:
+            fields: dict[str, object] = {
+                "操作": operation,
+                "模型": model,
+                "端点": endpoint.base_url,
+                "耗时毫秒": _elapsed_ms(begin),
+            }
+            if isinstance(exc, LLMRequestError):
+                fields["状态码"] = exc.status_code
+                if exc.request_id:
+                    fields["请求id"] = exc.request_id
+            self.log_error("LLM 调用失败", exc, face=None, **fields)
+            raise
+
+    def _log_start(
+        self,
+        operation: str,
+        endpoint: LLMEndpointSettings,
+        model: str,
+        message_count: int,
+        **params: object,
+    ) -> None:
+        """调用开始日志（DEBUG）：补齐请求规模与采样参数。
+
+        成功日志回答「花了多久、用了多少 token」，开始日志回答「发出去的是什么
+        规模」——长会话卡住时，消息条数往往比耗时更先暴露问题。
+        """
+        fields: dict[str, object] = {
+            "操作": operation,
+            "模型": model,
+            "端点": endpoint.base_url,
+            "消息数": message_count,
+        }
+        # None 表示「未显式指定、跟随端点配置」，记成 null 只会制造噪音
+        fields.update({key: value for key, value in params.items() if value is not None})
+        self.log.debug("LLM 调用开始", face=None, **fields)
+
     def _log_done(
         self,
         begin: float,
@@ -400,12 +510,17 @@ class LLMService(Service):
         model: str,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
+        *,
+        operation: str = "chat",
+        extra: dict[str, object] | None = None,
     ) -> None:
-        """调用成功日志：只记模型 / 端点 / 耗时 / token 用量，不记正文。
+        """调用成功日志：只记操作 / 模型 / 端点 / 耗时 / token 用量，不记正文。
 
         兼容端点未必返回 usage，取不到就省略 token 字段，不因为没得记而报错。
+        `extra` 用于各操作自己的补充维度（流式的首包与片段数、结构化的 schema 名）。
         """
         fields: dict[str, object] = {
+            "操作": operation,
             "模型": model,
             "端点": endpoint.base_url,
             "耗时毫秒": _elapsed_ms(begin),
@@ -414,5 +529,7 @@ class LLMService(Service):
             fields["输入token"] = prompt_tokens
         if completion_tokens is not None:
             fields["输出token"] = completion_tokens
+        if extra:
+            fields.update({key: value for key, value in extra.items() if value is not None})
         # 显式传 face：fields 的值是 object，**fields 展开时会被逐个形参对账
         self.log.info("LLM 调用完成", face=None, **fields)

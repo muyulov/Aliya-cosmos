@@ -285,6 +285,11 @@ class AgentRuntimeService(Service):
         self._active = True
         self._parallel = asyncio.Semaphore(max(1, self._config.cosmos.dispatch.max_parallel))
         self._monitor = asyncio.create_task(self._watch_heartbeats())
+        self.log.info(
+            "运行时已就绪",
+            并发上限=max(1, self._config.cosmos.dispatch.max_parallel),
+            心跳巡检秒=HEARTBEAT_TICK_SECONDS,
+        )
 
     @override
     async def stop(self) -> None:
@@ -296,6 +301,8 @@ class AgentRuntimeService(Service):
             _ = self._monitor.cancel()
             self._monitor = None
         running = [record for record in self._tasks.values() if record.task is not None]
+        if running:
+            self.log.info("正在停止运行时", 运行任务数=len(running))
         for record in running:
             record.cancelled = True
         tasks = [record.task for record in running if record.task is not None]
@@ -490,6 +497,12 @@ class AgentRuntimeService(Service):
             cached = self._cached(request_id)
             if cached is not None:
                 # 幂等重放不能再触发 supersede，否则会把正在跑的旧任务取消。
+                self.log.debug(
+                    "命中幂等窗口，复用任务",
+                    agent_id=agent_id,
+                    task_id=cached.task_id,
+                    request_id=request_id,
+                )
                 return cached
         await self._supersede(agent_id, session_id)
         record = self._prepare(
@@ -540,6 +553,12 @@ class AgentRuntimeService(Service):
             raise AgentNotFoundError(f"任务不存在：{task_id}", reason="task_not_found")
         if record.done.is_set():
             return
+        self.log.info(
+            "收到取消请求",
+            agent_id=record.request.agent_id,
+            task_id=task_id,
+            已排队=record.task is None,
+        )
         record.cancelled = True
         if record.task is None:
             # 排队中或尚未首次调度：直接收口，不能等一个不存在的协程。
@@ -559,6 +578,12 @@ class AgentRuntimeService(Service):
             slot.stalled = True
             slot.status = "stalled"
             await self.publish_state(record.request.agent_id)
+            self.log.warning(
+                "取消宽限内未退出，标记 stalled",
+                agent_id=record.request.agent_id,
+                task_id=task_id,
+                宽限秒=TIMEOUT_GRACE_SECONDS,
+            )
             raise
 
     async def retry(self, task_id: str) -> TaskHandle:
@@ -571,6 +596,12 @@ class AgentRuntimeService(Service):
             raise AgentInvokeError("该任务不允许重试", agent_id=card.id, code="not_retriable")
         if record.result is None or record.result.status not in {"failed", "partial"}:
             raise AgentInvokeError("只有失败的任务可以重试", agent_id=card.id, code="not_retriable")
+        self.log.info(
+            "重试失败任务",
+            agent_id=card.id,
+            task_id=task_id,
+            上次状态=record.result.status,
+        )
         return await self.submit(
             record.request.agent_id,
             dict(record.request.params),
@@ -715,11 +746,23 @@ class AgentRuntimeService(Service):
         record.finished_at = record.started_at
         record.done.set()
         self._tasks[task_id] = record
+        self.log.warning(
+            "任务提交被拒",
+            agent_id=task.agent_id,
+            task_id=task_id,
+            错误码=str(code),
+            错误消息=str(exc),
+        )
         return record
 
     def _start(self, record: _Record) -> None:
         """按并发策略启动或入队；同步执行，判定不依赖事件循环调度。"""
         if not self._active:
+            self.log.debug(
+                "运行时已停止，任务直接取消",
+                agent_id=record.request.agent_id,
+                task_id=record.task_id,
+            )
             self._cancel_record(record)
             return
         agent_id = record.request.agent_id
@@ -734,11 +777,25 @@ class AgentRuntimeService(Service):
                 )
                 record.status = "abnormal"
                 record.done.set()
+                self.log.warning(
+                    "并发已满，任务被拒绝",
+                    agent_id=agent_id,
+                    task_id=record.task_id,
+                    并发上限=slot.max_concurrent,
+                )
                 raise AgentBusyError(f"{agent_id} 并发已满", agent_id=agent_id)
             slot.queue.append(record)
             slot.status = "queued"
             record.status = "queued"
             record.handle.queued = True
+            self.log.info(
+                "任务已排队",
+                agent_id=agent_id,
+                task_id=record.task_id,
+                排队数=len(slot.queue),
+                运行中=slot.running,
+                并发上限=slot.max_concurrent,
+            )
             self._spawn(self.publish_state(agent_id))
             return
         slot.running += 1
@@ -750,6 +807,14 @@ class AgentRuntimeService(Service):
         record.started_perf = time.perf_counter()
         record.last_heartbeat_at = record.started_at
         slot.last_heartbeat_at = record.started_at
+        self.log.info(
+            "任务开始执行",
+            agent_id=agent_id,
+            task_id=record.task_id,
+            运行中=slot.running,
+            并发上限=slot.max_concurrent,
+            标签=record.label,
+        )
         record.task = asyncio.create_task(self._execute(record, slot))
 
     async def _execute(self, record: _Record, slot: _Slot) -> None:
@@ -797,6 +862,13 @@ class AgentRuntimeService(Service):
         record.started_perf = time.perf_counter()
         record.last_heartbeat_at = record.started_at
         slot.last_heartbeat_at = record.started_at
+        self.log.debug(
+            "任务出队启动",
+            agent_id=record.request.agent_id,
+            task_id=record.task_id,
+            剩余排队=len(slot.queue),
+            运行中=slot.running,
+        )
         record.task = asyncio.create_task(self._execute(record, slot))
 
     async def _run_handler(self, record: _Record, slot: _Slot) -> None:
@@ -890,9 +962,32 @@ class AgentRuntimeService(Service):
             else:
                 await self._publish_abnormal(record.request.agent_id, "error", error)
 
+        self._log_finished(record, normalized)
         record.done.set()
         await self.publish_state(record.request.agent_id)
         await self.publish_result(record)
+
+    def _log_finished(self, record: _Record, result: AgentResult) -> None:
+        """任务终态统一日志：成功 / 失败 / 取消 / 超时都经过 `_finalize`。
+
+        失败与部分成功走 WARNING，便于错误日志文件单独收口；字段与
+        「任务开始执行」同形（agent_id / task_id），可按任务 id 串起完整生命周期。
+        """
+        fields: dict[str, object] = {
+            "agent_id": record.request.agent_id,
+            "task_id": record.task_id,
+            "状态": result.status,
+            "耗时毫秒": round(record.elapsed * 1000, 1),
+        }
+        if record.step:
+            fields["步骤"] = record.step
+        if result.error is not None:
+            fields["错误码"] = result.error.code
+            fields["错误消息"] = result.error.message
+        if result.status in {"failed", "partial"}:
+            self.log.warning("任务结束", face=None, **fields)
+        else:
+            self.log.info("任务结束", face=None, **fields)
 
     def _normalize(self, record: _Record, result: AgentResult | None) -> AgentResult:
         """兜底：handler 没返回结果 / 摘要为空 / 内容超长。"""
@@ -967,20 +1062,26 @@ class AgentRuntimeService(Service):
                 for record in chunk:
                     try:
                         self._start(record)
-                    except CosmosError:
+                    except CosmosError as exc:
                         # 提交期错误（并发满 / agent 被注销）都收敛成 skipped
-                        self._skip(record)
+                        self._skip(record, 原因=f"提交失败：{type(exc).__name__}")
                 _ = await asyncio.gather(*(record.done.wait() for record in chunk))
             for index in layer:
                 record = records[index]
                 if record.result is not None and record.result.status in {"failed", "partial"}:
                     failed.add(index)
 
-    def _skip(self, record: _Record) -> None:
-        """上游失败 → 下游不执行，结果标 skipped。"""
+    def _skip(self, record: _Record, *, 原因: str = "上游任务失败") -> None:
+        """上游失败或提交期错误 → 不执行，结果标 skipped。"""
+        self.log.warning(
+            "任务跳过",
+            agent_id=record.request.agent_id,
+            task_id=record.task_id,
+            原因=原因,
+        )
         record.result = AgentResult.failed(
             code="skipped",
-            message="上游任务失败，已跳过",
+            message=f"{原因}，已跳过",
             retriable=False,
         )
         record.status = "abnormal"
@@ -1056,6 +1157,13 @@ class AgentRuntimeService(Service):
                     slot = self.slot(record.request.agent_id)
                     slot.stalled = True
                     slot.status = "stalled"
+                    self.log.warning(
+                        "心跳超时，标记 stalled",
+                        agent_id=record.request.agent_id,
+                        task_id=record.task_id,
+                        静默秒=round(elapsed, 1),
+                        阈值秒=card.execution.heartbeat_seconds,
+                    )
                     await self.publish_state(record.request.agent_id)
                     await self._publish_abnormal(record.request.agent_id, "stalled", None)
 

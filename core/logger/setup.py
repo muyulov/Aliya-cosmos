@@ -42,9 +42,9 @@ def _caller_depth() -> int:
 
     固定写 depth=2 不够用：`Service.log_error` 这类包装层会再套一层，来源就
     停在包装函数上。这里按文件名判断——只要还在 `core/logger/` 里就继续往上走，
-    第一个外部帧就是调用点。包装层可再传 `stacklevel` 多跳一层。
+    第一个外部帧就是调用点。包装层可用 `log.stacklevel()` 再多跳一层。
     """
-    frame = sys._getframe(1)
+    frame = sys._getframe(1)  # pyright: ignore[reportPrivateUsage]
     depth = 0
     while frame is not None and Path(frame.f_code.co_filename).parent == _LOGGER_DIR:
         frame = frame.f_back
@@ -65,9 +65,13 @@ class Log:
     #: 颜文字常量表，便于 log.face.CHEER 这样取用
     face: ModuleType = faces_module
 
-    def __init__(self, base: dict[str, object] | None = None, prefix: str = "") -> None:
+    def __init__(
+        self, base: dict[str, object] | None = None, prefix: str = "", offset: int = 0
+    ) -> None:
         self._base: dict[str, object] = dict(base) if base else {}
         self._prefix: str = prefix
+        #: 来源定位的额外跳层数，由 stacklevel() 派生，见 _caller_depth
+        self._offset: int = offset
 
     def bind(self, **kv: object) -> Log:
         """返回带基础字段的派生门面。
@@ -78,7 +82,7 @@ class Log:
         与既有基础字段同名时同样以后一次为准：bind(服务="x").bind(服务="y")
         的结果是 服务=y。
         """
-        return Log({**self._base, **kv}, self._prefix)
+        return Log({**self._base, **kv}, self._prefix, self._offset)
 
     def prefix(self, text: str) -> Log:
         """返回带消息前缀的派生门面，渲染为 [text] 消息。
@@ -86,68 +90,54 @@ class Log:
         多次调用时以后一次为准（覆盖而非追加）：prefix("A").prefix("B")
         渲染为 [B] 消息。
         """
-        return Log(self._base, text)
+        return Log(self._base, text, self._offset)
+
+    def stacklevel(self, levels: int = 1) -> Log:
+        """返回「来源再上跳 levels 层」的派生门面。
+
+        供包装函数使用：`Service.log_error` 调 `self.log.stacklevel().error(...)`，
+        来源才会落在调用 `log_error` 的业务代码上，而不是包装函数自己。
+        做成派生实例而不是方法形参，是为了不给 info/error 增加命名参数——
+        否则 `**fields` 展开时类型检查会认为字段可能撞上这个形参。
+        """
+        return Log(self._base, self._prefix, self._offset + levels)
 
     def _compose(self, message: str) -> str:
         return f"[{self._prefix}] {message}" if self._prefix else message
 
-    def _emit(
-        self,
-        level: str,
-        message: str,
-        face: str | None = None,
-        *,
-        stacklevel: int = 0,
-        **fields: object,
-    ) -> None:
+    def _emit(self, level: str, message: str, face: str | None = None, **fields: object) -> None:
         resolved = face or faces_module.DEFAULT_BY_LEVEL.get(level.upper(), "")
         merged = {**self._base, **context_module.current(), **fields}
         # 动态算 depth：跳过门面自身的帧，来源才落在业务调用点而不是 setup.py
-        depth = _caller_depth() + stacklevel
+        depth = _caller_depth() + self._offset
         logger.bind(face=resolved, fields=merged).opt(depth=depth).log(
             level.upper(), self._compose(message)
         )
 
-    def debug(
-        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
-    ) -> None:
-        self._emit("DEBUG", message, face, stacklevel=stacklevel, **fields)
+    def debug(self, message: str, face: str | None = None, **fields: object) -> None:
+        self._emit("DEBUG", message, face, **fields)
 
-    def info(
-        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
-    ) -> None:
-        self._emit("INFO", message, face, stacklevel=stacklevel, **fields)
+    def info(self, message: str, face: str | None = None, **fields: object) -> None:
+        self._emit("INFO", message, face, **fields)
 
-    def success(
-        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
-    ) -> None:
-        self._emit("SUCCESS", message, face, stacklevel=stacklevel, **fields)
+    def success(self, message: str, face: str | None = None, **fields: object) -> None:
+        self._emit("SUCCESS", message, face, **fields)
 
-    def warning(
-        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
-    ) -> None:
-        self._emit("WARNING", message, face, stacklevel=stacklevel, **fields)
+    def warning(self, message: str, face: str | None = None, **fields: object) -> None:
+        self._emit("WARNING", message, face, **fields)
 
-    def error(
-        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
-    ) -> None:
-        self._emit("ERROR", message, face, stacklevel=stacklevel, **fields)
+    def error(self, message: str, face: str | None = None, **fields: object) -> None:
+        self._emit("ERROR", message, face, **fields)
 
-    def critical(
-        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
-    ) -> None:
-        self._emit("CRITICAL", message, face, stacklevel=stacklevel, **fields)
+    def critical(self, message: str, face: str | None = None, **fields: object) -> None:
+        self._emit("CRITICAL", message, face, **fields)
 
-    def exception(
-        self, message: str, face: str | None = None, *, stacklevel: int = 0, **fields: object
-    ) -> None:
+    def exception(self, message: str, face: str | None = None, **fields: object) -> None:
         """记录异常并附带 traceback。"""
         resolved = face or faces_module.DEFAULT_BY_LEVEL.get("ERROR", "")
         merged = {**self._base, **context_module.current(), **fields}
-        depth = _caller_depth() + stacklevel
-        logger.bind(face=resolved, fields=merged).opt(depth=depth).exception(
-            self._compose(message)
-        )
+        depth = _caller_depth() + self._offset
+        logger.bind(face=resolved, fields=merged).opt(depth=depth).exception(self._compose(message))
 
     @contextmanager
     def context(self, **kv: object) -> Generator[None, None, None]:
