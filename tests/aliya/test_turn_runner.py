@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from agent.aliya.prompt.builder import PromptBuilder
@@ -13,6 +15,9 @@ class FakeRuntime:
         self.delivered: list[str] = []
         #: 模拟 AliyaRuntime 的 _current_turn：工具发送后同步回合的 sent 状态
         self.turn: TurnContext | None = None
+
+    def now(self) -> datetime:
+        return datetime(2026, 11, 26, 21, 5, tzinfo=UTC)
 
     async def send(self, text: str) -> None:
         self.delivered.append(text)

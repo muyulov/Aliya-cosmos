@@ -6,7 +6,8 @@
 - 底层依赖：`core/`（service / config / logger / llm / decision / agent）
 - 状态：**已实现**。15 个常驻服务（core 4 个 + cosmos 11 个，含 `ControlServerService`）与契约模型已落地，
   启动命令 `uv run python -m agent.cosmos.app`；链路心跳、通道状态上报、调度并发/supersede、
-  世界推理定时兜底与事件缺口快照补偿已接入。Aliya 以独立进程通过 UDS 控制面连接
+  世界推理定时兜底与事件缺口快照补偿已接入；桌面内置 5 个工具
+  （echo / edit / search / run / web），Aliya 以独立进程通过 UDS 控制面连接
 
 ---
 
@@ -79,7 +80,8 @@ agent/cosmos/
     agent-settings.example.yaml  并入 data/config/cosmos.yaml 的 agent: 节点样例
   contracts/     契约模型（pydantic）：AgentCard / AgentRuntimeState / TerminalMessage / ...
   services/      core.service.Service 子类：Registry / Runtime / Desktop / Presence / ...
-  registry/      子 agent 配置加载（bootstrap）与内置示例 agent（echo）
+  registry/      子 agent 配置加载（bootstrap）与内置工具：
+                 echo（回声）、edit（编辑）、search（检索）、run（运行）、web（联网）
   transport/     MessageBus / EventBus 端口、进程内实现与 BusService
   assembly.py    装配入口：core 4 个服务 + cosmos 11 个服务
   app.py         进程入口：uv run python -m agent.cosmos.app
@@ -162,7 +164,8 @@ asyncio.run(main())
 | `TerminalService.report_presence()` | 接收通道上报的在线/输入/设备状态 | 部署方通道适配器 |
 
 最小子 agent handler 见 [08-subagent-contract.md](docs/08-subagent-contract.md#9-edit-agent-契约示例)
-与内置的 `agent/cosmos/registry/echo.py`；完整链路见 [10-flows.md](docs/10-flows.md)。
+与内置的 5 个工具（`edit` / `search` / `run` / `web` / `echo`，见
+[08 第 11 节](docs/08-subagent-contract.md#11-内置工具)）；完整链路见 [10-flows.md](docs/10-flows.md)。
 
 ---
 
@@ -177,7 +180,7 @@ asyncio.run(main())
 | [05 任务分发](docs/05-dispatch.md) | 统一管线、匹配策略、并行规则、失败降级 | 要改调度行为 |
 | [06 通信终端](docs/06-terminal.md) | 消息模型、上下文、异步推送、打扰预算、脱敏 | 要改消息链路 |
 | [07 世界推理](docs/07-world-reasoning.md) | `WorldInput` / `WorldInference`、触发门控、信念、EFE、校准与轨迹 | 要接世界推理 agent 或调参 |
-| [08 子 agent 契约](docs/08-subagent-contract.md) | 输入输出、进度上报、超时取消、幂等 | 写子 agent 时必看 |
+| [08 子 agent 契约](docs/08-subagent-contract.md) | 输入输出、进度上报、超时取消、幂等；内置 5 个工具清单 | 写子 agent 时必看 |
 | [09 控制接口](docs/09-control-api.md) | Aliya 能调用的全部能力 | 写 Aliya 侧代码 |
 | [10 流程示例](docs/10-flows.md) | 五类端到端流程 | 验收与联调 |
 | [11 扩展性](docs/11-extension.md) | 扩展清单与常见坑 | 每次扩展前过一遍 |

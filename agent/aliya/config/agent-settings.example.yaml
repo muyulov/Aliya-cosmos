@@ -61,9 +61,11 @@ agent:
 
     # ---------- 工具偏好 ----------
     tools:
-      prefer_agents: [edit]
+      prefer_agents: [edit, search, run, web]
       ask_before_write: true
       max_parallel_dispatch: 2
+      mcp_enabled: true # data/mcp.json；空的 mcpServers 不连任何 server
+      skills_enabled: true # data/skills/*/SKILL.md；只进索引，正文按需读取
 
     # ---------- 世界推理 ----------
     world:

@@ -24,17 +24,20 @@ class PromptBuilder:
         charter: str,
         tools: Sequence[Tool],
         max_chars: int | None = None,
+        extra_index: str = "",
     ) -> None:
         self._persona: str = persona
         self._charter: str = charter
         self._tools: Sequence[Tool] = tools
         self._max_chars: int = max_chars or DEFAULT_CONTEXT_MAX_CHARS
+        #: 技能索引等附加段落；放在人格之后、工具说明之前
+        self._extra_index: str = extra_index.strip()
 
     def build(self, *, turn: TurnContext) -> list[ChatCompletionMessageParam]:
         tool_help = self._tool_help()
         fixed = "\n\n".join(
             part.strip()
-            for part in (self._charter, self._persona, tool_help)
+            for part in (self._charter, self._persona, self._extra_index, tool_help)
             if part is not None and part.strip()
         )
         context = turn.context_text()
@@ -45,7 +48,9 @@ class PromptBuilder:
         else:
             available -= len(context)
 
-        system_text = system_prompt(self._charter, self._persona, tool_help, context)
+        system_text = system_prompt(
+            self._charter, self._persona, self._extra_index, tool_help, context
+        )
         messages: list[ChatCompletionMessageParam] = [system_text]
         messages.extend(self._fit_history(turn.history_messages(), available))
         messages.append(user(turn.user_text))

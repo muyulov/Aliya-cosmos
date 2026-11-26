@@ -122,6 +122,9 @@ agent:
     reply:
       max_rounds: 6
       turn_timeout_seconds: 120
+    tools:
+      mcp_enabled: true # 接入 data/mcp.json 里的外部工具；空的 mcpServers 不连任何 server
+      skills_enabled: true # 加载 data/skills/*/SKILL.md，只披露索引，正文按需读取
     world:
       consume: true
       max_hypotheses_used: 2
@@ -154,7 +157,8 @@ agent:
     desktop:
       groups: # 分组顺序即面板展示顺序
         - {key: dev, title: 开发工具, order: 10}
-        - {key: media, title: 内容处理, order: 20}
+        - {key: web, title: 联网, order: 20}
+        - {key: media, title: 内容处理, order: 30}
         - {key: general, title: 通用, order: 90}
       progress_throttle_ms: 1000 # 进度事件尾沿节流，避免高频刷新
       reconcile_seconds: 30 # 全量对账周期
@@ -267,4 +271,106 @@ agent:
             - input: 帮我回显一句话
           desktop: {group: general, order: 100, pinned: false, visible: true}
           execution: {timeout_seconds: 30, max_concurrent: 1, queue: true}
+          permissions: {read_presence: false, notify_user: false, read_conversation: false}
+      # ---------- 真实业务工具 ----------
+      # 路径沙箱、敏感文件拦截与写入上限都在各 handler 内部实现（08 章 7 节）。
+      - id: edit
+        module: agent.cosmos.registry.edit
+        handler: handle
+        card:
+          name: 编辑台
+          icon: "✏️"
+          summary: 改写仓库内的文件
+          description: >-
+            在仓库根目录内修改文本文件：write 整文件覆盖、append 追加、replace 精确替换。
+            不做目录外操作，不执行命令，不提交 git；replace 找不到原文时不写入任何内容。
+          capabilities: [file_write, file_edit, code_edit]
+          params_schema:
+            type: object
+            properties:
+              action: {type: string, enum: [write, append, replace]}
+              path: {type: string}
+              content: {type: string}
+              old: {type: string}
+              new: {type: string}
+              count: {type: integer, minimum: 1}
+            required: [action, path]
+          examples:
+            - input: 把 README 里那句过时的话改掉
+            - input: 新建一个 notes/todo.md，写上三条待办
+          desktop: {group: dev, order: 10, pinned: false, visible: true}
+          execution: {timeout_seconds: 60, max_concurrent: 1, queue: true, retryable: true}
+          permissions: {read_presence: false, notify_user: false, read_conversation: false}
+      - id: search
+        module: agent.cosmos.registry.search
+        handler: handle
+        card:
+          name: 检索台
+          icon: "🔍"
+          summary: 在仓库里找文件名或内容
+          description: >-
+            在仓库根目录内按文件名或正文查找：mode=files 匹配文件名，mode=content 匹配文件内容。
+            只读，不改文件、不执行命令；跳过依赖、缓存与版本库目录，不返回二进制内容。
+          capabilities: [file_search, code_search]
+          params_schema:
+            type: object
+            properties:
+              query: {type: string}
+              mode: {type: string, enum: [content, files]}
+              path: {type: string}
+              glob: {type: string}
+              max_results: {type: integer, minimum: 1, maximum: 100}
+            required: [query]
+          examples:
+            - input: 找一下哪里定义了 TurnRunner
+            - input: 列出所有 test_ 开头的文件
+          desktop: {group: dev, order: 20, pinned: false, visible: true}
+          execution: {timeout_seconds: 60, max_concurrent: 2, queue: true, retryable: true}
+          permissions: {read_presence: false, notify_user: false, read_conversation: false}
+      - id: run
+        module: agent.cosmos.registry.run
+        handler: handle
+        card:
+          name: 运行台
+          icon: "⚙️"
+          summary: 跑测试与只读命令
+          description: >-
+            在仓库内执行白名单命令并返回输出：pytest、ruff、python、uv、git 查询、文件查看等。
+            不执行安装、发布、推送、删除类操作；超时会终止子进程，输出按上限截断。
+          capabilities: [run_tests, run_command, lint]
+          params_schema:
+            type: object
+            properties:
+              command: {type: string}
+              cwd: {type: string}
+              timeout_seconds: {type: integer, minimum: 1, maximum: 300}
+            required: [command]
+          examples:
+            - input: 跑一下 tests/aliya 的测试
+            - input: 对改过的文件跑 ruff 检查
+          desktop: {group: dev, order: 30, pinned: false, visible: true}
+          execution: {timeout_seconds: 300, max_concurrent: 1, queue: true, retryable: true}
+          permissions: {read_presence: false, notify_user: false, read_conversation: false}
+      - id: web
+        module: agent.cosmos.registry.web
+        handler: handle
+        card:
+          name: 联网台
+          icon: "🌐"
+          summary: 抓取公开网页正文
+          description: >-
+            抓取一个公开网页并转成纯文本，适合读文章、文档与公告。
+            不支持登录、提交表单、下载文件；只访问公网地址，拒绝本机与内网。
+          capabilities: [web_fetch, read_page]
+          params_schema:
+            type: object
+            properties:
+              url: {type: string}
+              max_chars: {type: integer, minimum: 200, maximum: 20000}
+            required: [url]
+          examples:
+            - input: 读一下这篇公告的内容
+            - input: 把这个文档页面的正文抓下来
+          desktop: {group: web, order: 10, pinned: false, visible: true}
+          execution: {timeout_seconds: 60, max_concurrent: 2, queue: true, retryable: true}
           permissions: {read_presence: false, notify_user: false, read_conversation: false}

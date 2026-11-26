@@ -180,7 +180,7 @@ async def run(control) -> None:
 ```mermaid
 flowchart TD
     E(["收信封"]) --> M["组装上下文<br/>cosmos 轮次 + Aliya 记忆"]
-    M --> L["LLM chat_tools<br/>普通 13 个 / 主动 10 个工具"]
+    M --> L["LLM chat_tools<br/>普通 16 个 / 主动 12 个工具<br/>+ MCP 与技能工具"]
     L --> T{"有 tool_calls?"}
     T -->|"有"| X["顺序执行工具<br/>结果回填"]
     X --> R{"未超 6 轮?"}
@@ -213,6 +213,34 @@ flowchart TD
 | `world.inference` | 参考 `hypotheses` 与 `action_windows`；可完全忽略 |
 | `user.active` | 取消待发主动消息，不打断进行中的回合 |
 | `link.state.changed` | 曲率航行导致通讯中断时，停止发送、把话留到链路恢复 |
+
+### 5.3 工具面
+
+普通回合 16 个工具，主动回合 12 个（去掉 `dispatch_task` / `cancel_task` / `retry_task` / `read_file`，
+主动搭话不该派重活）：
+
+| 类别 | 工具 | 说明 |
+| --- | --- | --- |
+| 通信 | `send_message` | 用户唯一能看见她的途径 |
+| 调度 | `see_desktop` / `dispatch_task` / `task_status` / `cancel_task` / `retry_task` | 看平板、派活、查进度、改主意 |
+| 情境 | `refresh_world` / `current_time` | 重新感知世界；读控制面校准过的时间 |
+| 文件 | `read_file` | 只读，路径限定仓库内，敏感路径拒绝 |
+| 计算 | `calculate` | AST 白名单求值，不用 `eval` |
+| 记忆 | `remember` / `check_memory` / `resolve_topic` | 长期记忆的写、读、收尾 |
+| 时间 | `plan_followup` / `cancel_followup` / `defer_proactive` | 未来跟进与主动开口延后 |
+
+本地工具的运行时能力统一由 `RuntimePort` 提供（`send` / `describe_desktop` / `dispatch` / `now` 等），
+工具函数用闭包绑定 runtime，避免 `self` 被当成工具参数。
+
+外部工具在 `AliyaRuntime.start()` 装配：
+
+| 来源 | 装配方式 | 失败行为 | 开关 |
+| --- | --- | --- | --- |
+| MCP | `MCPManager.from_file()` 读 `data/mcp.json`，工具只注册进普通回合（主动回合无人值守，不接外部工具）；`stop()` 时断开 | 建连失败启动期抛错；单个工具重名只跳过并告警 | `agent.aliya.tools.mcp_enabled` |
+| Skill | `SkillLibrary.load()` 扫描 `data/skills/*/SKILL.md`；索引由 `PromptBuilder(extra_index=...)` 拼在人格之后、工具说明之前 | frontmatter 非法或重名在加载期抛 `SkillError` | `agent.aliya.tools.skills_enabled` |
+
+技能正文不进提示词，模型调用内置工具 `load_skill(name)` 时才读取；空库时既不导出工具，也不占索引位置。
+仓库自带示例技能 `data/skills/workspace-tasks/SKILL.md`，说明如何给编辑台、检索台、运行台、联网台填参数。
 
 ---
 

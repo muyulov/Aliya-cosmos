@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from uuid import uuid4
@@ -33,6 +33,7 @@ from agent.cosmos.contracts import (
     ReadablePresence,
     WorldInference,
 )
+from core.agent import MCPManager, SkillLibrary, Tool, ToolDefinitionError, ToolRegistry
 from core.config.settings import AgentAliyaSettings
 from core.llm import LLMService
 from core.logger import log
@@ -204,6 +205,8 @@ class AliyaRuntime:
         self._preference_gate: PreferenceGate = PreferenceGate(config.initiative.prefer_when)
         self._runner: TurnRunner | None = None
         self._proactive_runner: TurnRunner | None = None
+        self._mcp: MCPManager | None = None
+        self._skills: SkillLibrary = SkillLibrary()
         self._started: bool = False
         self._pending_inbound: int = 0
         self._closed: asyncio.Event = asyncio.Event()
@@ -223,10 +226,21 @@ class AliyaRuntime:
         charter = load_charter(self._config.persona.charter)
         tools = build_tools(self)
         proactive_tools = build_tools(self, proactive=True)
+        try:
+            extra_index = await self._attach_external_tools(tools, proactive_tools)
+        except BaseException:
+            # MCP 已经连上但后续装配失败或被取消时，不能把连接留在后台
+            await self._stop_mcp()
+            raise
         self._runner = TurnRunner(
             llm=self._llm,
             tools=tools,
-            builder=PromptBuilder(persona=persona, charter=charter, tools=tools.tools),
+            builder=PromptBuilder(
+                persona=persona,
+                charter=charter,
+                tools=tools.tools,
+                extra_index=extra_index,
+            ),
             config=self._config,
         )
         self._proactive_runner = TurnRunner(
@@ -236,6 +250,7 @@ class AliyaRuntime:
                 persona=persona,
                 charter=charter,
                 tools=proactive_tools.tools,
+                extra_index=extra_index,
             ),
             config=self._config,
         )
@@ -253,9 +268,57 @@ class AliyaRuntime:
             准则字数=len(charter),
             普通工具数=len(tools.tools),
             主动工具数=len(proactive_tools.tools),
+            MCP工具数=len(self._mcp.tools) if self._mcp is not None else 0,
+            技能数=len(self._skills),
             订阅主题数=len(_EVENT_TOPICS),
             记忆启用=self._config.memory.enabled,
         )
+
+    async def _attach_external_tools(
+        self, tools: ToolRegistry, proactive_tools: ToolRegistry
+    ) -> str:
+        """把 MCP 工具与技能库接到回合工具面上。
+
+        返回技能索引文本，由 PromptBuilder 拼进 system；空库返回空串。
+        MCP 只进普通回合：主动回合是无人值守的，不应自行调用任意外部工具。
+        MCP 建连失败直接抛出（工具不能无声消失）；单个工具重名只跳过并告警。
+        """
+        if self._config.tools.mcp_enabled:
+            manager = MCPManager.from_file()
+            await manager.start()
+            self._mcp = manager
+            self._register_quietly(tools, manager.tools)
+        if not self._config.tools.skills_enabled:
+            return ""
+        library = SkillLibrary.load()
+        skill_tools = library.tools()
+        self._register_quietly(tools, skill_tools)
+        self._register_quietly(proactive_tools, skill_tools)
+        self._skills = library
+        return library.index()
+
+    @staticmethod
+    def _register_quietly(registry: ToolRegistry, items: Sequence[Tool]) -> None:
+        """逐个注册；重名工具跳过，避免一个外部工具把整个进程拖垮。"""
+        for item in items:
+            try:
+                registry.register(item)
+            except ToolDefinitionError:
+                log.warning("工具重名，已跳过", 工具=item.name)
+
+    async def _stop_mcp(self) -> None:
+        """断开 MCP；失败只记日志，不阻断停止流程。"""
+        manager, self._mcp = self._mcp, None
+        if manager is None:
+            return
+        try:
+            await manager.stop()
+        except Exception as exc:
+            log.warning(
+                "断开 MCP 失败",
+                错误类型=type(exc).__name__,
+                错误消息=str(exc),
+            )
 
     async def _prime_state(self) -> None:
         """启动时拉一次状态，避免主动回合在首个事件到达前没有任何上下文。"""
@@ -332,6 +395,7 @@ class AliyaRuntime:
             *(task for task in tasks if task is not None),
             return_exceptions=True,
         )
+        await self._stop_mcp()
         self._worker = None
         self._ticker = None
         self._consumers = []
@@ -352,6 +416,10 @@ class AliyaRuntime:
         await self._queue.join()
 
     # ---------- 工具面调用的运行时能力 ----------
+
+    def now(self) -> datetime:
+        """工具面读取的时间；与主动判断共用控制面校准过的来源。"""
+        return self._now()
 
     async def send(self, text: str) -> None:
         turn = self._current_turn

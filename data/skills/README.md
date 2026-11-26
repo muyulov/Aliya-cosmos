@@ -29,3 +29,6 @@ description: 处理 PDF 文件：抽取文本、合并拆分、填表单
 - 系统提示里只出现「名称 + 一句话描述」，正文由模型调用 `load_skill(name)` 按需读取。
 - 目录里除 `SKILL.md` 之外的脚本与附件不会被读取或执行。
 - frontmatter 非法、缺字段、重名会在加载期报错（`SkillError`）。
+
+仓库自带一个示例：`workspace-tasks/SKILL.md`，说明怎么给编辑台、检索台、运行台、联网台填参数。
+Aliya 侧由 `agent.aliya.tools.skills_enabled` 控制是否加载（默认开启）。

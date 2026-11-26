@@ -81,7 +81,7 @@ type AgentStatus = Literal["idle", "queued", "running", "stalled", "abnormal", "
 
 ```text
 ✏️  编辑台  ·  ● 忙
-编辑代码与文件
+改写仓库内的文件
 正在改写 logger，进度 60%
 已用 1 分 12 秒 · 队列 1
 ```
@@ -197,7 +197,7 @@ type ReadableTone = Literal["calm", "busy", "strained", "alarming", "muted"]
 
 ```json
 {
-  "card": {"id": "edit", "name": "编辑台", "icon": "✏️", "summary": "编辑代码与文件"},
+  "card": {"id": "edit", "name": "编辑台", "icon": "✏️", "summary": "改写仓库内的文件"},
   "status": "running",
   "task": {
     "task_id": "tsk_01H...",
@@ -236,9 +236,13 @@ type ReadableTone = Literal["calm", "busy", "strained", "alarming", "muted"]
 
 | 分组键 | 标题 | 建议收纳 |
 | --- | --- | --- |
-| `dev` | 开发工具 | Edit agent、测试 agent、检索 agent |
+| `dev` | 开发工具 | 编辑台、检索台、运行台 |
+| `web` | 联网 | 联网台等抓取公开信息的 agent |
 | `media` | 内容处理 | 文档、图片、音视频类 agent |
-| `general` | 通用 | 未指定分组的 agent |
+| `general` | 通用 | 未指定分组的 agent；回声台等联调用工具 |
+
+仓库当前的内置工具是 `edit`（dev / order 10）、`search`（dev / 20）、`run`（dev / 30）、
+`web`（web / 10）、`echo`（general / 100），分组顺序由 `desktop.groups` 决定。
 
 分组由配置声明，未声明的 group 落 `general` 并 WARNING。分组的 `title` 与 `order` 由 `desktop.groups` 配置，`collapsed` 是 Aliya 的运行时偏好，不写回配置。
 

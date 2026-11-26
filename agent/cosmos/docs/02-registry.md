@@ -19,6 +19,8 @@
 
 判断标准：**需要被 Aliya 主动启动、需要独立状态与进度、可能长时间运行** → 注册成子 agent；**只是模型推理时顺手调一下** → 注册成 tool。
 
+仓库当前注册了 5 个子 agent：`edit` / `search` / `run` / `web` / `echo`。各自的职责、参数与安全边界见 [08-subagent-contract.md](08-subagent-contract.md#11-内置工具)。
+
 ---
 
 ## 2. AgentCard 结构
@@ -134,22 +136,26 @@ agent:
         card:
           name: 编辑台          # 展示名用她的语言；工程名只留在 id 与文档正文里
           icon: "✏️"
-          summary: 编辑代码与文件
+          summary: 改写仓库内的文件
           description: >-
-            按指令修改仓库内文件：支持新建、改写、局部替换、批量重命名。
-            不负责运行测试与提交；需要跑测试请显式说明。
-          capabilities: [code_edit, file_write, file_rename]
+            在仓库根目录内修改文本文件：write 整文件覆盖、append 追加、replace 精确替换。
+            不做目录外操作，不执行命令，不提交 git。
+          capabilities: [file_write, file_edit, code_edit]
           params_schema:
             type: object
             properties:
-              instruction: {type: string}
-              paths: {type: array, items: {type: string}}
-            required: [instruction]
+              action: {type: string, enum: [write, append, replace]}
+              path: {type: string}
+              content: {type: string}
+              old: {type: string}
+              new: {type: string}
+              count: {type: integer, minimum: 1}
+            required: [action, path]
           examples:
             - input: "把 core/logger/base.py 里的 log 改成 logger"
-          desktop: {group: dev, order: 10, pinned: true}
-          execution: {timeout_seconds: 300, max_concurrent: 2, queue: true}
-          permissions: {read_presence: false, notify_user: true}
+          desktop: {group: dev, order: 10}
+          execution: {timeout_seconds: 60, max_concurrent: 1, queue: true, retryable: true}
+          permissions: {read_presence: false, notify_user: false}
 ```
 
 ### 3.2 代码注册
@@ -162,16 +168,20 @@ registry.register(
         id="edit",
         name="编辑台",
         icon="✏️",
-        summary="编辑代码与文件",
-        description="按指令修改仓库内文件，不负责运行测试与提交。",
-        capabilities=["code_edit", "file_write"],
+        summary="改写仓库内的文件",
+        description="在仓库根目录内修改文本文件：write / append / replace，不做目录外操作。",
+        capabilities=["file_write", "file_edit"],
         params_schema={
             "type": "object",
-            "properties": {"instruction": {"type": "string"}},
-            "required": ["instruction"],
+            "properties": {
+                "action": {"type": "string", "enum": ["write", "append", "replace"]},
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["action", "path"],
         },
         desktop=DesktopMeta(group="dev", order=10),
-        execution=ExecutionPolicy(timeout_seconds=300, max_concurrent=2, queue=True),
+        execution=ExecutionPolicy(timeout_seconds=60, max_concurrent=1, queue=True),
     ),
     handle,
 )

@@ -123,7 +123,12 @@ sequenceDiagram
   "tasks": [
     {
       "agent_id": "edit",
-      "params": {"instruction": "把 log 改成 logger", "paths": ["core/logger/base.py"]},
+      "params": {
+        "action": "replace",
+        "path": "core/logger/base.py",
+        "old": "log.",
+        "new": "logger."
+      },
       "label": "改写 core/logger/base.py 的日志调用",
       "depends_on": []
     }

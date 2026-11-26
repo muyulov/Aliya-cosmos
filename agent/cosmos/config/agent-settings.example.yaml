@@ -184,43 +184,54 @@ agent:
     # ---------- 子 agent 注册（02-registry.md） ----------
     # module + handler 指向实现；card 是 AgentCard 的 YAML 形态。
     allow_runtime_registration: false # 运行期注册需显式开启，Aliya 永远无权
+    # 内置工具：edit / search / run / web / echo；完整注册见 data/config/cosmos.yaml。
     agents:
       - id: edit
-        module: agent.cosmos.registry.edit # 目标形态路径，实现落地后生效
+        module: agent.cosmos.registry.edit
         handler: handle
         card:
           name: 编辑台 # 展示名用 Aliya 的语言，工程名只留在 id 与文档正文里
           icon: "✏️"
-          summary: 编辑代码与文件
+          summary: 改写仓库内的文件
           description: >-
-            按指令修改仓库内文件：新建、改写、局部替换、批量重命名。
-            不负责运行测试与提交，也不做超出仓库根目录的路径操作。
-          capabilities: [code_edit, file_write, file_rename]
+            在仓库根目录内修改文本文件：write 整文件覆盖、append 追加、replace 精确替换。
+            不做目录外操作，不执行命令，不提交 git；replace 找不到原文时不写入任何内容。
+          capabilities: [file_write, file_edit, code_edit]
           params_schema:
             type: object
             properties:
-              instruction:
+              action:
                 type: string
-                description: 要做什么改动
-              paths:
-                type: array
-                items: {type: string}
-                description: 要修改的文件路径
-            required: [instruction, paths]
+                enum: [write, append, replace]
+              path:
+                type: string
+                description: 相对仓库根的路径
+              content:
+                type: string
+                description: write/append 要写入的正文
+              old:
+                type: string
+                description: replace 要被替换的原文
+              new:
+                type: string
+                description: replace 替换后的文本
+              count:
+                type: integer
+                minimum: 1
+            required: [action, path]
           examples:
             - input: 把 core/logger/base.py 里的 log 改成 logger
-            - input: 给 decision 层补一个超时重试
-            - input: 把这个函数拆成两个
-          desktop: {group: dev, order: 10, pinned: true, visible: true}
+            - input: 新建一个 notes/todo.md，写上三条待办
+          desktop: {group: dev, order: 10, pinned: false, visible: true}
           execution:
-            timeout_seconds: 300
-            max_concurrent: 2
+            timeout_seconds: 60
+            max_concurrent: 1
             queue: true
             cancel_on_supersede: false
             retryable: true
-            heartbeat_seconds: 30
+            heartbeat_seconds: 20
           permissions:
             read_presence: false
             presence_fields: []
-            notify_user: true
+            notify_user: false
             read_conversation: false

@@ -619,6 +619,10 @@ class AgentAliyaToolsSettings(_AgentConfigNode):
     prefer_agents: list[str] = Field(default_factory=list)
     ask_before_write: bool = True
     max_parallel_dispatch: int = Field(default=2, ge=1)
+    #: 接入 data/mcp.json 的外部 MCP 工具；空配置不连任何 server
+    mcp_enabled: bool = True
+    #: 加载 data/skills 下的技能索引；正文由 load_skill 按需读取
+    skills_enabled: bool = True
 
 
 class AgentAliyaWorldSettings(_AgentConfigNode):

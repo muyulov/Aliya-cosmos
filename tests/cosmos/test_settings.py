@@ -43,7 +43,7 @@ def test_完整样例_yaml_可校验() -> None:
     assert isinstance(cosmos_data, dict)
     cosmos = AgentCosmosSettings.model_validate(cast("dict[str, object]", cosmos_data))
     assert cosmos.agents[0].id == "edit"
-    assert cosmos.agents[0].card.capabilities == ["code_edit", "file_write", "file_rename"]
+    assert cosmos.agents[0].card.capabilities == ["file_write", "file_edit", "code_edit"]
     assert cosmos.world.port_factory == "build"
     assert cosmos.contract.contract_version == "1.0.0"
 

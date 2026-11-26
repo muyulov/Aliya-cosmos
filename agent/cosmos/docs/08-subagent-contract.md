@@ -286,6 +286,10 @@ stateDiagram-v2
 
 ## 9. Edit agent 契约示例
 
+下面是**契约演示**，用最少的代码展示参数自包含、进度单调、失败分类与结果不给用户文案。
+仓库内置的 `edit` 实际参数是 `action` / `path` / `content` / `old` / `new` / `count`
+（见第 11 节），差异只在业务参数，不影响契约本身。
+
 ```python
 from agent.cosmos.contracts import (
     AgentCard,
@@ -398,7 +402,22 @@ async def handle(request: AgentRequest, ctx: AgentContext) -> AgentResult:
 
 ---
 
-## 11. 内置示例：echo
+## 11. 内置工具
+
+仓库内置 5 个工具，都在 `data/config/cosmos.yaml` 的 `agent.cosmos.agents[]` 里登记：
+
+| id | 展示名 | 模块 | 职责 | 关键边界 |
+| --- | --- | --- | --- | --- |
+| `edit` | 编辑台 | `registry/edit.py` | `write` / `append` / `replace` 改文件 | 路径限定仓库内；拒绝 `.git`、`.env`、`data/state`、`logs`、`data/mcp.json`；单次写入 ≤ 200k 字、目标文件 ≤ 2MB；临时文件 + `os.replace` 原子写 |
+| `search` | 检索台 | `registry/search.py` | 按文件名或正文检索 | 只读；跳过依赖、缓存、版本库与敏感目录；跳过二进制与大文件 |
+| `run` | 运行台 | `registry/run.py` | 执行 pytest / ruff check / python -m / uv run / git 只读查询 | 无 shell；命令名不能带路径；参数不能指向工作区外；不接受 `--fix`、`format` 与任意脚本；超时/取消 kill 整个进程组 |
+| `web` | 联网台 | `registry/web.py` | 抓取公开网页转纯文本 | 仅 http/https；DNS 解析后必须是公网地址；拒绝本机与内网 |
+| `echo` | 回声台 | `registry/echo.py` | 原样返回指令 | 联调用，不做任何文件与网络操作 |
+
+四个业务工具的安全边界都在各自 handler 内实现（见第 7 节：cosmos 不做路径级沙箱），
+并统一复用 `core/agent/workspace.py` 的路径解析与敏感路径判断。
+
+### 11.1 最小示例：echo
 
 `agent/cosmos/registry/echo.py` 是联调用的最小实现，用来验证「注册 → 调度 → 进度 → 结果」整条链路：
 
@@ -456,3 +475,15 @@ agent:
 ```
 
 `AgentRegistryService.start()` 会调用 `load_agents()` 完成导入与绑定；模块不存在或 handler 不是 `async def` 时启动期抛 `AgentRegistrationError`。
+
+### 11.2 新增工具时的参考
+
+按第 1–8 节实现后，在 `data/config/cosmos.yaml` 的 `agent.cosmos.agents[]` 追加一条登记即可。
+内置的 `edit` / `search` / `run` / `web` 可直接作为模板，它们分别演示了：
+
+| 关注点 | 参考实现 |
+| --- | --- |
+| 参数二次校验与失败分类 | `edit.handle`（缺参、路径越界、原文不存在分别给不同 `code`） |
+| 只读遍历与目录剪枝 | `search._scan`（就地修改 `dirs`，跳过依赖与敏感目录） |
+| 子进程、超时与输出截断 | `run._execute`（`create_subprocess_exec`，超时 kill 后 `wait`） |
+| 外部请求与 SSRF 防护 | `web._host_is_public`（解析后要求所有地址 `is_global`） |

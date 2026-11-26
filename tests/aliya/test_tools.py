@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from agent.aliya.turn.tools import build_tools
@@ -8,6 +10,9 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.delivered: list[str] = []
         self.remembered: list[tuple[str, str]] = []
+
+    def now(self) -> datetime:
+        return datetime(2026, 11, 26, 21, 5, tzinfo=UTC)
 
     async def send(self, text: str) -> None:
         self.delivered.append(text)
@@ -82,6 +87,8 @@ def test_proactive_toolset_is_small(runtime: FakeRuntime) -> None:
         "see_desktop",
         "task_status",
         "refresh_world",
+        "current_time",
+        "calculate",
         "check_memory",
         "resolve_topic",
         "plan_followup",
@@ -101,6 +108,9 @@ def test_normal_toolset_has_all_tools(runtime: FakeRuntime) -> None:
         "cancel_task",
         "retry_task",
         "refresh_world",
+        "current_time",
+        "read_file",
+        "calculate",
         "check_memory",
         "resolve_topic",
         "plan_followup",
