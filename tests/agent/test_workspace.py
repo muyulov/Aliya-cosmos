@@ -37,7 +37,7 @@ def test_相对路径按工作区解析(tmp_path: Path, monkeypatch: pytest.Monk
 
     assert resolve_in_workspace("notes/a.md", root=root) == root / "notes" / "a.md"
     with pytest.raises(WorkspacePathError):
-        resolve_in_workspace("../outside.md", root=root)
+        _ = resolve_in_workspace("../outside.md", root=root)
 
 
 def test_敏感路径大小写不敏感(tmp_path: Path) -> None:
