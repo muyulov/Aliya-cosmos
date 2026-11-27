@@ -31,5 +31,4 @@
 ## 文档约定
 
 - 本 wiki 是项目现行文档的唯一信息源。原先分散在 `README.md`、`docs/agent-development.md`、`agent/**/README.md`、`agent/cosmos/docs/*` 的内容已合并至此，原文件已删除，历史可从 git 追溯。
-- `docs/plans/` 下的设计与实施计划属于历史归档，不进入本站点；其中已落地的结论已并入对应章节。
 - 站点构建：`uv run mkdocs serve` 本地预览，`uv run mkdocs build --strict` 校验（含内部链接与导航完整性）。

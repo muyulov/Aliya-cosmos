@@ -47,8 +47,6 @@ uv run mkdocs serve            # 热重载预览
 uv run mkdocs build --strict   # 校验链接与导航
 ```
 
-`docs/plans/` 下的设计与实施计划属于历史归档，不进入站点。
-
 ## 目录结构
 
 ```text
@@ -57,7 +55,6 @@ agent/cosmos/   主 agent：契约、常驻服务、总线、装配、进程入�
 agent/aliya/    Aliya：独立进程、UDS 控制面客户端、回合循环、记忆与自主行动
 data/           配置与运行数据（config 可提交，state / Aliya / memory 为运行时产物）
 docs/wiki/      文档站点源文件
-docs/plans/     历史设计与实施计划（归档）
 tests/          测试
 mkdocs.yml      文档站点配置
 ```
