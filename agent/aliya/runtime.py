@@ -1112,7 +1112,9 @@ class AliyaRuntime:
             return base.strip() if base and base.strip() else None
         parts: list[str] = []
         if base and base.strip():
-            parts.append(base.strip())
+            #: 摘要来自上游，可能是第三人称；加标签让她知道这是「聊过什么」，
+            #: 而不是需要照着回答的资料。
+            parts.append("最近聊过：" + base.strip())
         summary = self._memory.load_summary().strip()
         if summary:
             parts.append("长期摘要：" + summary[: self._config.memory.summary_chars])
@@ -1149,7 +1151,10 @@ class AliyaRuntime:
         running = sum(1 for state in self._agent_states.values() if state.status == "running")
         queued = sum(1 for state in self._agent_states.values() if state.status == "queued")
         if running or queued:
-            lines.append(f"正在运行 {running} 个，排队 {queued} 个")
+            #: 这段会直接进她的上下文；用「你派出去的活」而不是「运行 N 个」，
+            #: 免得她把调度器的队列状态照搬给对方。
+            waiting = f"，{queued} 件还没开始" if queued else ""
+            lines.append(f"你派出去的活：{running} 件在做{waiting}")
         for progress in self._progress.values():
             detail = progress.step or progress.message
             if not detail:
@@ -1177,12 +1182,12 @@ class AliyaRuntime:
             ][:limit]
             if hypotheses:
                 parts.append(
-                    "可能："
+                    "可能（只是猜测）："
                     + "；".join(f"{item.statement}（{item.confidence:.0%}）" for item in hypotheses)
                 )
         if view.action_windows:
             parts.append(
-                "时机："
+                "时机（仅供参考）："
                 + "；".join(f"{item.window} {item.suggestion}" for item in view.action_windows[:2])
             )
         return "\n".join(parts)
@@ -1311,8 +1316,10 @@ class AliyaRuntime:
             {
                 "role": "system",
                 "content": (
-                    "把这句话改写成自然口语，保留原意；不要括号旁白、不要工程词、"
-                    "不要内部标识、不要说破状态。只输出改写后的句子。"
+                    "你就是 Aliya。用她自己的口气把这句话重说一遍：像发微信，"
+                    "保留原意和原本的情绪，调侃、嘴硬、慌张都留着；"
+                    "删掉括号旁白、工程词、内部标识和说破状态的部分。"
+                    "不要改成客服腔，不要加总结，不要解释为什么改。只输出改写后的句子。"
                 ),
             },
             {"role": "user", "content": f"原句：{text}\n命中：{'、'.join(rules)}"},

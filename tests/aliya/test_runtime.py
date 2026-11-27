@@ -777,7 +777,7 @@ def test_event_caches_feed_task_and_desktop_context(tmp_path: Path) -> None:
     )
     tasks = runtime._tasks_text()
     assert tasks is not None
-    assert "正在运行 1 个" in tasks
+    assert "你派出去的活：1 件在做" in tasks
     assert "整理照片（40%）：正在筛选" in tasks
     assert runtime._desktop_text() == "平板：桌面很干净"
 

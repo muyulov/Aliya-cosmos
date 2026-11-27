@@ -33,9 +33,14 @@ def format_presence(presence: ReadablePresence | None) -> str | None:
     """
     if presence is None:
         return None
+    #: 明写「不要复述」：这段是给她判断时机用的，不是让她照着念的台词。
+    #: 之前只补主体标签，模型仍会把 summary 当事实陈述出来。
     if presence.hint:
-        return f"对方状态：{presence.summary}（{presence.hint}）"
-    return f"对方状态：{presence.summary}"
+        return (
+            f"对方状态：{presence.summary}（{presence.hint}）"
+            "\n（只用来判断时机，不要复述）"
+        )
+    return f"对方状态：{presence.summary}\n（只用来判断时机，不要复述）"
 
 
 @dataclass(slots=True)

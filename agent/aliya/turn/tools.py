@@ -73,9 +73,10 @@ class RuntimePort(Protocol):
 def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistry:
     @tool
     async def send_message(text: str) -> str:
-        """给用户发一条消息，这是用户唯一能看见你的途径。
+        """给对方发一条消息，他只能通过这条消息看见你。
 
-        想说话、想回应、想补充说明时用；一次调用只发一段，不要把连续的话拆成多次调用。
+        想说话、想回应、想补充时用；一次调用只发一段，想分几条说就调用几次，
+        不要为了省事把几段话挤进一条。
         返回发送结果；发不出去时返回失败原因。
 
         Args:
@@ -89,7 +90,7 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
         """查看平板上现在有哪些工具、能否使用、各自在做什么。
 
         在决定派活或需要指定工具之前先看；只读快照，不会触发任何操作。
-        用户随口打招呼、闲聊时不要为了找话说去看它，更不要把结果念出来。
+        对方随口打招呼、闲聊时不要为了找话说去看它，更不要把结果念出来。
         返回每个工具的 id、名字、状态与能力，派活时把 id 填进 agent_id。
         """
         return await runtime.describe_desktop()
@@ -156,7 +157,7 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
 
     @tool
     async def refresh_world() -> str:
-        """重新感知一次当前情境：时间、用户状态、环境有什么变化。
+        """重新感知一次当前情境：时间、对方状态、环境有什么变化。
 
         当上下文里的情境可能过期、或你要判断现在是否适合开口时用；只刷新感知，不改变任何东西。
         返回最新的情境摘要。
@@ -242,7 +243,7 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
     async def resolve_topic(topic: str) -> str:
         """把一条已经聊完的未收尾话题标记为收尾。
 
-        用户明确说这件事过去了、或你判断已经聊完时用；收尾后主动判断不再把它当成未完成。
+        对方明确说这件事过去了、或你判断已经聊完时用；收尾后主动判断不再把它当成未完成。
         返回是否找到并收尾。
 
         Args:
@@ -254,7 +255,7 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
     async def plan_followup(text: str, after_minutes: int) -> str:
         """把一件事排进未来，到时间后主动唤醒自己去处理。
 
-        用户提到之后要发生的事（面试、复查、约定），或你想过一阵再问时用。
+        对方提到之后要发生的事（面试、复查、约定），或你想过一阵再问时用。
         到点后会叫醒你，但不会替你执行任务；要不要动手届时再决定。
         返回约定的提醒时间；即使没人说话，你也会被叫醒。
 
@@ -268,7 +269,7 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
     async def cancel_followup(text: str) -> str:
         """取消一条已经排好的未来跟进。
 
-        用户说不用提醒了、或这件事已经不需要再做时用；只影响待跟进，不动长期记忆。
+        对方说不用提醒了、或这件事已经不需要再做时用；只影响待跟进，不动长期记忆。
         返回是否找到并取消。
 
         Args:
