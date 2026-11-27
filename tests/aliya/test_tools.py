@@ -10,6 +10,7 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.delivered: list[str] = []
         self.remembered: list[tuple[str, str]] = []
+        self.deferred: list[tuple[int, str]] = []
 
     def now(self) -> datetime:
         return datetime(2026, 11, 26, 21, 5, tzinfo=UTC)
@@ -61,7 +62,7 @@ class FakeRuntime:
         return f"已经取消了：{text}"
 
     async def defer(self, minutes: int, reason: str = "") -> str:
-        _ = reason
+        self.deferred.append((minutes, reason))
         return f"延后 {minutes} 分钟"
 
 
@@ -115,9 +116,20 @@ def test_normal_toolset_has_all_tools(runtime: FakeRuntime) -> None:
         "resolve_topic",
         "plan_followup",
         "cancel_followup",
-        "defer_proactive",
+        "mute_proactive",
         "remember",
     }
+
+
+@pytest.mark.asyncio
+async def test_mute_proactive_only_defers_future_turns(runtime: FakeRuntime) -> None:
+    """用户回合里只延后之后的主动消息，不给模型「这轮不开口」的选项。"""
+    registry = build_tools(runtime)  # type: ignore[arg-type]
+    result = await registry.execute(
+        ToolCall(id="3", name="mute_proactive", arguments='{"minutes":30}')
+    )
+    assert runtime.deferred == [(30, "对方要求暂时别主动打扰")]
+    assert "30 分钟" in result
 
 
 @pytest.mark.asyncio

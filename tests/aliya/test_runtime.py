@@ -287,7 +287,11 @@ class FakeLLM(LLMService):
         return self.chat_reply
 
 
-def make_envelope(message_id: str, text: str = "在吗") -> InboundEnvelope:
+def make_envelope(
+    message_id: str,
+    text: str = "在吗",
+    presence: ReadablePresence | None = None,
+) -> InboundEnvelope:
     return InboundEnvelope(
         message=TerminalMessage(
             message_id=message_id,
@@ -297,6 +301,7 @@ def make_envelope(message_id: str, text: str = "在吗") -> InboundEnvelope:
             session_id="s1",
         ),
         conversation=ConversationContext(session_id="s1"),
+        presence=presence,
     )
 
 
@@ -348,6 +353,35 @@ async def test_inbound_turn_is_serial(tmp_path: Path) -> None:
         assert [turn.role for turn in turns] == ["user", "aliya"]
         assert turns[0].message_id == "m1"
         assert turns[1].message_id == "m1:reply"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_用户回合的对方状态标明主体并保留时机建议(tmp_path: Path) -> None:
+    """presence 文案用「你」指对方，直接注入会被读成她自己，必须标主体并带 hint。"""
+    control = FakeControl()
+    llm = FakeLLM()
+    runtime = AliyaRuntime(
+        control=control,
+        llm=llm,
+        config=make_config(tmp_path),
+    )
+    await runtime.start()
+    try:
+        control.inbound_queue.put_nowait(
+            make_envelope(
+                "m1",
+                "梦",
+                presence=ReadablePresence(
+                    summary="你在线，刚发过消息",
+                    tone="engaged",
+                    hint="可以正常聊",
+                ),
+            )
+        )
+        await asyncio.wait_for(runtime.wait_idle(), timeout=2)
+        assert "对方状态：你在线，刚发过消息（可以正常聊）" in llm.prompt_text
     finally:
         await runtime.stop()
 
@@ -1276,6 +1310,21 @@ async def test_defer_silences_current_proactive_turn(tmp_path: Path) -> None:
     result = await runtime.defer(30, "她在忙")
     assert turn.silent is True
     assert "30 分钟" in result
+    assert runtime._defer_until is not None
+
+
+@pytest.mark.asyncio
+async def test_defer_in_user_turn_does_not_silence(tmp_path: Path) -> None:
+    """用户还在等回复：延后主动开口不能把这一轮变成静默。"""
+    runtime = AliyaRuntime(
+        control=FakeControl(),
+        llm=FakeLLM(),
+        config=make_config(tmp_path),
+    )
+    turn = TurnContext(user_text="梦", origin="user")
+    runtime._current_turn = turn
+    _ = await runtime.defer(30, "对方要忙")
+    assert turn.silent is False
     assert runtime._defer_until is not None
 
 

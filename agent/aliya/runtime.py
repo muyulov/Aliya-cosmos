@@ -17,7 +17,7 @@ from agent.aliya.memory import MemoryKind, MemoryScope, MemoryStore
 from agent.aliya.ports import ControlPort
 from agent.aliya.prompt.builder import PromptBuilder
 from agent.aliya.prompt.loader import load_charter, load_persona
-from agent.aliya.turn.context import TurnContext
+from agent.aliya.turn.context import TurnContext, format_presence
 from agent.aliya.turn.postcheck import check
 from agent.aliya.turn.runner import TurnRunner
 from agent.aliya.turn.tools import build_tools
@@ -406,7 +406,7 @@ class AliyaRuntime:
                 user_text=stored.text,
                 session_id=stored.session_id,
                 message_id=stored.message_id,
-                presence=self._presence.summary if self._presence else None,
+                presence=format_presence(self._presence),
                 tasks=self._tasks_text(),
                 desktop=self._desktop_text(),
                 world=self._world_text(),
@@ -662,9 +662,7 @@ class AliyaRuntime:
                 if envelope.presence is not None:
                     self._presence = envelope.presence
                 turn = TurnContext.from_envelope(envelope)
-                turn.presence = turn.presence or (
-                    self._presence.summary if self._presence else None
-                )
+                turn.presence = turn.presence or format_presence(self._presence)
                 turn.tasks = turn.tasks or self._tasks_text()
                 turn.desktop = self._desktop_text()
                 turn.world = self._world_text()
@@ -701,7 +699,7 @@ class AliyaRuntime:
                     turn = TurnContext(
                         user_text=event_brief(event),
                         session_id=self._last_session_id,
-                        presence=self._presence.summary if self._presence else None,
+                        presence=format_presence(self._presence),
                         tasks=self._tasks_text(),
                         desktop=self._desktop_text(),
                         world=self._world_text(),
@@ -948,7 +946,7 @@ class AliyaRuntime:
                 "要不要说、说什么由你决定。"
             ),
             session_id=self._last_session_id,
-            presence=self._presence.summary if self._presence else None,
+            presence=format_presence(self._presence),
             tasks=self._tasks_text(),
             desktop=self._desktop_text(),
             world=self._world_text(),
@@ -1023,7 +1021,7 @@ class AliyaRuntime:
         turn = TurnContext(
             user_text=user_text,
             session_id=self._last_session_id,
-            presence=self._presence.summary if self._presence else None,
+            presence=format_presence(self._presence),
             tasks=self._tasks_text(),
             desktop=self._desktop_text(),
             world=self._world_text(),

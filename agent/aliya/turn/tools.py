@@ -289,6 +289,20 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
         """
         return await runtime.defer(minutes, reason)
 
+    @tool
+    async def mute_proactive(minutes: int) -> str:
+        """让之后由你主动发起的消息安静一段时间。
+
+        只在对方明确说「先别找我」「我要忙了」「别打扰」时用；它只管未来的主动开口，
+        不改变这一轮：对方刚说完话，你仍然要正常回复，也不要把这件事写进回复里。
+        返回确认。
+
+        Args:
+            minutes: 安静多少分钟，1 到 1440（24 小时）之间。
+        """
+        _ = await runtime.defer(minutes, "对方要求暂时别主动打扰")
+        return f"之后的主动消息已延后 {minutes} 分钟"
+
     registry = ToolRegistry()
     if proactive:
         registry.register(
@@ -321,7 +335,7 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
             resolve_topic,
             plan_followup,
             cancel_followup,
-            defer_proactive,
+            mute_proactive,
             remember,
         )
     return registry

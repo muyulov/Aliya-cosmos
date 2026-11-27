@@ -14,7 +14,7 @@ from typing import Literal, cast
 
 from openai.types.chat import ChatCompletionMessageParam
 
-from agent.cosmos.contracts import InboundEnvelope
+from agent.cosmos.contracts import InboundEnvelope, ReadablePresence
 
 _WEEKDAYS = ("一", "二", "三", "四", "五", "六", "日")
 
@@ -22,6 +22,20 @@ _WEEKDAYS = ("一", "二", "三", "四", "五", "六", "日")
 def format_moment(value: datetime) -> str:
     """把时间写成她读得懂的样子：日期 + 时分 + 星期。"""
     return f"{value:%Y-%m-%d %H:%M}（星期{_WEEKDAYS[value.weekday()]}）"
+
+
+def format_presence(presence: ReadablePresence | None) -> str | None:
+    """把可解读状态写成提示词里的一段。
+
+    `readable.summary` 按设计用「你」指对方，直接塞进提示词会被读成她自己
+    （「你在线，刚发过消息」→ 以为刚说话的是自己）。这里补上主体标签，
+    并保留 `hint`：时机建议本来就是给她判断要不要开口用的，之前被丢掉了。
+    """
+    if presence is None:
+        return None
+    if presence.hint:
+        return f"对方状态：{presence.summary}（{presence.hint}）"
+    return f"对方状态：{presence.summary}"
 
 
 @dataclass(slots=True)
@@ -96,7 +110,7 @@ class TurnContext:
         return cls(
             user_text=envelope.message.text,
             history=history,
-            presence=envelope.presence.summary if envelope.presence else None,
+            presence=format_presence(envelope.presence),
             tasks=tasks,
             memory=envelope.conversation.summary,
             session_id=envelope.message.session_id,

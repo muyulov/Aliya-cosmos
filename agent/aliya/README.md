@@ -238,7 +238,7 @@ flowchart TD
 | 文件 | `read_file` | 只读，限定在 `data/Aliya/workspace`，敏感路径拒绝 |
 | 计算 | `calculate` | AST 白名单求值，不用 `eval` |
 | 记忆 | `remember` / `check_memory` / `resolve_topic` | 长期记忆的写、读、收尾 |
-| 时间 | `plan_followup` / `cancel_followup` / `defer_proactive` | 未来跟进与主动开口延后 |
+| 时间 | `plan_followup` / `cancel_followup` / `defer_proactive`（主动回合）/ `mute_proactive`（用户回合） | 未来跟进与主动开口延后；用户回合只能延后之后的主动消息，不影响当轮回复 |
 
 本地工具的运行时能力统一由 `RuntimePort` 提供（`send` / `describe_desktop` / `dispatch` / `now` 等），
 工具函数用闭包绑定 runtime，避免 `self` 被当成工具参数。
