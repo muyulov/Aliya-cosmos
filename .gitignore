@@ -32,6 +32,7 @@ htmlcov/
 # 构建产物
 dist/
 build/
+site/
 
 # 工具缓存
 .ruff_cache/

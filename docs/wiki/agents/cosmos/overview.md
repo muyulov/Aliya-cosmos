@@ -1,18 +1,4 @@
-# cosmos Agent 开发文档
-
-- 适用对象：在 `agent/cosmos` 上开发调度、通信与状态感知能力的工程师
-- 关联目录：`agent/aliya`（Aliya 的实现，本文档描述协作接口与边界）
-- 角色设定：`data/prompt/Aliya.md`（人设唯一来源，本文档的表述需与它一致）
-- 底层依赖：`core/`（service / config / logger / llm / decision / agent）
-- 状态：**已实现**。16 个常驻服务（core 4 个 + cosmos 12 个，含 `ControlServerService` 与
-  `WebSocketChannelService`）与契约模型已落地，启动命令 `uv run python -m agent.cosmos.app`；
-  链路心跳、通道状态上报、调度并发/supersede、世界推理定时兜底与事件缺口快照补偿已接入；
-  桌面内置 5 个工具（echo / edit / search / run / web），Aliya 以独立进程通过 UDS 控制面连接，
-  浏览器可通过 WebSocket 终端通道接入
-
----
-
-## 1. 定位
+# cosmos 定位与组件
 
 cosmos 是 Aliya 的**主 agent**，同时承担三重角色：
 
@@ -24,7 +10,9 @@ cosmos 是 Aliya 的**主 agent**，同时承担三重角色：
 
 一句话：**Aliya 决策，cosmos 执行与呈现，子 agent 干活，用户通过 cosmos 说话。**
 
-与游戏《彼方的她-Aliya》的对应关系：
+组件划分与依赖链见[架构总览](../../architecture/overview.md)，通信方式见 [cosmos 通信拓扑](../../architecture/cosmos-topology.md)。
+
+## 与游戏设定的对应关系
 
 | 游戏设定 | 本项目 |
 | --- | --- |
@@ -43,7 +31,7 @@ cosmos 是 Aliya 的**主 agent**，同时承担三重角色：
 | 可解读表述与变化推送 | 表述必须像她自己会得出的观察，不能像系统结论 |
 | 情绪信号（有文本证据时） | 默认不进面板常驻项；需要时她可以问，也可以关闭 |
 
-### 1.1 设定映射（必须维持的信息差）
+### 设定映射（必须维持的信息差）
 
 Aliya 只知道「与一个来自千年前的神秘信号建立了联系」。她**不知道**时间映射同步器的存在，也不知道信号取代了海獭号原有的 AI。
 
@@ -56,27 +44,12 @@ Aliya 只知道「与一个来自千年前的神秘信号建立了联系」。�
 | 不越权知情 | 她的平板上是「能做的事」，不是「子 agent 注册表」「调度队列」 |
 | 不主动提 Doll | 除非被问到或情境需要，不主动说自己的克隆身份与寿命 |
 
-详细约束见 [`agent/aliya/README.md`](../aliya/README.md#2-人设基线)。
+详细约束见 [Aliya Agent § 人设基线](../aliya.md#2-人设基线)。
 
----
-
-## 2. 目录结构
+## 目录结构
 
 ```text
 agent/cosmos/
-  README.md                      本文（定位、索引、快速上手）
-  docs/
-    01-architecture.md           架构、组件、通信流向、与 agent/aliya 的边界
-    02-registry.md               子 agent 注册机制（AgentCard）
-    03-desktop.md                agent 桌面与状态监控面板
-    04-presence.md               用户状态线索（字段、表述、推送、隐私、对等）
-    05-dispatch.md               任务分发策略
-    06-terminal.md               通信终端（消息模型、路由、双上下文、异步推送）
-    07-world-reasoning.md        世界推理 agent 接入规范
-    08-subagent-contract.md      子 agent 接口契约
-    09-control-api.md            Aliya 控制面
-    10-flows.md                  五类端到端流程
-    11-extension.md              扩展性（新增子 agent / 新增状态字段）
   config/
     agent-settings.example.yaml  并入 data/config/cosmos.yaml 的 agent: 节点样例
   contracts/     契约模型（pydantic）：AgentCard / AgentRuntimeState / TerminalMessage / ...
@@ -84,8 +57,11 @@ agent/cosmos/
   registry/      子 agent 配置加载（bootstrap）与内置工具：
                  echo（回声）、edit（编辑）、search（检索）、run（运行）、web（联网）
   transport/     MessageBus / EventBus 端口、进程内实现与 BusService
+  world/         内置规则基线世界推理实现
   assembly.py    装配入口：core 4 个服务 + cosmos 12 个服务
   app.py         进程入口：uv run python -m agent.cosmos.app
+  cli.py         终端通道入口：把 stdin 接成用户通道
+  web/           浏览器 WebSocket 测试页
   errors.py      错误树（CosmosError 及其子类）
   __init__.py    对外只导出 CosmosError 与 build_cosmos_manager（延迟导入）
 ```
@@ -93,31 +69,9 @@ agent/cosmos/
 模块依赖同样是单向的：`app → assembly → services → (contracts, transport, errors) → core`。
 `core` 不认识 `agent`；`transport` 只依赖契约与错误树。
 
----
+规范文档已合并进本 wiki，章节对应关系见下方[文档索引](#文档索引)。
 
-## 3. 组件划分
-
-全部常驻组件都是 `core.service.Service` 子类，由 `ServiceManager` 按类型注入依赖、分层启停。
-
-| 组件 | 职责 | 依赖 |
-| --- | --- | --- |
-| `AgentRegistryService` | 维护 `AgentCard` 与 handler 的绑定，提供查询与能力检索 | 配置 |
-| `AgentRuntimeService` | 任务生命周期：提交、进度、取消、超时、幂等去重 | `AgentRegistryService` |
-| `DesktopService` | 桌面布局（分组 / 排序 / 可见性）、状态快照与事件 | `AgentRegistryService` |
-| `PresenceService` | 采集与聚合用户状态，派生可解读表述，发出变化事件 | `ClockService` |
-| `ConversationService` | 对话上下文与摘要、回传格式化、脱敏 | `LLMService` |
-| `DispatchService` | 把「点击」与「自然语言」归一成同一套调度管线 | `AgentRegistryService` / `AgentRuntimeService` / `ConversationService` |
-| `WorldBridgeService` | 组装世界推理输入、接收推理结果、转发给 Aliya | `ClockService` / `PresenceService` / `AgentRuntimeService` |
-| `TerminalService` | 双向消息通道、路由、异步推送、主动消息投递 | `ConversationService` / `DispatchService` / `PresenceService` |
-| `ControlService` | 向 Aliya 暴露的控制面（桌面操作、订阅、发消息） | 以上全部 |
-| `ControlServerService` | 把 `ControlService` 暴露为 UDS/NDJSON 控制面：握手、RPC、入站与事件推送 | `ControlService` / `ClockService` / 配置 |
-| `WebSocketChannelService` | 浏览器侧用户通道：JSON 报文进出 `TerminalService`，按会话推送回复 | `TerminalService` / 配置 |
-
-依赖方向单向：`agent.cosmos → core`，且 `core` 不知道 `agent` 的存在。
-
----
-
-## 4. 快速上手
+## 快速上手
 
 启动进程（读 `data/config/cosmos.yaml`，Ctrl-C 优雅退出）：
 
@@ -165,31 +119,27 @@ asyncio.run(main())
 | `WorldBridgeService.set_history_provider()` | 由 `assembly` 接到 `TerminalService.history_pattern`，窗口取 `world.history.window_days` | 已在装配里接好 |
 | `TerminalService.report_presence()` | 接收通道上报的在线/输入/设备状态 | 部署方通道适配器 |
 
-最小子 agent handler 见 [08-subagent-contract.md](docs/08-subagent-contract.md#9-edit-agent-契约示例)
-与内置的 5 个工具（`edit` / `search` / `run` / `web` / `echo`，见
-[08 第 11 节](docs/08-subagent-contract.md#11-内置工具)）；完整链路见 [10-flows.md](docs/10-flows.md)。
+最小子 agent handler 见[子 agent 契约 § 9](subagent.md#9-edit-agent-契约示例)与内置的 5 个工具（`edit` / `search` / `run` / `web` / `echo`，见[§ 11](subagent.md#11-内置工具)）；完整链路见[流程示例](flows.md)。
 
----
-
-## 5. 文档索引
+## 文档索引
 
 | 章 | 内容 | 什么时候看 |
 | --- | --- | --- |
-| [01 架构](docs/01-architecture.md) | 角色、组件、通信方式、与 `agent/aliya` 的代码边界 | 第一次读，或要改整体结构 |
-| [02 注册机制](docs/02-registry.md) | `AgentCard` 字段、注册流程、校验规则 | 要接入新子 agent |
-| [03 agent 桌面](docs/03-desktop.md) | 卡片结构、状态字段、排序分组、刷新、监控面板 | 要改展示或状态呈现 |
-| [04 用户状态线索](docs/04-presence.md) | 状态字段模型、可解读表述、推送、隐私边界、对等原则 | 要加状态字段或改感知逻辑 |
-| [05 任务分发](docs/05-dispatch.md) | 统一管线、匹配策略、并行规则、失败降级 | 要改调度行为 |
-| [06 通信终端](docs/06-terminal.md) | 消息模型、上下文、异步推送、打扰预算、脱敏 | 要改消息链路 |
-| [07 世界推理](docs/07-world-reasoning.md) | `WorldInput` / `WorldInference`、触发门控、信念、EFE、校准与轨迹 | 要接世界推理 agent 或调参 |
-| [08 子 agent 契约](docs/08-subagent-contract.md) | 输入输出、进度上报、超时取消、幂等；内置 5 个工具清单 | 写子 agent 时必看 |
-| [09 控制接口](docs/09-control-api.md) | Aliya 能调用的全部能力 | 写 Aliya 侧代码 |
-| [10 流程示例](docs/10-flows.md) | 五类端到端流程 | 验收与联调 |
-| [11 扩展性](docs/11-extension.md) | 扩展清单与常见坑 | 每次扩展前过一遍 |
+| [架构总览](../../architecture/overview.md) | 角色、组件、依赖方向 | 第一次读，或要改整体结构 |
+| [cosmos 通信拓扑](../../architecture/cosmos-topology.md) | 通信方式、消息流向、链路状态 | 要改消息链路 |
+| [代码边界](../../architecture/boundaries.md) | 与 Aliya 的边界、错误分层、明确不做的事 | 改跨层接口前 |
+| [注册机制](registry.md) | `AgentCard` 字段、注册流程、校验规则 | 要接入新子 agent |
+| [桌面展示](desktop.md) | 卡片结构、状态字段、排序分组、刷新、监控面板 | 要改展示或状态呈现 |
+| [用户状态线索](presence.md) | 状态字段模型、可解读表述、推送、隐私边界、对等原则 | 要加状态字段或改感知逻辑 |
+| [任务分发](dispatch.md) | 统一管线、匹配策略、并行规则、失败降级 | 要改调度行为 |
+| [通信终端](terminal.md) | 消息模型、上下文、异步推送、打扰预算、脱敏 | 要改消息链路 |
+| [世界推理接入](world-reasoning.md) | `WorldInput` / `WorldInference`、触发门控、信念、EFE、校准与轨迹 | 要接世界推理 agent 或调参 |
+| [子 agent 契约](subagent.md) | 输入输出、进度上报、超时取消、幂等；内置 5 个工具清单 | 写子 agent 时必看 |
+| [控制接口](control-api.md) | Aliya 能调用的全部能力 | 写 Aliya 侧代码 |
+| [流程示例](flows.md) | 五类端到端流程 | 验收与联调 |
+| [扩展性](extension.md) | 扩展清单与常见坑 | 每次扩展前过一遍 |
 
----
-
-## 6. 贯穿全文的约定
+## 贯穿全文的约定
 
 | 约定 | 说明 |
 | --- | --- |
@@ -204,16 +154,4 @@ asyncio.run(main())
 | 不记正文 | 日志记标识、耗时、状态与错误类型，不记消息正文、用户状态原始值与文件内容 |
 | 时间统一来源 | 所有时间戳取 `ClockService.now()`，不直接 `datetime.now()` |
 
----
-
-## 7. 术语表
-
-| 术语 | 含义 |
-| --- | --- |
-| AgentCard | 子 agent 的注册元数据 + 桌面展示元数据 |
-| Agent 桌面 | cosmos 向 Aliya 呈现的子 agent 列表，形态类似手机桌面 APP |
-| 可解读状态 | 由原始字段派生的自然语言表述（如「你在线，5 分钟没说话了」） |
-| 世界推理 agent | Aliya 的后台参谋，持续推演世界状态，不占桌面、不触发调度 |
-| 调度上下文 | 与子 agent 任务相关的状态（task_id、进度、错误），不给用户看 |
-| 对话上下文 | 与用户聊天相关的历史与摘要，给 Aliya 用 |
-| 主动消息 | 非用户触发的消息（Aliya 主动搭话、任务完成通知、状态变化提示） |
+术语定义见[术语表](../../reference/glossary.md)。

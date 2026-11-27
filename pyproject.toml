@@ -1,5 +1,5 @@
 [project]
-name = "aliya-cosmos"
+name = "Aliya-cosmos"
 version = "0.1.0"
 description = "Python + uv 通用脚手架：service / logger / config 三层结构"
 readme = "README.md"
@@ -21,6 +21,9 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
     "ruff>=0.8",
+    # 文档站点（wiki）构建，仅开发环境需要
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
 ]
 
 [build-system]

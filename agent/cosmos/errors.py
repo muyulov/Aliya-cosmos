@@ -1,6 +1,6 @@
 """cosmos 错误树。
 
-约定（见 `agent/cosmos/docs/01-architecture.md` 第 8 节）：
+约定（见 `docs/wiki/architecture/boundaries.md` 错误分层一节）：
 
 - 统一继承 `CosmosError`，调用方一次 `except CosmosError` 就能兜住全部业务错误。
 - 三个属性：`code`（机器可读）、`message`（人可读）、`retriable`（是否值得重试）。

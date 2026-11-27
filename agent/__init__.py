@@ -6,8 +6,8 @@
 - `agent.cosmos`：cosmos 主 agent 的编排实现（调度中枢 + 通信终端 + 状态感知）。
 - `agent.aliya`：Aliya 的实现（对话主体 + 控制入口 + 自主行动）。
 
-当前阶段只有文档与配置骨架，不放业务逻辑；实现落地时再按
-`agent/cosmos/docs/01-architecture.md` 里的组件划分填代码。
+组件划分见 `docs/wiki/architecture/overview.md`，
+各服务的规范见 `docs/wiki/agents/cosmos/overview.md`。
 """
 
 __all__: list[str] = []

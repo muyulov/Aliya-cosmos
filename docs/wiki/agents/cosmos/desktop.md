@@ -1,4 +1,4 @@
-# 03 Agent 桌面展示规范
+# Agent 桌面展示规范
 
 agent 桌面是 cosmos 向 Aliya 呈现子 agent 的唯一入口，形态对应手机桌面上的 APP 列表：每个子 agent 是一张卡片，有自己的图标、名称、简介和状态。Aliya 像打开 APP 一样启动它，也能直接说一句话由 cosmos 自动匹配。
 
@@ -38,7 +38,7 @@ class DesktopGroup(BaseModel):
 
 ```python
 class DesktopEntry(BaseModel):
-    card: AgentCard                    # 注册元数据，见 02-registry.md
+    card: AgentCard                    # 注册元数据，见 registry.md
     status: AgentStatus                # idle / queued / running / stalled / abnormal / disabled
     task: AgentTaskView | None         # 当前或最近一次任务的视图
     readable: ReadableState            # 可解读状态，见第 4 节
@@ -191,7 +191,7 @@ type ReadableTone = Literal["calm", "busy", "strained", "alarming", "muted"]
 | 建议是参考不是指令 | `hint` 写「可取消后重新提交」，不写「立即取消」 |
 | 不使用情绪词描述 agent | 不写「Edit agent 很沮丧」——agent 没有情绪，只有状态 |
 
-最后一条尤其重要：**可解读 ≠ 拟人化**。心率之所以能反映情绪，是因为有生理学依据；agent 的状态只能反映执行情况，不能编造心理活动。真正需要情绪的是用户状态线索（见 [04-presence.md](04-presence.md)），那里的情绪信号必须有真实证据来源，而且默认不摆在面板上。
+最后一条尤其重要：**可解读 ≠ 拟人化**。心率之所以能反映情绪，是因为有生理学依据；agent 的状态只能反映执行情况，不能编造心理活动。真正需要情绪的是用户状态线索（见 [presence.md](presence.md)），那里的情绪信号必须有真实证据来源，而且默认不摆在面板上。
 
 ### 4.3 示例
 
@@ -285,7 +285,7 @@ class DesktopLayoutPatch(BaseModel):
 | --- | --- | --- |
 | 查看详情 | `ControlService.get_agent(agent_id)` | 返回卡片 + 运行态 + 最近 5 次任务摘要 |
 | 打开（进入待命） | `open_agent(agent_id)` | 仅做 UI 层选中，不启动任务；返回可填的参数 schema |
-| 点击调用 | `invoke_agent(agent_id, params)` | 走显式调用路径，见 [05-dispatch.md](05-dispatch.md#2-统一管线) |
+| 点击调用 | `invoke_agent(agent_id, params)` | 走显式调用路径，见 [dispatch.md](dispatch.md#2-统一管线) |
 | 取消任务 | `cancel_task(task_id)` | 子 agent 收到 `CancelledError`；5s 未退出标记 `stalled` |
 | 重试 | `retry_task(task_id)` | 仅 `execution.retryable=true` 且上次为失败时可用；生成新 `task_id` |
 | 启用 / 禁用 | `set_agent_enabled(agent_id, enabled)` | 仅管理面；Aliya 无此权限 |
@@ -317,4 +317,4 @@ class DesktopLayoutPatch(BaseModel):
 | 情绪 | 没有情绪，也不拟人化 | 有，但默认不进常驻项，需有文本证据 |
 | 关闭权 | Aliya 可折叠、排序 | Aliya 可要求关闭任一字段，用户可整体关闭采集 |
 
-详细规范见 [04-presence.md](04-presence.md)。
+详细规范见 [presence.md](presence.md)。

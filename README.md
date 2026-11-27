@@ -1,4 +1,4 @@
-# aliya-cosmos
+# Aliya-cosmos
 
 Python + uv 通用脚手架。三层结构：`service` / `logger` / `config`，开箱可跑，后续往里填业务。
 
@@ -14,618 +14,63 @@ uv sync
 uv run python -m core.main
 
 # 启动主 agent（core 4 个服务 + cosmos 12 个服务）
-# 控制面令牌只从进程环境变量读（.env 不会注入 os.environ），服务端与客户端必须同一个值
 ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.app
 
 # 另开终端，启动 Aliya（先 cosmos 后 Aliya）
 ALIYA_CONTROL_TOKEN=dev uv run python -m agent.aliya.app
 
-# 或者：用终端通道直接对话（CLI 即 cosmos，替代上面第一条命令）
+# 或者用终端通道直接对话（CLI 即 cosmos）
 ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.cli
 ```
 
-`agent.cosmos.cli` 与 `agent.cosmos.app` 二选一：两者都装配同一套服务并监听同一个控制面 socket，前者额外把 stdin 接成用户通道、把 Aliya 的回复打印到 stdout。
-
 无需任何配置即可启动，所有配置项都有默认值。要自定义时改 `data/config/cosmos.yaml`；密钥类配置写在 `.env`（参考 `.env.example`）。
 
-进程常驻，`SIGINT` / `SIGTERM` 触发优雅关闭。信号注册优先交给事件循环（POSIX 的标准做法）；Windows 的事件循环不实现 `add_signal_handler`，会自动退回 `signal.signal`，并经 `call_soon_threadsafe` 置位。
+## 文档
 
-### 浏览器 WebSocket 终端通道
+完整文档已整理为 wiki 站点，源文件在 `docs/wiki/`：
 
-`agent.cosmos.app` 额外把用户通道开成 WebSocket，供浏览器直接接入（默认开启，只监听回环地址）：
+| 我想…… | 入口 |
+| --- | --- |
+| 把项目跑起来 | [快速开始](docs/wiki/getting-started.md) |
+| 看懂进程与组件怎么连 | [架构总览](docs/wiki/architecture/overview.md) |
+| 改配置、接自己的模型端点 | [配置](docs/wiki/config.md) |
+| 写一个工具给 agent 用 | [工具开发](docs/wiki/development/tools.md) |
+| 了解 cosmos 的注册、调度、终端 | [cosmos 定位与组件](docs/wiki/agents/cosmos/overview.md) |
+| 了解 Aliya 的人格与主循环 | [Aliya Agent](docs/wiki/agents/aliya.md) |
+| 排查问题、看日志 | [日志](docs/wiki/operations/logging.md) |
+| 全部章节 | [wiki 首页](docs/wiki/index.md) |
 
-```yaml
-agent:
-  cosmos:
-    terminal:
-      ws:
-        enabled: true
-        host: 127.0.0.1      # 默认只监听回环地址
-        port: 8780
-        path: /ws
-        token_env: ""        # 绑定非回环地址时必须配置，如 ALIYA_WEB_TOKEN
-        default_session_id: web
-        history_limit: 20    # 握手后补发的最近对话条数；0 关闭
+本地预览与构建：
+
+```bash
+uv run mkdocs serve            # 热重载预览
+uv run mkdocs build --strict   # 校验链接与导航
 ```
 
-协议是一帧一条 JSON：先发 `hello` 建立会话，之后收发 `message`；`typing` 上报输入状态，`ping` / `pong` 维持链路。服务端在 `ready` 之后补发 `history`，Aliya 的回复以 `message` 帧推送。
+`docs/plans/` 下的设计与实施计划属于历史归档，不进入站点。
 
-```js
-const ws = new WebSocket("ws://127.0.0.1:8780/ws");
-ws.onopen = () => ws.send(JSON.stringify({type: "hello", session_id: "web"}));
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  if (data.type === "message") console.log(data.message.text);
-};
-ws.send(JSON.stringify({type: "message", text: "在吗"}));
+## 目录结构
+
+```text
+core/           通用能力层：service / logger / config / llm / embedding / decision / agent
+agent/cosmos/   主 agent：契约、常驻服务、总线、装配、进程入口、终端通道
+agent/aliya/    Aliya：独立进程、UDS 控制面客户端、回合循环、记忆与自主行动
+data/           配置与运行数据（config 可提交，state / Aliya / memory 为运行时产物）
+docs/wiki/      文档站点源文件
+docs/plans/     历史设计与实施计划（归档）
+tests/          测试
+mkdocs.yml      文档站点配置
 ```
 
-`token_env` 配置令牌后，`hello` 需带上同值 `token`；绑定非回环地址却未配令牌会拒绝启动。CLI 与 WS 都占用同一个用户出口，只能二选一：`agent.cosmos.cli` 启动时会自动关闭 WS 通道，由 stdin 接管。
-
-启动 `agent.cosmos.app` 后，直接用浏览器打开 `http://127.0.0.1:8780/` 即可使用自带测试页（对话、typing 上报、原始帧日志）；页面源码在 `agent/cosmos/web/ws-test.html`，也可以单独用 `file://` 打开。
+依赖方向单向：`agent.aliya → agent.cosmos.contracts → core`，`core` 不认识 `agent`。详见[代码边界](docs/wiki/architecture/boundaries.md)。
 
 ## 常用命令
 
 | 目的 | 命令 |
 | --- | --- |
-| 安装依赖 | `uv sync` |
-| 启动基础服务 | `uv run python -m core.main` |
-| 启动主 agent | `ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.app` |
-| 终端通道对话 | `ALIYA_CONTROL_TOKEN=dev uv run python -m agent.cosmos.cli` |
-| 启动 Aliya | `ALIYA_CONTROL_TOKEN=dev uv run python -m agent.aliya.app` |
 | 跑测试 | `uv run pytest` |
 | 覆盖率 | `uv run pytest --cov=core --cov=agent` |
 | 代码检查 | `uv run ruff check .` |
 | 代码格式化 | `uv run ruff format .` |
 
-## 目录结构
-
-```text
-core/
-  main.py        入口：装配服务容器并驱动生命周期
-  service/       业务层：服务基类、容器、注册表、具体服务实现
-  logger/        日志层：颜文字、结构化上下文、单行/树形/JSON 格式化、sink 装配
-  config/        配置层：YAML 骨架加载与占位符插值
-  embedding/     向量层：单条 / 批量文本向量化
-  llm/           LLM 层：对话 / 流式 / 结构化 / 工具调用 / 多模态
-  decision/      判断层：批量提问与 choice / score / noul 三原语
-  agent/         Agent 工具层：工具声明与执行、Skill、MCP、系统提示拼装
-agent/
-  cosmos/        主 agent：契约、12 个常驻服务、进程内总线、装配、进程入口与终端通道
-  aliya/         上层控制者：独立进程、UDS 客户端、回合循环、记忆与自主行动
-data/           配置与运行数据：config/cosmos.yaml 为配置骨架，可安全提交
-  Aliya/        Aliya 的数据根：记忆文件与工具区（运行时产物，不入库）
-    workspace/  文件与命令工具区（不存在时自动创建）
-  skills/       技能目录：<name>/SKILL.md
-  mcp.json      MCP server 清单（标准 mcpServers 结构）
-tests/           测试
-```
-
-依赖方向单向：`service → (config, logger)`、`embedding / llm / decision → (config, logger, service)`、`agent → (config, llm, logger)`、`agent.cosmos → core`（反向不成立）。`service` 层不引用任何框架，可被 CLI、定时任务、测试直接复用。唯一的例外是 `core/service/registry.py`：它要 import 具体服务类才能完成注册，因此这个模块反向依赖 `embedding` / `llm` / `decision`；它也因此不挂在 `core/service/__init__.py` 上（会成环），装配入口直接从 `core.service.registry` 取。
-
-## 配置
-
-配置以 `data/config/cosmos.yaml` 为唯一来源（路径相对当前工作目录）。该文件可安全提交，因为它不含任何明文密钥。要调整配置，改这个文件即可。
-
-```yaml
-app:
-  env: dev                   # 部署时可改成 ${APP_ENV:dev}，由环境变量顶掉
-log:
-  level: DEBUG               # 仓库骨架用 DEBUG；代码内置默认是 INFO
-  json: false
-  layout: line               # line（默认，字段内联成一行）/ tree（字段成树）
-  color: auto                # auto（仅终端）/ always / never
-```
-
-### 占位符
-
-`${VAR}` 与 `${VAR:默认值}` 两种写法，取值来源是进程环境变量与 `.env`（[进程环境变量优先](https://12factor.net/zh_cn/config)）：
-
-| 写法 | 语义 |
-| --- | --- |
-| `${DEEPSEEK_API_KEY}` | 取不到值就启动失败，进程退出 |
-| `${APP_ENV:dev}` | 取不到值时用 `dev` |
-| `$${VAR}` | 字面 `${VAR}`，不取值（`$$` 转义成 `$`） |
-
-占位符只作用于字符串值，`cosmos.yaml` 里 dict 的键不会被替换；展开后一律是字符串，类型由 pydantic 转换（如 `"true"` → `bool`）。
-
-默认只展开一趟：变量值里再写 `${B}` 不会继续展开，避免链式取值带来的隐式依赖。确实需要链式引用时，用 `load_settings(..., expand_rounds=2)` 显式开启。
-
-`.env` 的唯一职责就是给占位符喂值，**不能**直接覆盖配置项。变量名大小写敏感：`${App_Key}` 与 `${APP_KEY}` 是两个不同的名字。
-
-取值表包含**全部**进程环境变量，因此 `${PATH}`、`${HOME}` 这类写法会直接命中系统变量——建议用项目自己的变量名（如 `APP_` 前缀）避免撞车。
-
-### 配置项
-
-下表取 `data/config/cosmos.yaml` 的**当前值**（即进程实际生效的配置）；没有列出的字段回落到 `core/config/settings.py` 的内置默认。两者语义不同：删掉 YAML 里的某项后，取的是代码内置默认，而不是下表的值（例如 `log.level` 的代码默认是 `INFO`，仓库骨架覆盖成了 `DEBUG`）。
-
-| YAML 路径 | 仓库当前值 | 说明 |
-| --- | --- | --- |
-| `app.app_name` | `aliya-cosmos` | 应用名 |
-| `app.env` | `dev` | 环境，只能是 dev / test / prod |
-| `app.debug` | `true` | 调试开关 |
-| `log.level` | `DEBUG` | 日志级别；代码内置默认 `INFO` |
-| `log.json` | `false` | 是否输出 JSON 日志 |
-| `log.layout` | `line` | 输出布局：`line`（字段内联成一行，便于 grep 与按行采集）/ `tree`（字段缩进成树） |
-| `log.color` | `auto` | 控制台着色：`auto`（仅终端）/ `always` / `never`；日志文件永远不带颜色 |
-| `log.source` | `true` | 是否在每条日志里带上调用点 `文件名:行号` |
-| `log.dir` | `logs` | 日志目录 |
-| `log.file_name` | `cosmos-main-{time:%Y%m%d-%H%M%S}.log` | 主日志文件名，支持 loguru 时间模板（装配时求值，故每次启动一个独立文件） |
-| `log.error_file_name` | `cosmos-error-{time:%Y%m%d-%H%M%S}.log` | 错误日志文件名，同上。两个名字的前缀不能互为包含关系 |
-| `log.rotation` | `00:00` | 轮转阈值（默认按天），写进 YAML 时必须加引号 |
-| `log.retention` | `7 days` | 保留时长 |
-| `log.compression` | `zip` | 归档压缩方式 |
-| `service.start_timeout` | `30` | 单个服务 `start()` 的超时秒数，必须为正数；写 `null` 表示不限制 |
-| `service.stop_timeout` | `30` | 单个服务 `stop()` 的超时秒数，必须为正数；同上 |
-| `clock.tz` | `Asia/Shanghai` | 时钟服务的时区；代码内置默认 `UTC` |
-
-`embedding` 是独立的向量化端点，与 llm 分开配（DeepSeek 没有 embedding 端点，两家通常不是同一个服务）：
-
-| 字段 | 仓库当前值 | 说明 |
-| --- | --- | --- |
-| `base_url` | `http://127.0.0.1:9080/v1` | OpenAI 兼容端点地址（仓库骨架指向本地 llama.cpp）；代码内置默认是阿里云 compatible-mode |
-| `api_key` | `local` | YAML 里写 `${EMBEDDING_API_KEY:local}`；本地端点不校验鉴权，只是需要一个非空占位。留空则该端点不可用（只警告，不影响启动） |
-| `model` | `Qwen3-Embedding-4B-Q4_K_M` | 向量化模型；代码内置默认是 `text-embedding-v3` |
-| `timeout` | `60` | 单次请求超时秒数，必须为正数 |
-| `retries` | `2` | SDK 重试次数，`0` 关闭 |
-| `batch_size` | `10` | 单次请求最多几条文本；阿里 v3 上限就是 10（v1/v2 为 25、OpenAI 为 2048），超了会 400 |
-| `dimensions` | `null` | `null` 用模型原始维度；设值则请求截断，做不到的模型会报错 |
-
-`llm.chat` / `llm.vision` 是两个端点，字段完全相同（可指向同一服务，也可分开接不同供应商）：
-
-| 端点字段 | 仓库当前值 | 说明 |
-| --- | --- | --- |
-| `base_url` | `https://api.deepseek.com/v1` | 端点地址，chat 与 vision 相同；换供应商时改这里。代码内置默认是 OpenAI 官方端点 |
-| `api_key` | 空 | 密钥，YAML 里写 `${DEEPSEEK_API_KEY:}` 由 `.env` 提供；留空则该端点不可用（只警告，不影响启动） |
-| `model` | `deepseek-flash` | 该端点的模型；走 vision 端点需显式传 `endpoint="vision"`。代码内置默认是 `gpt-4o-mini` |
-| `timeout` | `60` | 单次请求超时秒数，必须为正数 |
-| `retries` | `2` | SDK 重试次数，`0` 关闭 |
-| `structured_mode` | `json_object` | 结构化输出模式。仓库骨架用 `json_object`（DeepSeek 不支持 `json_schema`），该模式要求提示词里出现 json 字样；换成支持 `json_schema` 的端点时可改回 |
-| `temperature` | `null` | 温度，`null` 表示不传该参数（用服务端默认） |
-| `max_tokens` | `null` | 最大输出 token，`null` 表示不传该参数 |
-
-`decision.jev`（云端）与 `decision.laya`（本地 laya-serve）是两个端点，字段完全相同，同一套 `/systemone` 协议；`base_url` 只写到 `/v1` 为止，路径 `/systemone` 由代码补上：
-
-| 端点字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `enabled` | `false` | 是否启用该端点；两个端点默认都关着，进程照常启动，调用时才报未启用 |
-| `base_url` | jev `https://api.typesafe.ai/v1` / laya `http://127.0.0.1:8000/v1` | 端点地址，只写到 `/v1`，路径 `/systemone` 由代码补 |
-| `api_key` | 空 | 密钥，YAML 里写 `${TYPESAFE_API_KEY:}` / `${LAYA_API_KEY:}` 由 `.env` 提供；留空则不发 `Authorization` 头（laya-serve 默认不要求认证） |
-| `model` | jev `jev-latest` / laya 空 | 该端点的模型；Jev 必填（空会 422），Laya 留空表示不带 `model` 字段、交给 Router 按语种自动选 checkpoint |
-| `timeout` | `60` | 单次请求超时秒数，必须为正数 |
-| `retries` | `2` | 429 / 502 / 503 / 504 / 529 的退避重试次数，`0` 关闭 |
-| `max_connections` | `null` | 该端点连接池上限；`null` 用 httpx2 默认。并发 `predict_many` 时用它压住对端点的连接数 |
-
-### 失败行为
-
-配置在进程启动时加载，出错即退出：
-
-| 场景 | 行为 |
-| --- | --- |
-| `data/config/cosmos.yaml` 不存在 | 全部走默认值继续启动，启动日志显示 `配置源=内置默认值（未找到 …）` |
-| `data/config/cosmos.yaml` 存在但为空 | 同上（全部走默认值），启动日志显示 `配置源=…（空文件，全部走默认值）` |
-| 配置文件不是合法 UTF-8，或读不动（权限等） | 报错退出 |
-| YAML 语法错误或顶层不是映射 | 报错退出 |
-| 占位符取不到值且没写默认值 | 报错退出，并指出是哪个变量 |
-| 字段取值非法（如 `env: staging`、`log.level: BOGUS`） | 报错退出 |
-| 某个服务的 `start()` 抛错或超时 | 回滚本次启动过的服务，记录 `应用启动失败，进程退出`（带堆栈），以非零码退出 |
-
-启动日志里的 `配置源` 字段会写明本次配置来自哪个文件，路径是相对工作目录解析的，从别处启动时请核对这一项。
-
-## 日志
-
-定位问题最快的方式是看结构化字段，而不是把变量拼进字符串。传进 `log.info` 的额外 kwargs 会自动渲染成结构化字段：
-
-```python
-from core.logger import log
-
-log.info("用户回合已入队", 参与者="qq:6329133635628374381", 已取消旧计划=0)
-```
-
-默认布局是单行（`log.layout: line`）：字段内联成 `键=值`，一条记录（除堆栈外）只占一行，便于 grep 与按行采集：
-
-```text
-2026-08-27 23:09:52 [I] dispatcher.py:42 (^_^)/ 用户回合已入队 | 参与者=qq:6329133635628374381 | 已取消旧计划=0
-```
-
-`log.layout: tree` 换成缩进树，人读更清楚：
-
-```text
-2026-08-27 23:09:52 [I] dispatcher.py:42 (^_^)/ 用户回合已入队
-    ├─ 参与者: qq:6329133635628374381
-    └─ 已取消旧计划: 0
-```
-
-级别后面的 `dispatcher.py:42` 是调用点来源（文件:行号），由 `log.source` 控制，默认开启。它由日志门面自动跳过自身与包装层得到，不需要调用点手写；`Service.log_error` 这类包装也会把来源落在真正调用它的业务代码上。压日志体积或对接固定格式采集时设 `log.source: false`。
-
-颜文字按级别自动选择，也可用 `face=` 指定，常量表在 `core/logger/faces.py`。`log.json: true` 时改为单行 JSON，字段平铺，便于日志采集；`time` / `level` / `message` / `face` / `exception` / `source` 是保留键，业务字段与它们同名时以保留键为准（单行与树形格式没有这个限制——业务字段独立于元数据，不与之混排）。
-
-`log.color` 控制控制台着色（时间戳暗灰、级别与消息按级别上色、字段名暗灰），`always` 可在 IDE 输出窗、CI 面板这类拿不到 `isatty` 的地方强制打开。**颜色只进控制台**：文件 sink 永远不写着 ANSI 转义序列。
-
-`context.request_scope` 作用域内的 `request_id` 会自动携带，调用点无需手写字段；标准库与第三方库（`sqlalchemy` / `httpx` / `asyncio`）经桥接后的日志同样携带这些上下文：
-
-```python
-from core.logger import context, log
-
-with context.request_scope():
-    log.info("处理订单", 订单号="A001")  # request_id 自动出现在字段里
-```
-
-需要临时附加业务维度时用上下文管理器，退出自动还原：
-
-```python
-with log.context(会话="qq:123"):
-    log.info("会话内")
-```
-
-异常堆栈会渲染成独立块，不与字段混淆：
-
-```text
-2026-09-12 10:00:00 [E] (x_x) 未捕获异常
-    ├─ 阶段: 装配
-    ├─ 异常: KeyError
-    └─ 堆栈
-       Traceback (most recent call last):
-         ...
-       KeyError: 'item_id'
-```
-
-日志文件有两个：`logs/cosmos-main-<启动时间戳>.log`（跟随 `log.level`）与 `logs/cosmos-error-<启动时间戳>.log`（固定 ERROR 级），均按天轮转。文件名默认带 `{time}` 模板，**每次启动写一组独立文件**，两次启动的内容不会混在一起；`setup_logging()` 返回的 `LogFiles(app=…, error=…)` 就是本次实际写入的路径。
-
-保留 `{…}` 占位符不只是为了命名：loguru 的 `retention` 靠它识别同族文件，改成固定名（`app.log`）后旧文件将永远清不掉。
-
-## LLM 层
-
-`LLMService` 把「调大模型」收成一个服务，业务代码不直接接触 SDK。五项能力：
-
-```python
-from pydantic import BaseModel
-
-from core.llm import (
-    LLMService,
-    assistant,
-    image_url,
-    system,
-    tool,
-    tool_result,
-    user,
-    user_with_images,
-)
-
-
-class Item(BaseModel):
-    name: str
-    price: float
-
-
-class WeatherArgs(BaseModel):
-    city: str
-
-
-async def main(svc: LLMService, picture_url: str) -> None:
-    # 对话
-    reply = await svc.chat([system("你是助手"), user("你好")])
-
-    # 流式：逐段产出，不自动拼接
-    parts = [part async for part in svc.stream([user("讲个故事")])]
-
-    # 结构化输出
-    item = await svc.chat_structured([user("苹果多少钱")], Item)
-
-    # 工具调用（单轮）：回传与循环由调用方写
-    messages = [user("上海天气")]
-    call_reply = await svc.chat_tools(messages, [tool("get_weather", "查天气", WeatherArgs)])
-    if call_reply.tool_calls:
-        # 要第二轮就自己拼：assistant() 原样带回 tool_calls，tool_result() 回填结果
-        call = call_reply.tool_calls[0]
-        messages += [assistant(tool_calls=call_reply.tool_calls), tool_result(call.id, "晴 26℃")]
-        final = await svc.chat(messages)
-
-    # 多模态：不单独开方法，显式指定 vision 端点
-    seen = await svc.chat([user_with_images("这是什么", image_url(picture_url))], endpoint="vision")
-```
-
-约定：
-
-| 约定 | 说明 |
-| --- | --- |
-| 不记正文 | 日志记调用开始（操作 / 模型 / 端点 / 消息数 / 采样参数，DEBUG）与完成（操作 / 模型 / 端点 / 耗时 / token），失败记错误类型与状态码；消息正文该不该记由调用方自己决定并自己打 |
-| 不自动多轮 | `chat_tools` 只发一轮并返回 `tool_calls`，回传用 `assistant(tool_calls=...)` + `tool_result(...)`，循环由调用方写 |
-| chat / vision 两端点 | 两个端点各自带连接与采样参数，可指向同一服务也可分开接；端点只按 `endpoint=` 显式选（多模态传 `"vision"`），不给就走 chat——不按模型名自动切换。用 Chat Completions 而非 Responses API，因为兼容端点普遍只实现前者 |
-| 缺密钥不 fail fast | 端点没配 `api_key` 时只警告、不建客户端；两个端点全没配健康检查才 unhealthy，调用时才抛 `LLMConfigError` |
-| 重试交给 SDK | 超时与重试由端点的 `timeout` / `retries` 控制；流式一旦开始消费就不再重试，断流是否重放由调用方决定 |
-| `json_object` 要提示词配合 | 该模式要求提示词里出现 json 字样，属调用方责任 |
-
-错误全部继承 `LLMError`，原始 SDK 异常挂在 `__cause__`：
-
-| 类型 | 触发条件 |
-| --- | --- |
-| `LLMConfigError` | 端点未配 `api_key` |
-| `LLMRequestError` | 端点返回 4xx / 5xx（带 `status_code` / `endpoint` / `model` / `request_id`） |
-| `LLMTimeoutError` | 请求超时 |
-| `LLMConnectionError` | 连不上端点（超时除外） |
-| `LLMSchemaError` | 结构化输出不符合给定 schema |
-| `LLMResponseError` | 返回体缺内容（choices 为空、`content` 为 `None`） |
-
-## 向量层
-
-`EmbeddingService` 把「文本转向量」收成一个服务，业务代码不直接接触 SDK：
-
-```python
-from core.embedding import EmbeddingService
-
-
-async def main(svc: EmbeddingService, texts: list[str]) -> None:
-    # 单条
-    vector = await svc.embed("要向量化的文本")
-
-    # 批量：按 batch_size 切片、逐批串行请求，结果顺序与入参一致
-    vectors = await svc.embed_many(texts)
-
-    # 截断到指定维度：调用覆盖 > 配置 dimensions > 不传（用模型原始维度）
-    short = await svc.embed("要向量化的文本", dimensions=512)
-```
-
-约定：
-
-| 约定 | 说明 |
-| --- | --- |
-| 原样透传、不归一化 | 返回的是模型原始向量，模长信息不丢；要不要 L2 归一化由调用方决定 |
-| 空序列早退 | `embed_many([])` 返回 `[]`，不发请求、不查密钥（空输入不需要服务）；空串与全空白串在本地抛 `EmbeddingInputError` |
-| `embed_many` 只收序列 | 传裸字符串（`str` 本身就是 `Sequence[str]`）会抛 `EmbeddingInputError`，否则会被静默按字符拆成 N 条向量；单个字符串请用 `embed()` |
-| 缺密钥不 fail fast | 没配 `api_key` 时只警告、不建内核，健康检查 unhealthy，调用时才抛 `EmbeddingConfigError` |
-| 重试交给 SDK | 超时与重试由端点的 `timeout` / `retries` 控制 |
-| 不记正文 | 日志记调用开始（操作 / 模型 / 端点 / 文本数 / 目标维度，DEBUG）与每批完成（操作 / 文本数 / 维度 / 耗时 / 输入 token），失败记错误类型与状态码；文本正文不记 |
-
-错误全部继承 `EmbeddingError`，原始 SDK 异常挂在 `__cause__`：
-
-| 类型 | 触发条件 |
-| --- | --- |
-| `EmbeddingConfigError` | 端点未配 `api_key` |
-| `EmbeddingInputError` | 文本为空或全空白 |
-| `EmbeddingRequestError` | 端点返回 4xx / 5xx（带 `status_code` / `endpoint` / `model` / `request_id`） |
-| `EmbeddingTimeoutError` | 请求超时 |
-| `EmbeddingConnectionError` | 连不上端点（超时除外） |
-| `EmbeddingResponseError` | 返回体与请求对不上：条数不符 / `index` 越界或重复 / 空向量 / 声明维度不符 |
-
-## 判断层
-
-`DecisionService` 把「让模型做一次判断」收成一个服务，业务代码不直接接触 HTTP。两个端点（jev 云端 / laya 本地）走**同一套 `/systemone` 协议、字段完全相同**——换 `base_url` 即可切换供应商。`backend` 显式选端点（默认 `laya`，本地优先：免费、数据不出域），**层内不做兜底**。
-
-```python
-from core.decision import DecisionService, choice, noul, score
-
-
-async def main(svc: DecisionService, message: str) -> None:
-    # 批量：一次前向把三题问完（协议的延迟优势就在这里）
-    result = await svc.predict(
-        message,
-        {
-            "部门": choice("归哪个部门？", {"billing": "账单", "technical": "技术故障"}),
-            "愤怒": score("愤怒程度？", ["平静", "不满", "愤怒"]),
-            "退款": noul("是否明确要求退款？", true="明确要求", false="没提"),
-        },
-    )
-    department = result.answers["部门"]
-
-    # 便捷方法：一次只问一题
-    picked = await svc.choose(message, "归哪个部门？", {"billing": "账单", "technical": "技术"})
-    anger = await svc.rate(message, "愤怒程度？", ["平静", "不满", "愤怒"])
-    wants_refund = await svc.ask(message, "是否明确要求退款？")
-
-    # 换后端：默认 laya（本地），要云端就传 backend
-    on_cloud = await svc.ask(message, "是否明确要求退款？", backend="jev")
-
-    # 并发批量：多条相互独立的提问一起飞；limit 限制同时在飞的请求数（结果顺序与入参一致）
-    batched = await svc.predict_many(
-        [
-            (message, {"退款": noul("是否要求退款？")}),
-            (other, {"部门": choice("归哪个部门？", {"billing": "账单"})}),
-        ],
-        backend="jev",
-        limit=4,
-    )
-
-    # 结果带回本次实际走的端点：confidence 跨后端不可比，按 result.backend 分别校准阈值
-    assert result.backend == "laya"
-```
-
-约定：
-
-| 约定 | 说明 |
-| --- | --- |
-| 不记正文 | 日志记调用开始（后端 / 模型 / 端点 / 问题数 / 问题 id，DEBUG）与完成（后端 / 问题数 / 耗时 / token），失败记尝试次数与状态码；`state` 与 `questions` 的正文由调用方决定要不要自己记 |
-| `confidence` 不能跨后端比较 | Jev 的 `confidence` 是 `(n·p_max−1)/(n−1)`，Laya 是 `1−归一化熵`，两个数不是同一个量；阈值要按当前 `backend` 单独校准 |
-| 零样本质量很差 | 官方 model card 自述「Laya 是便于特化的基座，不是零样本决策引擎」（零样本准确率接近随机），判断结果必须配阈值或人工兜底 |
-| 两端点同协议 | jev 与 laya 走同一套 `/systemone` 协议、字段完全相同，换 `base_url` 即可切换供应商 |
-| `backend` 显式选 | 默认 `laya`（本地优先），要云端显式传 `backend="jev"` |
-| 层内不兜底 | 一个端点未启用时直接抛 `DecisionConfigError`，不会静默换另一头；`confidence` 跨端点语义不同，兜底必然出错 |
-| 缺端点不 fail fast | 两个端点都没启用时只让健康检查 unhealthy，进程照常启动，调用时才报未启用 |
-| 重试按状态码 | 429 / 502 / 503 / 504 / 529 按「指数退避 + 全抖动」重试（次数由端点 `retries` 控制），其余 4xx / 5xx 不重试；退避用尽抛 `DecisionRetryError` |
-| 并发批量要限流 | `predict_many` 并发跑多条独立提问，`limit` 限制同时在飞的请求数（搭配端点 `max_connections` 收窄连接池）；空入参早退、不发请求，任一题失败原样抛出 |
-
-错误全部继承 `DecisionError`（调用方一次 `except` 就能兜住整个判断层）。原始 `httpx2` 异常**只在超时 / 连接失败两类上**挂 `__cause__`，其余类型无 cause——对账信息已收成属性（`DecisionRequestError` 的 `status_code` / `endpoint` / `model` / `request_id`），按文档直接读属性即可：
-
-| 类型 | 触发条件 | `__cause__` |
-| --- | --- | --- |
-| `DecisionConfigError` | 调用的端点未启用 | 无（没发起过调用） |
-| `DecisionRequestError` | 端点返回 4xx / 5xx（带 `status_code` / `endpoint` / `model` / `request_id`） | 无（对账信息在四个属性上） |
-| `DecisionRetryError` | 可重试状态码（429 / 502 / 503 / 504 / 529）退避重试后仍失败；`DecisionRequestError` 子类，对账坐标一致 | 无 |
-| `DecisionTimeoutError` | 请求超时 | `httpx2.TimeoutException` |
-| `DecisionConnectionError` | 连不上端点（超时除外），或其余请求错误 | `httpx2.TransportError` / `httpx2.RequestError` |
-| `DecisionResponseError` | 返回体不合法：非 JSON（含非 UTF-8）/ 压缩体解不开 / 顶层不是对象 / 缺 answers / 答案字段不完整 | JSON 解析异常或 `httpx2.DecodingError`；其余无 |
-
-## Agent 工具层
-
-`core/agent/` 把「工具怎么声明、怎么交给模型、结果怎么回填」「Skill 怎么按需披露」「MCP server 怎么接入」收成一个小库。**ReAct 循环仍由调用方写**：拿 `reply.tool_calls` 判断要不要继续、把 `assistant(tool_calls=...)` 与各条 `tool_result` 追加回 `messages`、决定最多几轮。
-
-完整的开发指南（工具/Skill/MCP 的扩展流程、ReAct 循环写法、错误与日志约定、测试门禁）见 `docs/agent-development.md`。
-
-```python
-from core.agent import MCPManager, SkillLibrary, ToolRegistry, system_prompt, tool
-from core.llm import LLMService, assistant, tool_result, user
-
-
-@tool
-def get_weather(city: str, unit: str = "celsius") -> str:
-    """查询指定城市的当前天气。
-
-    Args:
-        city: 城市名，如「上海」。
-        unit: 温度单位，celsius 或 fahrenheit。
-    """
-    return f"{city} 晴 26℃"
-
-
-library = SkillLibrary.load()
-registry = ToolRegistry()
-registry.register(get_weather, *library.tools())
-
-async with MCPManager.from_file() as mcp:
-    registry.register(*mcp.tools)
-
-    messages = [system_prompt("你是行程助手。", library.index()), user("上海天气？")]
-    reply = await llm.chat_tools(messages, registry.declarations())
-    for call in reply.tool_calls:
-        messages.append(tool_result(call.id, await registry.execute(call)))
-```
-
-约定：
-
-| 约定 | 说明 |
-| --- | --- |
-| 描述来自 docstring | 工具描述取 docstring 正文，参数描述取 `Args:` / `参数:` 段；没有描述在定义期报 `ToolDefinitionError` |
-| schema 由签名推导 | 参数缺注解、`*args` / `**kwargs` 直接报错——无注解会退化成 `Any`，模型只能盲猜 |
-| 同步工具下线程 | 同步 handler 走 `asyncio.to_thread`，不会卡住事件循环 |
-| 失败全部回填 | 参数校验失败回 `参数校验失败：字段: 原因`，handler 异常回 `工具执行失败：[类型] 消息`（不附堆栈）；只有「调了不存在的工具名」抛 `ToolNotFoundError` |
-| 一次多个调用逐个执行 | 层内不并发：工具可能有副作用，回填顺序要与 `tool_calls` 对齐 |
-| 注册表是显式实例 | 没有全局表；重名注册报错，顺序即声明顺序，运行期只读 |
-| 不记正文 | 日志只记工具名 / 耗时 / 成败 / 错误类型，不记参数与返回值 |
-
-### Skill
-
-技能放在 `data/skills/<name>/SKILL.md`（固定路径，不开放配置），每份以 YAML frontmatter 开头：
-
-```markdown
----
-name: pdf
-description: 处理 PDF 文件：抽取文本、合并拆分、填表单
----
-
-# 使用说明
-具体步骤……
-```
-
-- 渐进式披露：`library.index()` 只把「名称 + 一句话描述」拼进 system，正文由内置 `load_skill(name)` 工具按需读取；空库时 `index()` 返回空串、不导出工具。
-- frontmatter 缺字段、语法错、重名在加载期报 `SkillError`；目录不存在按空库处理（只警告）。
-- 目录里的其它脚本与附件不会被读取或执行。
-
-### MCP
-
-配置固定读 `data/mcp.json`，沿用生态通用的 `mcpServers` 结构（键即 server 名）：
-
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./"]
-    },
-    "remote": {
-      "type": "http",
-      "url": "http://127.0.0.1:3001/mcp",
-      "headers": {"Authorization": "Bearer ${MCP_TOKEN:}"},
-      "timeout": 60
-    }
-  }
-}
-```
-
-| 字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `type` | `stdio` | `stdio` / `http`（streamable HTTP） |
-| `command` / `args` / `env` | 空 | `stdio` 必填 `command`；`env` 由 SDK 与进程默认环境合并 |
-| `url` / `headers` | 空 | `http` 必填 `url` |
-| `timeout` | `60` | 建连 + initialize + list_tools 的上限（秒）；`npx` 首次下载可能很慢 |
-
-- 占位符复用 YAML 那套规则（`${VAR}` / `${VAR:默认}` / `$$`，取值来自进程环境与 `.env`）。
-- 生命周期由 `async with` 掌握：`MCPManager.from_file()` 读配置，`start()` 并发建连，`tools` 返回映射后的工具，`stop()` 断开；都幂等。
-- 工具名映射为 `{server}__{tool}`（非法字符换 `_`，超 64 字符截断）；`inputSchema` 原样透传，参数只校验「是 JSON 对象」，schema 由 server 校验。
-- 任一 server 建连失败即关闭已连的并抛 `MCPConnectionError`（超时是它的子类 `MCPTimeoutError`），不静默跳过。
-- 结果归一：文本与资源取正文，图片显示为 `[图片 mime]`，无文本但有 `structuredContent` 时转 JSON，`isError` 加 `工具执行失败：` 前缀；调用期异常由注册表回填。
-
-错误全部继承 `AgentError`，调用方一次 `except` 兜住整层：
-
-| 类型 | 触发条件 |
-| --- | --- |
-| `ToolDefinitionError` | 无 docstring / 参数缺注解 / `*args`、`**kwargs` / 重名注册 |
-| `ToolNotFoundError` | 执行了未注册的工具名 |
-| `PromptError` | `system_prompt()` 的所有分段都为空 |
-| `SkillError` | frontmatter 缺失或非法、缺字段、重名、文件读不动 |
-| `SkillNotFoundError` | `load_skill()` 传了不存在的名字（`SkillError` 子类，由注册表回填） |
-| `MCPConfigError` | `data/mcp.json` 读不动、JSON 非法、字段不合法、占位符缺值 |
-| `MCPConnectionError` | 建连 / initialize / list_tools 失败 |
-| `MCPTimeoutError` | 上述三步超时（`MCPConnectionError` 子类） |
-
-## 如何新增一个服务
-
-服务是继承 `Service` 的类，`ServiceManager` 负责装配、启停与健康检查。
-依赖按**类型**声明，容器在构造时注入。
-
-1. 在 `core/service/` 新建文件，继承 `Service`：
-
-```python
-from typing import ClassVar
-
-from core.config import CacheSettings
-from core.service.base import Service
-
-
-class CacheService(Service):
-    # 依赖的服务类型；容器据此排序并在构造时注入
-    dependencies: ClassVar[tuple[type[Service], ...]] = (DbService,)
-
-    def __init__(self, db: DbService, config: CacheSettings) -> None:
-        super().__init__()  # 必须调用：负责设置 state 与 self.log
-        self._db = db
-        self._config = config
-
-    async def start(self) -> None: ...  # 建连接
-    async def stop(self) -> None: ...  # 关连接
-```
-
-2. 在 `core/service/registry.py` 里注册**类型**（不是实例）：
-
-```python
-manager.register(CacheService)  # 支持一次传入多个类型：register(A, B, C)，顺序即同层内的启动先后
-```
-
-约定：
-
-| 约定 | 说明 |
-| --- | --- |
-| `__init__` 只赋值 | 连接、预热、加载这类动资源的活一律留到 `start()`。装配发生在 lifespan 之前，在 `__init__` 里连资源会让「装配失败」和「启动失败」混成一锅，回滚也会失去意义 |
-| 声明与签名对账 | `dependencies` 与构造器参数必须一一对应，容器装配时校验，不一致直接报 `ServiceContractError` |
-| 依赖写具体类型 | 写**被注册的那个具体类型**，不能拿抽象基类占位，`get()` 按精确类型查找 |
-| `name` 只是标签 | 缺省取类名，不参与依赖解析，也不要求全局唯一，仅用于日志与健康检查展示 |
-| 自带日志 | `self.log` 的消息已带 `[<label>]` 前缀（服务名不再重复进结构化字段），仍可继续 `bind` / `prefix` |
-| 统一错误格式 | 报错用 `self.log_error("消息", exc)`，自动拆出「错误类型 / 错误消息」两个结构化字段，便于采集端按类型聚合 |
-| 配置节点注入 | 需要局部配置时，把配置类定义在 `core/config/settings.py` 并挂成 `Settings` 的**顶层字段**，构造器声明该类型即可（如 `config: CacheSettings`），容器按类型注入。字段允许写成 `X \| None`（PEP 604），但只有当前值不是 `None` 时才建索引——可选字段为 `None` 时容器无法注入，装配期报 `ServiceContractError` |
-| 整份配置注入 | 需要全局视野时在构造器声明 `settings: Settings`，容器注入应用持有的那份实例 |
-| 超时覆盖 | 默认走 `service.start_timeout` / `service.stop_timeout`；单独调整时写 `start_timeout: ClassVar[float \| Unset \| None] = 300.0`（需 `from core.service.base import Unset`），`None` 表示该服务不限制，不写即跟随全局 |
-| 判「在跑」用 `running` | `Service.running` 是 `state is ServiceState.RUNNING` 的统一出口，调用点不要再散写状态比较，改判定规则时才不必全仓搜 |
-| 健康检查可附带信息 | `health()` 返回的 `HealthStatus.extra` 会作为字段带进启动时的「服务健康」日志（内置服务用它报身份：clock 报 `时区`，embedding 报 `模型` / `端点`，llm 报 `对话模型` / `对话端点` / `多模态模型` / `多模态端点`，decision 报 `jev模型` / `jev端点` / `laya模型` / `laya端点`）。与保留名同名的一律让位：`name` / `healthy` / `state` / `detail`，以及日志侧的 `服务` / `健康` / `状态` / `详情` |
-
-启停语义：`start` / `stop` 需幂等（重复调用不应报错），并且 **`stop()` 必须能安全作用在「从未成功启动过」的服务上**——启动失败者同样会被回滚调用。启动按依赖**分层**：同层并发、层间串行；单个服务超时或抛错都判该服务失败，并逆序回滚本次动过的服务（**含失败者**：`start()` 可能已经申请了部分资源，`stop()` 是它唯一的回收入口；失败者的状态保持 `FAILED`，清理成功不等于它启动成功过；**已 RUNNING、被本次跳过启动的服务也在回滚名单里**——整体启动失败意味着进程即将退出，而那时 `stop_all` 不会被调用），随后抛出 `ServiceStartError`；**被取消时（外层 `asyncio.timeout`、`task.cancel()`）走同一条回滚路径**——`lifespan()` 的 `__aenter__` 抛错时 `__aexit__` 不会执行、`stop_all` 不会被调用，所以回滚必须在 `start_all` 内部完成，已启动的服务不会留在 `RUNNING`。关闭按启动的逆序**串行**执行，单个服务超时或出错只记日志（状态置 `FAILED`），不影响其余服务停下。
-
-超时靠「定时取消 + 标志位」实现（不用 `asyncio.timeout`，好与业务自己抛的 `TimeoutError` 区分开），因此服务的 `start` / `stop` **不要吞掉 `CancelledError`**（写 `except Exception` 是安全的，它不会捕获 `CancelledError`）。框架侧超时抛 `HookTimeoutError`（`TimeoutError` 的**子类**），它会作为 `ServiceStartError.cause` 出现；业务自己抛的 `TimeoutError` 原样保留，记为「启动失败 / 关闭异常」。
-
-装配期的错误都是 `ServiceError` 的子类，只会让启动失败、进程退出（fail fast）。调用 `get()` 查一个未注册的类型属于编程错误，会抛 `ServiceNotRegisteredError`。
-
-| 类型 | 触发条件 |
-| --- | --- |
-| `ServiceContractError` | 非 `Service` 子类、重复注册（含同一次批量注册内重复）、装配后注册、构造器签名不可解释、声明与签名不一致 |
-| `ServiceNotRegisteredError` | `get()` 查的类型未注册 |
-| `MissingDependencyError` | `dependencies` 里的类型没注册 |
-| `CircularDependencyError` | 依赖成环 |
-| `ServiceStartError` | 某个服务 `start()` 抛错（携带 `label` 与 `cause`；超时场景的 `cause` 是 `HookTimeoutError`） |
+更多命令见[命令速查](docs/wiki/reference/commands.md)。

@@ -1,0 +1,109 @@
+site_name: Aliya-cosmos
+site_description: Python + uv 通用脚手架与 Agent 运行时
+docs_dir: docs/wiki
+site_dir: site
+use_directory_urls: true
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: 切换到深色
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: 切换到浅色
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.tracking
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+      # 默认 slugify 会丢弃非 ASCII 字符，导致中文标题锚点变成 "2" 这类裸编号；
+      # 换成 pymdownx 的实现以保留中文，锚点形如 "2-统一管线"
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search:
+      lang:
+        - zh
+        - en
+
+extra_javascript:
+  # 随仓库分发，离线预览时图表也能渲染
+  - assets/mermaid.min.js
+
+nav:
+  - 首页: index.md
+  - 快速开始: getting-started.md
+  - 架构:
+      - 总览: architecture/overview.md
+      - cosmos 通信拓扑: architecture/cosmos-topology.md
+      - 代码边界: architecture/boundaries.md
+  - 配置: config.md
+  - 能力层:
+      - LLM: capabilities/llm.md
+      - 向量: capabilities/embedding.md
+      - 判断: capabilities/decision.md
+      - Agent 工具: capabilities/tools.md
+  - Agent:
+      - 总览: agents/index.md
+      - cosmos:
+          - 定位与组件: agents/cosmos/overview.md
+          - 注册机制: agents/cosmos/registry.md
+          - 桌面展示: agents/cosmos/desktop.md
+          - 用户状态: agents/cosmos/presence.md
+          - 任务分发: agents/cosmos/dispatch.md
+          - 通信终端: agents/cosmos/terminal.md
+          - 世界推理: agents/cosmos/world-reasoning.md
+          - 子 agent 契约: agents/cosmos/subagent.md
+          - 控制接口: agents/cosmos/control-api.md
+          - 流程示例: agents/cosmos/flows.md
+          - 扩展性: agents/cosmos/extension.md
+      - Aliya: agents/aliya.md
+  - 开发指南:
+      - 概览: development/index.md
+      - 新增服务: development/services.md
+      - 工具开发: development/tools.md
+      - 提示与 Skill: development/prompt-skill.md
+      - MCP: development/mcp.md
+      - ReAct 循环: development/react-loop.md
+      - 测试与门禁: development/testing.md
+  - 运维:
+      - 日志: operations/logging.md
+      - 部署: operations/deploy.md
+      - 隐私: operations/privacy.md
+  - 参考:
+      - 术语表: reference/glossary.md
+      - 数据目录: reference/data-dirs.md
+      - 命令速查: reference/commands.md

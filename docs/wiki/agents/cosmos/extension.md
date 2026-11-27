@@ -1,4 +1,4 @@
-# 11 扩展性
+# 扩展性
 
 cosmos 的扩展只有两类：**加一个子 agent** 和 **加一种状态**。前者改桌面，后者改面板。两者都不应该改动核心链路。
 
@@ -12,7 +12,7 @@ cosmos 的扩展只有两类：**加一个子 agent** 和 **加一种状态**。
 | --- | --- | --- |
 | 1 | 想清楚能力边界：做什么、不做什么、输入需要哪些必填参数 | 一段 `description` 草稿 |
 | 2 | 定义 `params_schema`（JSON Schema object） | 参数契约 |
-| 3 | 实现 `async def handle(request, ctx) -> AgentResult` | handler，遵循 [08](08-subagent-contract.md) |
+| 3 | 实现 `async def handle(request, ctx) -> AgentResult` | handler，遵循 [08](subagent.md) |
 | 4 | 填 `AgentCard`：`id` / `name` / `icon` / `summary` / `description` / `capabilities` / `examples` | 卡片 |
 | 5 | 填 `desktop`：`group` / `order` / `pinned` | 桌面位置 |
 | 6 | 填 `execution`：超时、并发、排队、是否可重试 | 执行策略 |
@@ -70,7 +70,7 @@ cosmos 的扩展只有两类：**加一个子 agent** 和 **加一种状态**。
 | 6 | 加配置开关 | 与字段一一对应，可单独关闭 |
 | 7 | 决定是否进 `WorldInput` | 只进结论性信号，不进整份快照 |
 | 8 | 补测试：可用 / 不可用 / 陈旧 / 关闭 | 四种状态都要覆盖 |
-| 9 | 更新 [04](04-presence.md) 的字段表与规则表 | 文档是契约 |
+| 9 | 更新 [04](presence.md) 的字段表与规则表 | 文档是契约 |
 
 ### 2.2 硬性要求
 

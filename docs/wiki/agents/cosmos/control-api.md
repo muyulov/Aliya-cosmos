@@ -1,4 +1,4 @@
-# 09 Aliya 控制接口
+# Aliya 控制接口
 
 `ControlService` 是 cosmos 向 Aliya 暴露的全部能力面。Aliya 只依赖这个接口与 `contracts` 里的模型，不接触任何内部实现。
 

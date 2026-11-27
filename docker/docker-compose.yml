@@ -7,6 +7,7 @@
 # 端口与密钥可在同目录的 .env 中覆盖，参考 .env.example。
 # 两个库对外的地址要与 data/config/cosmos.yaml 的 memory 段保持一致。
 
+# 项目名只允许小写字母、数字、连字符与下划线，不能跟随仓库名写作 Aliya-cosmos
 name: aliya-cosmos-memory
 
 services:

@@ -7,7 +7,7 @@
 #   确需链式时由 load_settings(expand_rounds=2) 开启（见 README「占位符」）。
 
 app:
-  app_name: aliya-cosmos # 应用名，启动 / 关闭日志与健康检查都用它
+  app_name: Aliya-cosmos # 应用名，启动 / 关闭日志与健康检查都用它
   env: dev # 运行环境：dev / test / prod
   debug: true # 调试开关
 
@@ -93,7 +93,7 @@ decision:
     max_connections: null # 连接池上限；null = httpx2 默认（并发 predict_many 时压住连接数）
 
 # ============================================================================
-# cosmos 主 agent（设计见 agent/cosmos/docs/）
+# cosmos 主 agent（规范见 docs/wiki/agents/cosmos/overview.md）
 # 只放常改项，其余字段用 core/config/settings.py 里的默认值。
 # 未知键在加载期 WARNING 并忽略，不会阻断启动；改完建议跑一次配置校验/测试。
 # ============================================================================

@@ -201,7 +201,7 @@ def test_文件缺失时退回默认值并标记来源(tmp_path: Path) -> None:
 
     settings = load_settings(config_file=config_file, env_file=tmp_path / ".env")
 
-    assert settings.app.app_name == "aliya-cosmos"
+    assert settings.app.app_name == "Aliya-cosmos"
     assert settings.log.level == "INFO"
     assert settings.config_source == f"内置默认值（未找到 {config_file}）"
 
@@ -225,12 +225,12 @@ def test_空文件来源标出全部走默认值(tmp_path: Path) -> None:
 
     settings = load_settings(config_file=config_file, env_file=tmp_path / ".env")
 
-    assert settings.app.app_name == "aliya-cosmos"
+    assert settings.app.app_name == "Aliya-cosmos"
     assert settings.config_source == f"{config_file}（空文件，全部走默认值）"
 
 
 def test_未知配置项被忽略(tmp_path: Path) -> None:
-    assert _load(tmp_path, "app:\n  unknown_key: 1\n").app.app_name == "aliya-cosmos"
+    assert _load(tmp_path, "app:\n  unknown_key: 1\n").app.app_name == "Aliya-cosmos"
 
 
 def test_插值从env文件取值(tmp_path: Path) -> None:

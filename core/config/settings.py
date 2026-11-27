@@ -34,7 +34,7 @@ SOURCE_INJECTED = "外部注入"
 class AppSettings(BaseModel):
     """应用层配置。"""
 
-    app_name: str = "aliya-cosmos"
+    app_name: str = "Aliya-cosmos"
     env: Environment = "dev"
     debug: bool = True
 

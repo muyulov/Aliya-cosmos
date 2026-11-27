@@ -1,4 +1,4 @@
-# 02 Agent 注册机制
+# Agent 注册机制
 
 子 agent 要在 cosmos 里出现，必须先注册成一张 `AgentCard`。卡片既是**调度依据**（Aliya 与匹配逻辑据此选择 agent），也是**展示依据**（桌面图标与状态面板）。
 
@@ -19,7 +19,7 @@
 
 判断标准：**需要被 Aliya 主动启动、需要独立状态与进度、可能长时间运行** → 注册成子 agent；**只是模型推理时顺手调一下** → 注册成 tool。
 
-仓库当前注册了 5 个子 agent：`edit` / `search` / `run` / `web` / `echo`。各自的职责、参数与安全边界见 [08-subagent-contract.md](08-subagent-contract.md#11-内置工具)。
+仓库当前注册了 5 个子 agent：`edit` / `search` / `run` / `web` / `echo`。各自的职责、参数与安全边界见 [subagent.md](subagent.md#11-内置工具)。
 
 ---
 
@@ -53,7 +53,7 @@ class AgentCard(BaseModel):
 | --- | --- | --- | --- |
 | `id` | 是 | `^[a-z][a-z0-9_]{1,31}$`，全局唯一 | API 与事件里用它，不随展示名变化 |
 | `name` | 是 | 1–24 字符 | 展示名，**给 Aliya 看的**；避免 `agent`/`模型`/`调度` 这类工程词，可改；`id` 不可改 |
-| `version` | 否 | `X.Y.Z` | 用于兼容性判断，见 [11-extension.md](11-extension.md#4-版本与兼容) |
+| `version` | 否 | `X.Y.Z` | 用于兼容性判断，见 [extension.md](extension.md#4-版本与兼容) |
 | `icon` | 是 | emoji 或 `icon:<name>` | 桌面渲染用，缺省由 `id` 首字母生成 |
 | `summary` | 是 | 1–20 字 | 桌面上只显示这一句，写「做什么」不写「怎么用」 |
 | `description` | 是 | 20–400 字 | 给 Aliya 与匹配模型读；写适用场景、边界、不适用的情况 |
@@ -68,7 +68,7 @@ class AgentCard(BaseModel):
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `group` | `"general"` | 桌面分组键，见 [03-desktop.md](03-desktop.md#5-排序与分组) |
+| `group` | `"general"` | 桌面分组键，见 [desktop.md](desktop.md#5-排序与分组) |
 | `order` | `100` | 同组内排序，小的在前；同值按 `id` 字典序 |
 | `visible` | `true` | 是否在桌面显示；`false` 仍可被显式调用 |
 | `pinned` | `false` | 置顶，排在该组最前 |
@@ -90,7 +90,7 @@ class AgentCard(BaseModel):
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `read_presence` | `false` | 是否允许读取用户状态的**授权子集**（默认连摘要都不给） |
-| `presence_fields` | `[]` | 允许的字段名，见 [04-presence.md](04-presence.md#2-字段模型) |
+| `presence_fields` | `[]` | 允许的字段名，见 [presence.md](presence.md#2-字段模型) |
 | `notify_user` | `false` | 是否允许请求 cosmos 向用户发进展通知 |
 | `read_conversation` | `false` | 是否允许读取对话上下文（默认不给，子 agent 只需 `AgentRequest`） |
 
