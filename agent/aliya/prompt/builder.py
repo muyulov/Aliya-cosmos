@@ -65,7 +65,10 @@ class PromptBuilder:
         """
         if not self._tools:
             return None
-        lines = ["## 可用的平板工具"]
+        lines = [
+            "## 可用的平板工具",
+            "（你自己知道就行，不必向对方介绍，也不要在闲聊时报菜单）",
+        ]
         for item in self._tools:
             summary = item.description.strip().splitlines()[0].strip() if item.description else ""
             lines.append(f"- {item.name}：{summary}" if summary else f"- {item.name}")

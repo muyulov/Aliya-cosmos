@@ -111,6 +111,21 @@ def _gap_text(now: datetime, last_user_at: datetime | None) -> str:
     return f"{seconds / 86400:.1f} 天".replace(".0", "")
 
 
+def _moment_text(now: datetime) -> str:
+    """主动回合的当下由头：让她开口时有具体的事，不是只会问「在吗」。
+
+    只描述这个时段她多半在做什么，不替她编造今天发生了什么。
+    """
+    hour = now.hour
+    if hour >= 23 or hour < 5:
+        return "这个点你多半还没睡：数星星、刷信息，或者躺着听通风口响。"
+    if hour < 9:
+        return "这个点你通常在整理样本、记观测，或者找点吃的。"
+    if 11 <= hour < 14 or 17 <= hour < 20:
+        return "这个点你通常在处理手边的杂事，顺便想找点甜的。"
+    return "这个点你通常在修东西、查手册，或者给自己找点闲事做。"
+
+
 def _mapping(value: object) -> Mapping[str, object]:
     return cast("Mapping[str, object]", value) if isinstance(value, Mapping) else {}
 
@@ -943,6 +958,7 @@ class AliyaRuntime:
             user_text=(
                 f"你之前给自己安排了一件事：{intent.text}"
                 f"\n现在是 {now:%H:%M}，到时间了，而且没有人说话。"
+                f"\n（你此刻：{_moment_text(now)}）"
                 "要不要说、说什么由你决定。"
             ),
             session_id=self._last_session_id,
@@ -1015,6 +1031,7 @@ class AliyaRuntime:
         user_text = (
             f"现在是 {now:%H:%M}，距上次对话 {_gap_text(now, self._last_user_at)}。"
             "\n（现在没有人说话。）"
+            f"\n（你此刻：{_moment_text(now)}）"
         )
         if preference.condition:
             user_text += f"\n可以考虑：{preference.condition}"

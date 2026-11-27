@@ -18,6 +18,7 @@ from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolPara
 from agent.aliya.memory.store import MemoryStore
 from agent.aliya.runtime import (
     AliyaRuntime,
+    _moment_text,
     batch_needs_report,
     event_brief,
     remember_result,
@@ -1389,3 +1390,11 @@ async def test_memory_disabled_skips_long_term_storage(tmp_path: Path) -> None:
         assert runtime._compose_memory("摘要") == "摘要"
     finally:
         await runtime.stop()
+
+
+def test_主动回合按时段给出当下由头() -> None:
+    """主动回合要有一件具体的事可开口，不能每次都只会问「在吗」。"""
+    assert "数星星" in _moment_text(datetime(2026, 11, 26, 2, 0, tzinfo=UTC))
+    assert "整理样本" in _moment_text(datetime(2026, 11, 26, 7, 0, tzinfo=UTC))
+    assert "甜的" in _moment_text(datetime(2026, 11, 26, 12, 0, tzinfo=UTC))
+    assert "修东西" in _moment_text(datetime(2026, 11, 26, 15, 0, tzinfo=UTC))
