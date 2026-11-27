@@ -201,7 +201,7 @@ async def test_结构非法时只补一次严格提示() -> None:
     result = await _port(llm).infer(_input(PresenceSignal(online_state="online")))
 
     assert llm.calls == 2
-    assert "上一次输出不是合法的 JSON" in cast(str, llm.messages[1][0]["content"])
+    assert "上一次输出不符合要求" in cast(str, llm.messages[1][0]["content"])
     # 修复时放宽输出上限，避免截断导致的失败原样重演
     assert llm.kwargs[0]["max_tokens"] == 1200
     assert llm.kwargs[1]["max_tokens"] == 2400

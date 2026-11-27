@@ -46,7 +46,7 @@ flowchart LR
     end
 
     WB["WorldBridgeService<br/>组装 WorldInput"]
-    PORT["WorldReasoningPort.infer()<br/>超时 10s"]
+    PORT["WorldReasoningPort.infer()<br/>超时 30s"]
     WI["WorldInference<br/>校验 · 缓存 · 标 stale"]
     TS["TerminalService"]
     A["Aliya"]
@@ -361,7 +361,7 @@ class ActionChoice(BaseModel):
 
 | 项 | 默认 | 行为 |
 | --- | --- | --- |
-| `infer_timeout_seconds` | 10 | 超时取消本次；有旧结果时保留旧结果并标 `stale=true`，冷启动时返回 `None` |
+| `infer_timeout_seconds` | 30 | 覆盖首次调用 + 一次修复重试；超时取消本次，有旧结果时保留并标 `stale=true`，冷启动时返回 `None` |
 | 连续失败 | 3 次 | 暂停自动触发 5 分钟（指数退避），期间只响应 `refresh_world()` |
 | 首次推演失败 | —— | 不发事件；Aliya 侧 `get_world_view()` 返回 `None` |
 
@@ -527,7 +527,7 @@ agent:
   cosmos:
     world:
       enabled: true
-      infer_timeout_seconds: 10
+      infer_timeout_seconds: 30
       ttl_seconds: 600
       failure_backoff_seconds: 300
       max_hypotheses: 3
@@ -674,6 +674,7 @@ total(a)     = immediate(a) + γ × max_b immediate(b | T(s, a))
 `agent/cosmos/world/reasoning.py` 提供一个 `LLMWorldReasoningPort`：
 
 - 把 `WorldInput` 序列化后连同系统提示词交给 `LLMService.chat_structured`，输出映射到 `WorldInferenceDraft`，再装配成 `WorldInference`；
+- 输出模板写在 user 消息里：部分兼容端点会忽略 system 的格式要求，只把 user 的 JSON 当成待分析数据；`chat_structured` 解析前会去掉代码围栏与前后解释；
 - 提示词只列当前输入里真实存在的信号（`time / link / presence / tasks / agents / history / aliya / belief / anchors`）；模型返回的 `signals_used` 与 `basis_signals` 会被再次过滤，未接地的假设直接丢弃；
 - 复用全局 `llm.chat` 端点，`world.llm.model` / `temperature` / `max_tokens` 只覆盖本次调用，不单独配密钥；
 - 模型错误与超时直接抛给桥接层；结构化输出非法时只补一次更严格的 JSON 指令并放宽输出上限，仍失败再抛给桥接层：有旧结果保留并标 `stale`，冷启动保持 `None`；

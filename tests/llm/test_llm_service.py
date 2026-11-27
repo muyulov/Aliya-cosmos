@@ -388,6 +388,17 @@ async def test_结构化输出按schema解析() -> None:
     }
 
 
+async def test_结构化输出容忍代码围栏与前后缀() -> None:
+    service = _service()
+    client = _FakeClient(
+        completion=_completion('说明：\n```json\n{"name": "苹果", "price": 1.5}\n```\n以上。')
+    )
+    _attach(service, client)
+
+    item = await service.chat_structured([user("报价")], Item)
+    assert item == Item(name="苹果", price=1.5)
+
+
 async def test_结构化输出不合schema时报LLMSchemaError() -> None:
     service = _service()
     _attach(service, _FakeClient(completion=_completion('{"name": "苹果"}')))

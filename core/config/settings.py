@@ -487,7 +487,8 @@ class AgentWorldSettings(_AgentConfigNode):
     """世界推理桥（07 章）。"""
 
     enabled: bool = False
-    infer_timeout_seconds: float = Field(default=10.0, gt=0)
+    #: 需要覆盖「首次调用 + 一次修复重试」；太短会让修复永远跑不完
+    infer_timeout_seconds: float = Field(default=30.0, gt=0)
     ttl_seconds: int = Field(default=600, ge=0)
     failure_backoff_seconds: int = Field(default=300, ge=0)
     max_hypotheses: int = Field(default=3, ge=1, le=3)

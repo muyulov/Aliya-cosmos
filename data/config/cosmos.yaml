@@ -228,7 +228,7 @@ agent:
     world:
       enabled: true # 基于 llm.chat 的世界推理；false 时仍启动但不触发
       # 端点与密钥复用顶层 llm.chat；没配 api_key 时推演失败，主链路照常运行。
-      infer_timeout_seconds: 15 # 单次推演超时（含模型调用）；超时保留旧结果并标 stale
+      infer_timeout_seconds: 30 # 单次推演超时（含修复重试）；超时保留旧结果并标 stale
       llm:
         model: null # null = 沿用 llm.chat.model；填同一端点上的便宜模型名即可单独降本
         temperature: 0.4 # 低温度换稳定结论；null 表示跟随端点默认值

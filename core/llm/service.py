@@ -88,6 +88,27 @@ def _elapsed_ms(begin: float) -> float:
     return round((time.perf_counter() - begin) * 1000, 1)
 
 
+def _normalize_structured_content(text: str) -> str:
+    """去掉代码围栏与前后解释，截取最外层的 JSON 对象。
+
+    兼容端点可能忽略 `response_format`，返回 ```json ... ``` 或前后带说明；
+    直接 `model_validate_json` 会误判成非法输出。
+    """
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end > start:
+        return stripped[start : end + 1]
+    return stripped
+
+
 @asynccontextmanager
 async def _wrap_errors(endpoint: str, model: str) -> AsyncGenerator[None, None]:
     """把 SDK 异常换成 LLM 层错误。
@@ -340,7 +361,7 @@ class LLMService(Service):
             operation="structured",
             extra={"结构类型": schema.__name__},
         )
-        content = self._content(response)
+        content = _normalize_structured_content(self._content(response))
         try:
             return schema.model_validate_json(content)
         except ValidationError as exc:
