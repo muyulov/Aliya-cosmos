@@ -61,7 +61,6 @@ agent.cosmos → core
 | `DispatchError` | 无法生成调度计划（无候选、置信度过低且未指定目标） |
 | `PresenceError` | 状态字段非法、采集开关冲突 |
 | `PresencePrivacyError` | 请求了未授权字段 |
-| `WorldBridgeError` | 输入组装失败、推理端口未配置 |
 | `MessageDeliveryError` | 投递失败且重试耗尽 |
 
 配置类错误继承 `core.service.ServiceError` 的语义（启动失败、进程退出）；运行期错误不杀进程，只影响单条链路。

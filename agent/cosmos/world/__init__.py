@@ -1,6 +1,7 @@
-"""世界推理的离线工具：轨迹读取、触发分类器与校准。
+"""世界推理：运行时的 LLM 端口与离线校准工具。
 
-运行时不依赖本包；它只读 `world_trace.jsonl`，产出可回填配置的 JSON。
+`reasoning` 是桥接层使用的运行时端口；`trace` / `classifier` / `calibration`
+只读 `world_trace.jsonl`，产出可回填配置的 JSON。
 """
 
 from agent.cosmos.world.classifier import (

@@ -1,7 +1,6 @@
 """推演轨迹的读取模型。
 
-轨迹是**追加写、单行 JSON**，字段只增不减；读取端对缺字段一律给默认值，
-这样旧轨迹也能参与校准。
+轨迹是**追加写、单行 JSON**；读取端对缺字段一律给默认值，旧轨迹仍可参与校准。
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ class TraceRecord:
     at: datetime
     inference_id: str
     revision: int = 0
-    producer: str = "deep"
     trigger: str = "tick"
     salience: float = 0.0
     fingerprint: str = ""
@@ -31,7 +29,7 @@ class TraceRecord:
     expected_value: float | None = None
     #: 触发特征，供分类器训练；旧轨迹没有这一列时为空
     features: dict[str, float] = field(default_factory=dict)
-    #: 原始行，保留未知字段，便于后续字段只增不减地兼容
+    #: 原始行，保留未知字段，便于后续增量字段兼容
     raw: dict[str, object] = field(default_factory=dict)
 
     @classmethod
@@ -45,7 +43,6 @@ class TraceRecord:
             at=at,
             inference_id=str(data.get("inference_id", "")),
             revision=_as_int(data.get("revision")),
-            producer=str(data.get("producer", "deep")),
             trigger=str(data.get("trigger", "tick")),
             salience=_as_float(data.get("salience")),
             fingerprint=str(data.get("fingerprint", "")),

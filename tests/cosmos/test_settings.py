@@ -44,7 +44,7 @@ def test_完整样例_yaml_可校验() -> None:
     cosmos = AgentCosmosSettings.model_validate(cast("dict[str, object]", cosmos_data))
     assert cosmos.agents[0].id == "edit"
     assert cosmos.agents[0].card.capabilities == ["file_write", "file_edit", "code_edit"]
-    assert cosmos.world.port_factory == "build"
+    assert cosmos.world.llm.temperature == 0.4
     assert cosmos.contract.contract_version == "1.0.0"
 
 
@@ -52,7 +52,7 @@ def test_仓库配置骨架可加载() -> None:
     settings = load_settings()
     assert settings.agent.cosmos.agents[0].id == "echo"
     assert settings.agent.cosmos.world.enabled is True
-    assert settings.agent.cosmos.world.port_module == "agent.cosmos.world.reasoning"
+    assert settings.agent.cosmos.world.llm.max_tokens == 1200
 
 
 @pytest.mark.parametrize(

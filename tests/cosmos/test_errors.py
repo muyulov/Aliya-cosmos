@@ -17,10 +17,9 @@ from agent.cosmos.errors import (
     MessageDeliveryError,
     PresenceError,
     PresencePrivacyError,
-    WorldBridgeError,
 )
 
-#: 11 个子类及其默认码
+#: 10 个子类及其默认码
 SUBCLASSES: list[tuple[type[CosmosError], str]] = [
     (AgentRegistrationError, "agent_registration"),
     (AgentNotFoundError, "agent_not_found"),
@@ -29,7 +28,6 @@ SUBCLASSES: list[tuple[type[CosmosError], str]] = [
     (DispatchError, "dispatch"),
     (PresenceError, "presence"),
     (PresencePrivacyError, "presence_privacy"),
-    (WorldBridgeError, "world_bridge"),
     (MessageDeliveryError, "message_delivery"),
     (ContractVersionError, "contract_version"),
     (CosmosPermissionError, "permission"),

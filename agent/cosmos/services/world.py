@@ -11,7 +11,6 @@
 
 - 触发层：规则显著性打分 + 动态窗口（`world_trigger.py`）；
 - 信念层：`BeliefState` 延续上一轮结论，不再每次从零推断；
-- 快慢层：冷启动先给保守结论，深度端口返回后按 `revision` 覆盖；
 - 校准层：置信度分解、证据接地校验与推演轨迹落盘。
 """
 
@@ -19,10 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib
 import json
 import math
-import uuid
 from collections import deque
 from collections.abc import Callable, Coroutine
 from datetime import datetime
@@ -48,15 +45,15 @@ from agent.cosmos.contracts import (
     WorldInferenceEvent,
     WorldInput,
 )
-from agent.cosmos.errors import WorldBridgeError
-from agent.cosmos.services.desktop import DesktopService
 from agent.cosmos.services.presence import PresenceService
 from agent.cosmos.services.registry import AgentRegistryService
 from agent.cosmos.services.runtime import AgentRuntimeService
 from agent.cosmos.services.world_policy import WorldActionSelector
 from agent.cosmos.services.world_trigger import TriggerKind, TriggerScore, WorldTriggerPolicy
 from agent.cosmos.transport import BusService, WorldReasoningPort
+from agent.cosmos.world.reasoning import LLMWorldReasoningPort
 from core.config import AgentSettings, AgentWorldSettings
+from core.llm import LLMService
 from core.service import ClockService, Service
 
 #: 单条文本上限（07 章 4.1）
@@ -91,8 +88,8 @@ class WorldBridgeService(Service):
         PresenceService,
         AgentRuntimeService,
         AgentRegistryService,
-        DesktopService,
         BusService,
+        LLMService,
     )
 
     def __init__(
@@ -101,8 +98,8 @@ class WorldBridgeService(Service):
         presence: PresenceService,
         runtime: AgentRuntimeService,
         registry: AgentRegistryService,
-        desktop: DesktopService,
         bus: BusService,
+        llm: LLMService,
         config: AgentSettings,
     ) -> None:
         super().__init__()
@@ -110,8 +107,8 @@ class WorldBridgeService(Service):
         self._presence: PresenceService = presence
         self._runtime: AgentRuntimeService = runtime
         self._registry: AgentRegistryService = registry
-        self._desktop: DesktopService = desktop
         self._bus: BusService = bus
+        self._llm: LLMService = llm
         self._config: AgentSettings = config
         self._world: AgentWorldSettings = config.cosmos.world
         self._policy: WorldTriggerPolicy = WorldTriggerPolicy(self._world)
@@ -132,8 +129,6 @@ class WorldBridgeService(Service):
         self._queue_provider: Callable[[], tuple[int, int]] = lambda: (0, 0)
         self._last_aliya_provider: Callable[[], datetime | None] | None = None
         self._history_provider: Callable[[], HistoryPattern] | None = None
-        self._link_since: LinkState = "up"
-        self._last_link_state: LinkState = "up"
         self._last_online: str = "unknown"
         self._last_mood_valence: float | None = None
 
@@ -164,8 +159,14 @@ class WorldBridgeService(Service):
     # ---------- 生命周期 ----------
 
     def set_port(self, port: WorldReasoningPort) -> None:
-        """注入推理端口（测试或部署方）。"""
+        """注入推理端口（测试或部署方替换实现）。"""
         self._port = port
+
+    def _ensure_port(self) -> WorldReasoningPort:
+        """未注入时使用内置 LLM 端口。"""
+        if self._port is None:
+            self._port = LLMWorldReasoningPort(self._llm, self._world)
+        return self._port
 
     def set_link_provider(self, provider: Callable[[], LinkState]) -> None:
         """注入链路状态读取器，避免与 TerminalService 构造器循环依赖。"""
@@ -193,12 +194,24 @@ class WorldBridgeService(Service):
 
     @override
     async def start(self) -> None:
-        """关闭时不加载端口、不注册定时器；开启且无端口时 fail fast。"""
+        """关闭时不建端口、不注册定时器；开启时装配 LLM 推理端口。"""
         if self._active or not self._world.enabled:
             return
         self._apply_calibration_report()
-        if self._port is None:
-            self._port = self._load_port()
+        port = self._ensure_port()
+        if isinstance(port, LLMWorldReasoningPort):
+            fields: dict[str, object] = {
+                "模型": self._llm.chat_model,
+                "地址": self._llm.chat_base_url,
+            }
+            if self._llm.available("chat"):
+                self.log.info("世界推理使用 LLM", face=None, **fields)
+            else:
+                self.log.warning(
+                    "世界推理使用 LLM，但 llm.chat 未配置 api_key；推演会失败并按降级策略处理",
+                    face=None,
+                    **fields,
+                )
         self._active = True
         try:
             self._trace_path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,25 +277,6 @@ class WorldBridgeService(Service):
         if applied:
             self.log.info("世界推理校准已应用", 字段="、".join(applied))
 
-    def _load_port(self) -> WorldReasoningPort:
-        """按 `world.port_module` + `port_factory` 动态加载。"""
-        module_name = self._world.port_module
-        if not module_name:
-            raise WorldBridgeError("世界推理已启用，但没有配置 port_module")
-        try:
-            module = importlib.import_module(module_name)
-        except Exception as exc:
-            raise WorldBridgeError(f"加载世界推理端口失败：{module_name}：{exc}") from exc
-        factory = getattr(module, self._world.port_factory, None)
-        if not callable(factory):
-            raise WorldBridgeError(
-                f"模块 {module_name} 里没有工厂函数 {self._world.port_factory!r}"
-            )
-        port: object = factory()
-        if not hasattr(port, "infer"):
-            raise WorldBridgeError(f"{module_name}.{self._world.port_factory} 的返回值不是推理端口")
-        return cast(WorldReasoningPort, port)
-
     # ---------- 读写 ----------
 
     async def set_aliya_context(self, ctx: AliyaContext | None) -> None:
@@ -310,7 +304,7 @@ class WorldBridgeService(Service):
     ) -> WorldInference | None:
         """触发一次推演；未启用或处于合并窗口时返回缓存。
 
-        `force` 只绕过节流与退避；`reuse` 才表示允许命中指纹缓存与冷启动快路。
+        `force` 只绕过节流与退避；`reuse` 才表示允许命中指纹缓存。
         事件触发应传 `reuse=True`，显式刷新可保持 `False` 以拿到新结果。
         """
         if not self._world.enabled:
@@ -338,44 +332,25 @@ class WorldBridgeService(Service):
                 cached = self._cache_get(fingerprint)
                 if cached is not None:
                     self._inference = cached
+                    # 命中缓存说明输入没变、结论仍可用；上次调用的失败不再影响新鲜度。
+                    # 失败计数与退避不清：缓存命中不代表端点已经恢复。
+                    self._degraded = False
                     return self.view()
 
-            heuristic: WorldInference | None = None
-            if self._inference is None and self._world.fast_path.enabled and allow_reuse:
-                heuristic = self._heuristic(input_payload)
-                heuristic = heuristic.model_copy(update={"revision": self._next_revision()})
-                await self._commit(
-                    heuristic,
-                    resolved,
-                    fingerprint,
-                    cache=False,
-                    salience=salience,
-                    features=features,
-                )
-
-            port = self._port
-            if port is None:
-                raise WorldBridgeError("世界推理端口未注入")
+            port = self._ensure_port()
             try:
                 async with asyncio.timeout(self._world.infer_timeout_seconds):
                     raw = await port.infer(input_payload)
             except Exception as exc:
                 self._on_failure(exc)
-                if heuristic is not None:
-                    # 快路结论是新鲜的，不因为深度失败而标脏
-                    self._degraded = False
                 return self.view()
 
             inference = self._validate(raw)
             if inference is None:
                 self._on_failure(ValueError("返回结构非法"))
-                if heuristic is not None:
-                    self._degraded = False
                 return self.view()
 
-            enriched = self._enrich(
-                inference.model_copy(update={"producer": "deep"}), input_payload
-            )
+            enriched = self._enrich(inference, input_payload)
             enriched = enriched.model_copy(
                 update={"revision": self._next_revision(), "stale": False}
             )
@@ -383,7 +358,6 @@ class WorldBridgeService(Service):
                 enriched,
                 resolved,
                 fingerprint,
-                cache=True,
                 salience=salience,
                 features=features,
             )
@@ -531,7 +505,7 @@ class WorldBridgeService(Service):
             )
             self._failures = 0
 
-    # ---------- 内部：快路、缓存与提交 ----------
+    # ---------- 内部：缓存与提交 ----------
 
     def _next_revision(self) -> int:
         return max(self._revision, self._inference.revision if self._inference else 0) + 1
@@ -565,14 +539,12 @@ class WorldBridgeService(Service):
         trigger: TriggerKind,
         fingerprint: str,
         *,
-        cache: bool,
         salience: float | None,
         features: dict[str, float] | None,
     ) -> None:
         self._inference = inference
         self._revision = max(self._revision, inference.revision)
-        if cache:
-            self._cache_put(fingerprint, inference)
+        self._cache_put(fingerprint, inference)
         event = WorldInferenceEvent(
             inference=inference,
             stale=False,
@@ -581,45 +553,6 @@ class WorldBridgeService(Service):
         )
         _ = await self._bus.events.publish("world.inference", event)
         await self._trace(inference, trigger, fingerprint, salience or 0.0, features or {})
-
-    def _heuristic(self, payload: WorldInput) -> WorldInference:
-        """冷启动保守结论：不调用端口，先让 Aliya 有参考。"""
-        now = payload.generated_at
-        state = payload.presence.online_state if payload.presence is not None else "unknown"
-        snapshot_map = {
-            "online": "你在线，先按正常状态处理",
-            "away": "你可能暂时离开了，先按保守方式处理",
-            "busy": "你可能在忙，先不推进话题",
-            "offline": "你可能离线了，先不主动打扰",
-            "unknown": "状态还不清楚，先按最保守的方式处理",
-        }
-        signals = ["time"]
-        if payload.presence is not None:
-            signals.append("presence")
-        if payload.tasks.running or payload.tasks.queued:
-            signals.append("tasks")
-        confidence = min(
-            self._world.fast_path.confidence_cap,
-            0.2 + 0.08 * len(signals),
-        )
-        inference = WorldInference(
-            inference_id=f"inf_h_{uuid.uuid4().hex[:12]}",
-            generated_at=now,
-            ttl_seconds=self._world.ttl_seconds,
-            snapshot=snapshot_map.get(state, snapshot_map["unknown"]),
-            hypotheses=[
-                Hypothesis(
-                    statement=f"当前按「{snapshot_map.get(state, snapshot_map['unknown'])}」处理",
-                    confidence=confidence,
-                    basis="在线状态与任务队列的保守判断",
-                    basis_signals=signals[:2],
-                )
-            ],
-            signals_used=signals,
-            confidence=confidence,
-            producer="heuristic",
-        )
-        return self._enrich(inference, payload)
 
     # ---------- 内部：校验、校准与信念 ----------
 
@@ -1050,7 +983,6 @@ class WorldBridgeService(Service):
             elif event.topic == "link.state.changed":
                 state = _payload_get(event.payload, "state")
                 if isinstance(state, str):
-                    self._last_link_state = cast(LinkState, state)
                     await self.on_event("link", {"state": state, "entity": "link"})
             elif event.topic == "user.active":
                 self._last_silence_threshold = 0
@@ -1144,7 +1076,6 @@ class WorldBridgeService(Service):
             "at": self._clock.now().isoformat(),
             "inference_id": inference.inference_id,
             "revision": inference.revision,
-            "producer": inference.producer,
             "trigger": trigger,
             "salience": salience,
             "trigger_features": features,

@@ -28,7 +28,6 @@ __all__ = [
     "MessageDeliveryError",
     "PresenceError",
     "PresencePrivacyError",
-    "WorldBridgeError",
 ]
 
 
@@ -132,12 +131,6 @@ class PresencePrivacyError(CosmosError):
     """请求了未授权的状态字段。"""
 
     code: str = "presence_privacy"
-
-
-class WorldBridgeError(CosmosError):
-    """输入组装失败、推理端口未配置。"""
-
-    code: str = "world_bridge"
 
 
 class MessageDeliveryError(CosmosError):

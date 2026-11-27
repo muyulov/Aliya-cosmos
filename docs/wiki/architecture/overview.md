@@ -35,7 +35,7 @@
 | `PresenceService` | 用户状态采集、聚合、派生表述、变化事件 | `ClockService` |
 | `ConversationService` | 上下文摘要、分段、脱敏 | `LLMService` |
 | `DispatchService` | 统一调度管线、匹配、并行、降级 | 上面四个 |
-| `WorldBridgeService` | 输入组装、结果转发、缓存 | `ClockService`、`PresenceService`、`AgentRuntimeService` |
+| `WorldBridgeService` | 输入组装、结果转发、缓存 | `ClockService`、`PresenceService`、`AgentRuntimeService`、`AgentRegistryService`、`BusService`、`LLMService` |
 | `TerminalService` | 双向消息、推送、主动消息节流 | `ConversationService`、`PresenceService` |
 | `WebSocketChannelService` | 浏览器用户通道：WebSocket JSON 收发、输入状态上报、按会话推送 | `TerminalService`、`AgentSettings` |
 | `ControlService` | Aliya 控制面 | 以上全部 |

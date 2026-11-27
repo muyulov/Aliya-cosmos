@@ -213,6 +213,9 @@ async def test_未配key时start不建客户端() -> None:
 
     service = mgr.get(LLMService)
     assert service.state is ServiceState.RUNNING
+    # 两头都没密钥：可用性检查应如实返回 False，供上层启动告警使用
+    assert service.available("chat") is False
+    assert service.available("vision") is False
     status = await service.health()
     assert status.healthy is False
     assert "未配置" in status.detail
@@ -233,6 +236,8 @@ async def test_只启用一个端点也算健康() -> None:
     service = _service(vision=_endpoint(api_key="", model="vision-m"))
     await service.start()
 
+    assert service.available("chat") is True
+    assert service.available("vision") is False
     status = await service.health()
     assert status.healthy is True
     assert status.detail == ""

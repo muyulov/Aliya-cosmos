@@ -57,7 +57,7 @@ agent/cosmos/
   registry/      子 agent 配置加载（bootstrap）与内置工具：
                  echo（回声）、edit（编辑）、search（检索）、run（运行）、web（联网）
   transport/     MessageBus / EventBus 端口、进程内实现与 BusService
-  world/         内置规则基线世界推理实现
+  world/         LLM 世界推理端口 + 触发/校准离线工具
   assembly.py    装配入口：core 4 个服务 + cosmos 12 个服务
   app.py         进程入口：uv run python -m agent.cosmos.app
   cli.py         终端通道入口：把 stdin 接成用户通道
@@ -114,7 +114,7 @@ asyncio.run(main())
 | 注入点 | 默认实现 | 谁来替换 |
 | --- | --- | --- |
 | `TerminalService.set_user_channel()` | `MemoryUserChannel` | 内置 `WebSocketChannelService`（配置 `terminal.ws.enabled`）或 CLI 终端通道 |
-| `WorldBridgeService.set_port()` | 按 `world.port_module` 动态加载；内置规则基线 `agent.cosmos.world.reasoning` | 部署方 / 世界推理实现 |
+| `WorldBridgeService.set_port()` | 默认 `LLMWorldReasoningPort`，复用 `llm.chat` | 部署方 / 世界推理实现 |
 | `WorldBridgeService.set_link_provider()` | 由 `assembly` 接到 `TerminalService.link_state` | 已在装配里接好 |
 | `WorldBridgeService.set_history_provider()` | 由 `assembly` 接到 `TerminalService.history_pattern`，窗口取 `world.history.window_days` | 已在装配里接好 |
 | `TerminalService.report_presence()` | 接收通道上报的在线/输入/设备状态 | 部署方通道适配器 |

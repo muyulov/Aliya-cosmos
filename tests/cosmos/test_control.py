@@ -43,6 +43,9 @@ from core.service import ClockService
 
 
 class FakeLLM:
+    def available(self, _endpoint: str | None = None) -> bool:
+        return True
+
     async def chat(self, _messages: object, **_kwargs: object) -> str:
         return "摘要"
 
@@ -119,7 +122,15 @@ async def env(
     )
     desktop = DesktopService(registry, runtime, bus, clock, settings.agent)
     await desktop.start()
-    world = WorldBridgeService(clock, presence, runtime, registry, desktop, bus, settings.agent)
+    world = WorldBridgeService(
+        clock,
+        presence,
+        runtime,
+        registry,
+        bus,
+        cast("LLMService", cast("object", llm)),
+        settings.agent,
+    )
     await world.start()
     terminal = TerminalService(conversation, presence, runtime, bus, clock, settings.agent)
     channel = MemoryUserChannel()

@@ -136,12 +136,13 @@ agent:
 
     # ---------- 世界推理（07-world-reasoning.md） ----------
     world:
-      enabled: true # 规则基线端口已内置；false 时仍启动但不触发
-      # 世界推理实现由端口注入：模块路径 + 工厂函数名。
-      # enabled=true 且两者都没给时，启动期抛 WorldBridgeError（对齐设计 07 章 8 节）。
-      port_module: agent.cosmos.world.reasoning # 规则基线；可替换成 LLM 端口
-      port_factory: build # 工厂函数：无参调用，返回 WorldReasoningPort
-      infer_timeout_seconds: 10 # 单次推演超时；超时保留旧结果并标 stale
+      enabled: true # 基于 llm.chat 的世界推理；false 时仍启动但不触发
+      # 端点与密钥复用顶层 llm.chat；没配 api_key 时推演失败，主链路照常运行。
+      infer_timeout_seconds: 15 # 单次推演超时（含模型调用）；超时保留旧结果并标 stale
+      llm:
+        model: null # null = 沿用 llm.chat.model；填同一端点上的便宜模型名即可单独降本
+        temperature: 0.4 # 低温度换稳定结论；null 表示跟随端点默认值
+        max_tokens: 1200 # 结构化输出上限；过小会导致 JSON 被截断
       ttl_seconds: 600 # 结果缓存与 stale 判定共用这个时长
       failure_backoff_seconds: 300 # 连续 3 次失败后暂停，避免持续打爆端口
       max_hypotheses: 3 # 最多保留 3 条；端口多给会被截断并 WARNING
@@ -169,9 +170,6 @@ agent:
       policy:
         horizon: 2 # 两步前瞻；当前实现最多 3 步
         discount: 0.8 # 前瞻折扣；越小越短视
-      fast_path:
-        enabled: true # 冷启动先给保守结论，深度端口返回后按 revision 覆盖
-        confidence_cap: 0.45 # 快路置信度上限，避免和深路抢结论
       calibration:
         temperature: 1.5 # >1 压低高置信，<1 抬高；抑制模型自报偏高
         model_weight: 0.45 # 与 evidence_weight 一起归一化，不是硬编码相加

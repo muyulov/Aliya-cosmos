@@ -132,9 +132,23 @@ class LLMService(Service):
         return self._config.chat.model
 
     @property
+    def chat_base_url(self) -> str:
+        """对话端点地址；供启动日志与告警定位配置。"""
+        return self._config.chat.base_url
+
+    @property
     def vision_model(self) -> str:
         """多模态模型：显式传 `endpoint="vision"` 调用时用的模型名。"""
         return self._config.vision.model
+
+    def available(self, endpoint: EndpointName | None = None) -> bool:
+        """端点是否已建好客户端（即配置了 api_key 且已 start）。
+
+        只读内存状态，不发请求；供健康检查与启动期告警使用。
+        """
+        key: EndpointName = "chat" if endpoint is None else endpoint
+        client = self._chat if key == "chat" else self._vision
+        return client is not None
 
     # ---------- 生命周期 ----------
 

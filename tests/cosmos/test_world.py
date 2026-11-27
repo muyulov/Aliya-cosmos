@@ -6,7 +6,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 
 import pytest
 from loguru import logger
@@ -24,15 +24,18 @@ from agent.cosmos.contracts import (
     WorldInference,
     WorldInput,
 )
-from agent.cosmos.errors import WorldBridgeError
 from agent.cosmos.services import (
     AgentRegistryService,
     AgentRuntimeService,
-    DesktopService,
     PresenceService,
     WorldBridgeService,
 )
 from agent.cosmos.transport import BusService
+from agent.cosmos.world.reasoning import (
+    DraftHypothesis,
+    LLMWorldReasoningPort,
+    WorldInferenceDraft,
+)
 from core.config import Settings
 from core.decision.service import DecisionService
 from core.llm.service import LLMService
@@ -92,10 +95,80 @@ def make_inference(identifier: str = "inf_1") -> WorldInference:
     )
 
 
+class _NoopLLM:
+    """默认占位：不调用模型，只让桥接层通过启动期可用性检查。"""
+
+    @property
+    def chat_model(self) -> str:
+        return "test-model"
+
+    @property
+    def chat_base_url(self) -> str:
+        return "http://test/v1"
+
+    def available(self, _endpoint: str | None = None) -> bool:
+        return True
+
+
+class _UnavailableLLM(_NoopLLM):
+    """模拟未配置 api_key 的 LLM：可用性检查返回 False。"""
+
+    @override
+    def available(self, _endpoint: str | None = None) -> bool:
+        return False
+
+
+class _BrokenLLM:
+    """模型调用永远失败：用来验证桥接层的降级路径。"""
+
+    def available(self, _endpoint: str | None = None) -> bool:
+        return True
+
+    async def chat_structured(self, *_args: object, **_kwargs: object) -> WorldInferenceDraft:
+        raise RuntimeError("模型不可用")
+
+
+class FakeWorldLLM:
+    """最小结构化模型替身：只回一条在线假设。"""
+
+    @property
+    def chat_model(self) -> str:
+        return "fake-model"
+
+    @property
+    def chat_base_url(self) -> str:
+        return "http://fake/v1"
+
+    def available(self, _endpoint: str | None = None) -> bool:
+        return True
+
+    async def chat_structured(
+        self,
+        _messages: list[dict[str, object]],
+        schema: type[WorldInferenceDraft],
+        **_kwargs: object,
+    ) -> WorldInferenceDraft:
+        assert schema is WorldInferenceDraft
+        return WorldInferenceDraft(
+            snapshot="你在线，状态相对平稳",
+            hypotheses=[
+                DraftHypothesis(
+                    statement="你在线",
+                    confidence=0.6,
+                    basis="在线状态",
+                    basis_signals=["presence"],
+                )
+            ],
+            signals_used=["presence", "time"],
+            confidence=0.6,
+        )
+
+
 def make_service(
     settings: Settings,
     clock: ClockService,
     bus: BusService,
+    llm: LLMService | None = None,
 ) -> WorldBridgeService:
     registry = AgentRegistryService(settings.agent)
     card = AgentCard(
@@ -116,20 +189,13 @@ def make_service(
         bus,
         settings.agent,
     )
-    desktop = DesktopService(
-        registry,
-        runtime,
-        bus,
-        clock,
-        settings.agent,
-    )
     return WorldBridgeService(
         clock,
         presence,
         runtime,
         registry,
-        desktop,
         bus,
+        llm if llm is not None else cast(LLMService, cast(object, _NoopLLM())),
         settings.agent,
     )
 
@@ -154,14 +220,64 @@ async def test_关闭时恒为_None且不调端口(
         await service.stop()
 
 
-async def test_开启但无端口启动失败(
+async def test_未注入端口时使用_LLM_实现(
     settings: Settings, clock: ClockService, bus: BusService
 ) -> None:
     settings.agent.cosmos.world.enabled = True
-    settings.agent.cosmos.world.port_module = None
-    service = make_service(settings, clock, bus)
-    with pytest.raises(WorldBridgeError):
+    llm = cast(LLMService, cast(object, FakeWorldLLM()))
+    service = make_service(settings, clock, bus, llm=llm)
+
+    await service.start()
+    try:
+        result = await service.refresh(force=True)
+        assert result is not None
+        assert result.hypotheses
+        assert result.action_choice is not None
+    finally:
+        await service.stop()
+
+
+async def test_未配_api_key_时启动告警(
+    settings: Settings, clock: ClockService, bus: BusService
+) -> None:
+    messages: list[str] = []
+    sink_id = logger.add(lambda message: messages.append(str(message)), level="WARNING")
+    settings.agent.cosmos.world.enabled = True
+    service = make_service(
+        settings,
+        clock,
+        bus,
+        llm=cast(LLMService, cast(object, _UnavailableLLM())),
+    )
+    try:
         await service.start()
+    finally:
+        await service.stop()
+        logger.remove(sink_id)
+
+    assert any("未配置 api_key" in message for message in messages)
+
+
+async def test_注入自定义端口时不告警_api_key(
+    settings: Settings, clock: ClockService, bus: BusService
+) -> None:
+    messages: list[str] = []
+    sink_id = logger.add(lambda message: messages.append(str(message)), level="WARNING")
+    settings.agent.cosmos.world.enabled = True
+    service = make_service(
+        settings,
+        clock,
+        bus,
+        llm=cast(LLMService, cast(object, _UnavailableLLM())),
+    )
+    service.set_port(FakePort(inference=make_inference()))
+    try:
+        await service.start()
+    finally:
+        await service.stop()
+        logger.remove(sink_id)
+
+    assert not any("未配置 api_key" in message for message in messages)
 
 
 async def test_注入端口后组装完整输入(
@@ -289,7 +405,7 @@ async def test_假设过多时截断而不是丢弃(
     assert len(result.action_windows) == 3
 
 
-async def test_冷启动快路先保守再被深路覆盖(
+async def test_冷启动直接产出结论(
     settings: Settings, clock: ClockService, bus: BusService
 ) -> None:
     settings.agent.cosmos.world.enabled = True
@@ -299,18 +415,14 @@ async def test_冷启动快路先保守再被深路覆盖(
     iterator = bus.events.subscribe(["world.inference"])
     try:
         result = await service.refresh(force=False)
-        first = await asyncio.wait_for(anext(iterator), 1.0)
-        second = await asyncio.wait_for(anext(iterator), 1.0)
+        event = await asyncio.wait_for(anext(iterator), 1.0)
     finally:
         await iterator.aclose()
 
     assert result is not None
-    assert result.producer == "deep"
-    assert result.revision == 2
-    first_inference = cast(dict[str, object], first.payload["inference"])
-    second_inference = cast(dict[str, object], second.payload["inference"])
-    assert first_inference["producer"] == "heuristic"
-    assert second_inference["revision"] == 2
+    assert result.revision == 1
+    payload = cast(dict[str, object], event.payload["inference"])
+    assert payload["revision"] == 1
 
 
 async def test_相同输入指纹命中缓存(
@@ -318,7 +430,6 @@ async def test_相同输入指纹命中缓存(
 ) -> None:
     settings.agent.cosmos.world.enabled = True
     settings.agent.cosmos.world.triggers.low_salience_window_seconds = 0
-    settings.agent.cosmos.world.fast_path.enabled = False
     service = make_service(settings, clock, bus)
     port = FakePort(inference=make_inference())
     service.set_port(port)
@@ -326,6 +437,26 @@ async def test_相同输入指纹命中缓存(
     _ = await service.refresh(force=False)
     _ = await service.refresh(force=False)
     assert len(port.payloads) == 1
+
+
+async def test_缓存命中清除上次失败的_stale标记(
+    settings: Settings, clock: ClockService, bus: BusService
+) -> None:
+    settings.agent.cosmos.world.enabled = True
+    service = make_service(settings, clock, bus)
+    service.set_port(FakePort(inference=make_inference("inf_cached")))
+    _ = await service.refresh(force=True, reuse=True)  # 写入缓存
+
+    service.set_port(FakePort(error=RuntimeError("模型挂了")))
+    failed = await service.refresh(force=True)
+    assert failed is not None
+    assert failed.stale is True
+
+    # 同输入命中缓存：不再继承上次失败的新鲜度
+    hit = await service.refresh(force=True, reuse=True)
+    assert hit is not None
+    assert hit.inference_id == "inf_cached"
+    assert hit.stale is False
 
 
 async def test_信念随推演累积(settings: Settings, clock: ClockService, bus: BusService) -> None:
@@ -421,7 +552,6 @@ async def test_推演轨迹落盘(settings: Settings, clock: ClockService, bus: 
     assert len(lines) == 1
     payload = cast(dict[str, object], cast(object, json.loads(lines[0])))
     assert payload["revision"] == 1
-    assert payload["producer"] == "deep"
     assert payload["fingerprint"]
     assert "trigger_features" in payload
     assert "action_choice" in payload
@@ -450,7 +580,7 @@ async def test_历史提供器与样本不足截断(
     assert history.typical_session_minutes is None
 
 
-async def test_冷启动超时保留快路结果(
+async def test_冷启动超时返回_None(
     settings: Settings, clock: ClockService, bus: BusService
 ) -> None:
     settings.agent.cosmos.world.enabled = True
@@ -459,9 +589,7 @@ async def test_冷启动超时保留快路结果(
     service.set_port(FakePort(inference=make_inference("inf_slow"), delay=0.2))
 
     result = await service.refresh(force=False)
-    assert result is not None
-    assert result.producer == "heuristic"
-    assert result.stale is False
+    assert result is None
 
 
 async def test_低显著事件不触发推演(
@@ -517,7 +645,6 @@ async def test_强制刷新也可以复用缓存(
     settings: Settings, clock: ClockService, bus: BusService
 ) -> None:
     settings.agent.cosmos.world.enabled = True
-    settings.agent.cosmos.world.fast_path.enabled = False
     service = make_service(settings, clock, bus)
     port = FakePort(inference=make_inference())
     service.set_port(port)
@@ -551,23 +678,22 @@ async def test_启动时应用校准报告(
         await service.stop()
 
 
-async def test_内置规则端口可通过配置加载(
+async def test_LLM_失败时保留旧结果并降级(
     settings: Settings, clock: ClockService, bus: BusService
 ) -> None:
     settings.agent.cosmos.world.enabled = True
-    settings.agent.cosmos.world.port_module = "agent.cosmos.world.reasoning"
-    settings.agent.cosmos.world.port_factory = "build"
-    service = make_service(settings, clock, bus)
+    broken = cast(LLMService, cast(object, _BrokenLLM()))
+    service = make_service(settings, clock, bus, llm=broken)
+    service.set_port(FakePort(inference=make_inference("inf_old")))
+    _ = await service.refresh(force=True)
 
-    await service.start()
-    try:
-        result = await service.refresh(force=True)
-        assert result is not None
-        assert result.producer == "deep"
-        assert result.hypotheses
-        assert result.action_choice is not None
-    finally:
-        await service.stop()
+    service.set_port(LLMWorldReasoningPort(broken, settings.agent.cosmos.world))
+    result = await service.refresh(force=True)
+    assert result is not None
+    assert result.inference_id == "inf_old"
+    view = service.view()
+    assert view is not None
+    assert view.stale is True
 
 
 async def test_定时兜底绕过显著性(settings: Settings, clock: ClockService, bus: BusService) -> None:

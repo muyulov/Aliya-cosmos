@@ -251,10 +251,8 @@ class WorldInference(BaseModel):
     confidence: float = Field(default=0.0, ge=0, le=1)
     #: cosmos 侧标记，不由推理侧写
     stale: bool = False
-    #: 单调递增：快路与慢路、并发推演都靠它排序
+    #: 单调递增：并发推演靠它排序
     revision: int = Field(default=0, ge=0)
-    #: 快路（规则）还是慢路（深度端口）
-    producer: Literal["heuristic", "deep"] = "deep"
     #: 置信度分解：time / presence / tasks / history / mood / model
     confidence_breakdown: dict[str, float] = Field(default_factory=dict)
     #: 本轮更新后的信念

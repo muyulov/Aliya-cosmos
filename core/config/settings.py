@@ -454,14 +454,6 @@ class AgentWorldBeliefSettings(_AgentConfigNode):
     observation_weight: float = Field(default=0.6, ge=0, le=1)
 
 
-class AgentWorldFastPathSettings(_AgentConfigNode):
-    """冷启动快路：先给保守结论，深度结果到达后覆盖。"""
-
-    enabled: bool = True
-    #: 快路结论的置信度上限
-    confidence_cap: float = Field(default=0.45, ge=0, le=1)
-
-
 class AgentWorldPolicySettings(_AgentConfigNode):
     """有限时域 EFE 的前瞻深度与折扣。"""
 
@@ -481,20 +473,28 @@ class AgentWorldCalibrationSettings(_AgentConfigNode):
     report_path: str | None = None
 
 
+class AgentWorldLLMSettings(_AgentConfigNode):
+    """世界推理的模型参数；端点与密钥复用全局 `llm.chat`。"""
+
+    #: None 表示沿用 `llm.chat.model`
+    model: str | None = None
+    #: None 表示跟随端点默认值
+    temperature: float | None = Field(default=0.4, ge=0, le=2)
+    max_tokens: int | None = Field(default=1200, ge=1)
+
+
 class AgentWorldSettings(_AgentConfigNode):
     """世界推理桥（07 章）。"""
 
     enabled: bool = False
-    port_module: str | None = None
-    port_factory: str = "build"
     infer_timeout_seconds: float = Field(default=10.0, gt=0)
     ttl_seconds: int = Field(default=600, ge=0)
     failure_backoff_seconds: int = Field(default=300, ge=0)
     max_hypotheses: int = Field(default=3, ge=1, le=3)
+    llm: AgentWorldLLMSettings = AgentWorldLLMSettings()
     history: AgentWorldHistorySettings = AgentWorldHistorySettings()
     triggers: AgentWorldTriggerSettings = AgentWorldTriggerSettings()
     belief: AgentWorldBeliefSettings = AgentWorldBeliefSettings()
-    fast_path: AgentWorldFastPathSettings = AgentWorldFastPathSettings()
     policy: AgentWorldPolicySettings = AgentWorldPolicySettings()
     calibration: AgentWorldCalibrationSettings = AgentWorldCalibrationSettings()
     #: 推演轨迹：输入指纹、触发原因、结论与置信度，供离线回放/调参

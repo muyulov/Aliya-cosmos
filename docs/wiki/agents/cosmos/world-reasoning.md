@@ -42,7 +42,6 @@ flowchart LR
         PRE["PresenceService"]
         RT["AgentRuntimeService"]
         REG["AgentRegistryService"]
-        DK["DesktopService"]
         HIS["HistoryPattern"]
     end
 
@@ -56,7 +55,6 @@ flowchart LR
     PRE --> WB
     RT --> WB
     REG --> WB
-    DK --> WB
     HIS --> WB
     WB --> PORT --> WI --> TS --> A
 
@@ -80,7 +78,7 @@ class WorldReasoningPort(Protocol):
 | 可替换 | 换模型、换实现、换供应商不影响 cosmos；测试可注入假端口 |
 | 可超时 | 单个 await 就能设超时，超时即丢弃 |
 
-cosmos **不实现语义推理**，只做桥接。仓库内置一个规则基线端口，用来在没有任何 LLM 的情况下跑通链路；它不是语义推理器，部署方可以按同一协议替换成自己的实现。
+cosmos **不实现语义推理**，只做桥接。默认端口 `agent/cosmos/world/reasoning.py` 把聚合信号交给 `LLMService.chat_structured`，复用全局 `llm.chat` 端点做结构化推理；部署方仍可按同一协议注入自己的实现。
 
 ---
 
@@ -263,8 +261,7 @@ class WorldInference(BaseModel):
     signals_used: list[str]                         # 用到了哪些信号
     confidence: float                               # 端口自报置信度
     stale: bool = False                             # cosmos 侧标记，不由端口写
-    revision: int = 0                               # 单调递增，快慢路排序用
-    producer: Literal["heuristic", "deep"] = "deep"
+    revision: int = 0                               # 单调递增，并发推演排序用
     confidence_breakdown: dict[str, float] = {}     # cosmos 侧校准分解
     belief: BeliefState | None = None               # 更新后的信念
     belief_delta: dict[str, float] = {}             # 各维度变化量
@@ -300,7 +297,7 @@ class ActionChoice(BaseModel):
     rationale: str = ""
 ```
 
-`ActionKind` 取值为 `wait / observe / check_in / offer_help / notify / act`。端口只负责写 `inference_id / snapshot / hypotheses / action_windows / signals_used / confidence`；`revision / producer / confidence_breakdown / belief / prediction_error / urgency / action_choice` 由 cosmos 侧补齐，端口不写也不会被拒绝。
+`ActionKind` 取值为 `wait / observe / check_in / offer_help / notify / act`。端口只负责写 `inference_id / snapshot / hypotheses / action_windows / signals_used / confidence`；`revision / confidence_breakdown / belief / prediction_error / urgency / action_choice` 由 cosmos 侧补齐，端口不写也不会被拒绝。
 
 ### 4.1 格式约束
 
@@ -364,9 +361,9 @@ class ActionChoice(BaseModel):
 
 | 项 | 默认 | 行为 |
 | --- | --- | --- |
-| `infer_timeout_seconds` | 10 | 超时取消本次；有旧结果时保留旧结果并标 `stale=true`，冷启动时退回规则快路结果 |
+| `infer_timeout_seconds` | 10 | 超时取消本次；有旧结果时保留旧结果并标 `stale=true`，冷启动时返回 `None` |
 | 连续失败 | 3 次 | 暂停自动触发 5 分钟（指数退避），期间只响应 `refresh_world()` |
-| 首次推演失败 | —— | 不发事件；若快路也关闭，Aliya 侧 `get_world_view()` 返回 `None` |
+| 首次推演失败 | —— | 不发事件；Aliya 侧 `get_world_view()` 返回 `None` |
 
 **推演失败绝不能阻塞对话与调度**：它在独立的异步任务里跑，主链路的 `await` 只有 `EventBus.publish`。
 
@@ -391,7 +388,7 @@ class WorldInferenceEvent(BaseModel):
 
 ### 6.2 呈现给 Aliya 的形态
 
-端口返回的 `hypothesis.statement`、`action_window.suggestion` 与顺序**原样保留**；cosmos 只追加校验与校准字段，不改写文本。理由：
+端口返回的 `hypothesis.statement`、`action_window.suggestion` 与顺序**原样保留**；cosmos 只追加校验与校准字段，不改写文本。以下约束在 LLM 提示词里声明，并在端口归一化与桥接层各校验一次。理由：
 
 - 概括会丢失置信度与依据，而这两项正是 Aliya 判断该不该采纳的关键。
 - cosmos 一旦开始「总结」，就等于在替推理侧下结论，违反「不改写」原则。
@@ -467,10 +464,12 @@ Aliya 判断「要不要主动说话」时三者都要看：状态说「合适�
 
 | 场景 | 行为 |
 | --- | --- |
-| 端口未配置 | `world.enabled=false` 时完全不触发；`enabled=true` 但无实现则启动期 `WorldBridgeError` |
+| 默认端口 | 内置 LLM 实现，复用 `llm.chat`；`world.enabled=false` 时完全不触发 |
+| `llm.chat` 未配密钥 | 启动期 WARNING（带模型与地址）；推演调用失败，按下面的抛错路径降级；进程照常启动 |
+| 端点不可达 / 模型名错误 | 启动期不做网络探测，首次推演失败后才暴露并降级 |
 | `infer()` 抛错 | 丢弃本次，WARNING，不影响其它事件；有旧结果则继续用旧结果 |
-| `infer()` 超时 | 取消；有旧结果保留并标 `stale`，冷启动时返回规则快路结果 |
-| 返回非法结构 | 丢弃，WARNING，记录字段路径（不记内容） |
+| `infer()` 超时 | 取消；有旧结果保留并标 `stale`，冷启动时返回 `None` |
+| 返回非法结构 | 先补一次更严格的 JSON 指令并放宽输出上限；仍失败则丢弃，WARNING，记录字段路径（不记内容） |
 | 输入信号缺失 | 用 `None` 与 `unavailable_fields` 表达，**不填默认值伪装完整** |
 | `HistoryPattern.sample_days < 3` | 照常传，由推理侧自行判断可用性 |
 | 事件订阅方离线 | 缓存最新一份，重连后补发 |
@@ -513,10 +512,11 @@ class FakeWorldReasoning:
             confidence=0.6,
         )
 
-bridge = WorldBridgeService(clock, presence, runtime, registry, port=FakeWorldReasoning())
+bridge = WorldBridgeService(clock, presence, runtime, registry, bus, llm, settings.agent)
+bridge.set_port(FakeWorldReasoning())
 ```
 
-生产代码不传 `port` 时走配置里的 `port_module` / `port_factory`；测试可注入假端口。
+生产代码不传 `port` 时默认构造 `LLMWorldReasoningPort`（复用 `llm.chat`）；测试可注入假端口。
 
 ---
 
@@ -527,12 +527,14 @@ agent:
   cosmos:
     world:
       enabled: true
-      port_module: agent.cosmos.world.reasoning
-      port_factory: build
       infer_timeout_seconds: 10
       ttl_seconds: 600
       failure_backoff_seconds: 300
       max_hypotheses: 3
+      llm:
+        model: null        # null = 沿用 llm.chat.model
+        temperature: 0.4
+        max_tokens: 1200
       history:
         window_days: 14
         min_sample_days: 3
@@ -545,7 +547,31 @@ agent:
 
 `enabled=false` 时 `WorldBridgeService` 仍启动（保持依赖图稳定），但不注册定时器与事件订阅，`get_world_view()` 恒返回 `None`。
 
-上面只是最小配置；显著性门控、信念、EFE 前瞻、快慢路、校准与轨迹的完整调参项见 11.3。
+上面只是最小配置；显著性门控、信念、EFE 前瞻、校准与轨迹的完整调参项见 11.3。
+
+### 10.1 换成更便宜的模型
+
+世界推理默认复用 `llm.chat` 的模型。只把后台推演换成同一端点上的便宜模型，不影响 Aliya 主对话：
+
+```yaml
+agent:
+  cosmos:
+    world:
+      llm:
+        # 填 llm.chat.base_url 这个端点实际提供的模型名，例如更小的 flash / mini 档
+        model: <同一端点上的便宜模型名>
+        temperature: 0.3 # 推演是归纳任务，0.2–0.5 足够
+        max_tokens: 1200 # 不建议低于 800，过小会截断 JSON
+```
+
+| 项 | 说明 |
+| --- | --- |
+| `model` | 必须是 `llm.chat.base_url` 提供的模型名；`null` 表示沿用 `llm.chat.model` |
+| `base_url` / `api_key` | 世界推理不单独配置，始终复用 `llm.chat` |
+| 验证 | 重启后看日志 `LLM 调用完成` 的「模型」字段；首次推演失败会 WARNING，并保留旧结果 |
+| 省钱 | 推演由触发与指纹缓存控制；调大 `triggers.reconcile_seconds`、合并窗口可进一步减少调用 |
+
+如果便宜模型在另一家供应商、需要另一个 `base_url`：当前世界推理只走 `llm.chat` 端点，无法单独指定地址。要么把 `llm.chat` 整体指向该供应商（Aliya 主对话也会一起换），要么先给 `LLMService` 增加独立端点，再把 `world.llm` 指过去。
 
 ---
 
@@ -569,12 +595,12 @@ agent:
 
 高显著事件用 `high_salience_window_seconds`（默认 30s），低显著事件用 `low_salience_window_seconds`（默认 300s）；同一实体在半个窗口内重复出现只算一次。静默巡检按 60s 检查阈值，不依赖定时对账。
 
-### 11.2 信念与快慢双路
+### 11.2 信念与推演排序
 
 - `WorldInput.belief` / `WorldInference.belief` 让推理基于上一轮信念更新，而不是每次从零推断；`prediction_error` 记录上一轮在线预测与本轮观测的误差。
 - `belief.observation_weight` 控制新旧信念混合比例（0=完全信旧信念，1=完全信本轮观测）；`belief.enabled=false` 时每轮从零推断。
-- 冷启动（还没有任何结论）先发一份 `producer="heuristic"` 的保守结论，深度端口返回后以 `revision+1` 覆盖；Aliya 按 `revision` 丢弃旧版本。
-- 输入指纹缓存（去掉时间戳、信念、上一轮摘要）避免相同状态下重复调用端口。
+- `revision` 单调递增；Aliya 按它丢弃旧版本，并发推演不会回退到旧结论。
+- 输入指纹缓存（去掉时间戳、信念、上一轮摘要）避免相同状态下重复调用端口；命中缓存视为一次成功刷新，会清除上次失败的 `stale` 标记，但不清零失败计数与退避。
 - 定时兜底与 `dispatch_finished` 分别由 `reconcile_seconds` 和 `triggers.dispatch_finished` 控制；历史窗口由 `world.history.window_days` 传给终端统计。
 
 ### 11.3 校准、证据与轨迹
@@ -597,9 +623,6 @@ agent:
       policy:
         horizon: 2
         discount: 0.8
-      fast_path:
-        enabled: true
-        confidence_cap: 0.45
       calibration:
         temperature: 1.5
         model_weight: 0.45
@@ -646,20 +669,21 @@ total(a)     = immediate(a) + γ × max_b immediate(b | T(s, a))
 
 结果写入 `WorldInference.action_choice`（含 `pragmatic / epistemic / cost / efe / lookahead / total_efe` 与理由）。这仍是**近似**：没有观测模型，转移函数先验化；等轨迹足够多后可用 `world_calibration.json` 的统计替换先验。多步 POMDP 求解不在当前范围内，但不影响 Aliya 按 `total_efe` 排序使用建议。
 
-### 11.6 内置规则端口与校准回填
+### 11.6 LLM 端口与校准回填
 
-`agent/cosmos/world/reasoning.py` 提供一个可运行的 `RuleWorldReasoningPort`：
+`agent/cosmos/world/reasoning.py` 提供一个 `LLMWorldReasoningPort`：
 
-- 直接从 `WorldInput` 的 presence / tasks / agents / history / time 生成 1–3 条假设；
-- 不依赖外部模型，作为独立基线；外部 LLM 端口失败时按失败降级处理（有旧结果保留，冷启动退回快路），不会自动切换端口；
-- 配置 `port_module: agent.cosmos.world.reasoning` + `port_factory: build` 即可启用；
-- 部署方可以按同一协议替换成自己的 LLM 端口。
+- 把 `WorldInput` 序列化后连同系统提示词交给 `LLMService.chat_structured`，输出映射到 `WorldInferenceDraft`，再装配成 `WorldInference`；
+- 提示词只列当前输入里真实存在的信号（`time / link / presence / tasks / agents / history / aliya / belief / anchors`）；模型返回的 `signals_used` 与 `basis_signals` 会被再次过滤，未接地的假设直接丢弃；
+- 复用全局 `llm.chat` 端点，`world.llm.model` / `temperature` / `max_tokens` 只覆盖本次调用，不单独配密钥；
+- 模型错误与超时直接抛给桥接层；结构化输出非法时只补一次更严格的 JSON 指令并放宽输出上限，仍失败再抛给桥接层：有旧结果保留并标 `stale`，冷启动保持 `None`；
+- 部署方仍可通过 `WorldBridgeService.set_port()` 注入自己的实现。
 
 校准报告现在可以在启动期自动回填：设置
 `world.calibration.report_path` 后，`WorldBridgeService.start()` 会读取报告中的
 `temperature` 与 `min_salience`，校验范围后写入配置；文件不存在或字段非法时
 保持原值，不阻断启动。
 
-`refresh(force=True)` 只绕过节流与退避；是否复用指纹缓存/冷启动快路由
+`refresh(force=True)` 只绕过节流与退避；是否复用指纹缓存由
 `reuse=True` 控制。事件触发和 `refresh_world()` 会带 `reuse=True`，显式
 `get_world_view(force=True)` 默认不复用，以拿到新结果。

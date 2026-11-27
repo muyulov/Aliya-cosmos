@@ -276,7 +276,6 @@ sequenceDiagram
     "generated_at": "2026-11-07T21:03:12+08:00",
     "ttl_seconds": 600,
     "revision": 1,
-    "producer": "deep",
     "snapshot": "你离线 2 小时了，21 点这个点你通常在线",
     "hypotheses": [
       {"statement": "你可能临时走开了，等下会回来", "confidence": 0.5, "basis": "21 点在线率 0.78", "basis_signals": ["presence", "history"]},
