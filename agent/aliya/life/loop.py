@@ -41,7 +41,7 @@ _REST_GAIN_PER_MINUTE = 0.003
 
 @dataclass(slots=True)
 class LifeDecision:
-    kind: Literal["start", "move", "finish", "wait"]
+    kind: Literal["start", "move", "wait"]
     activity: PendingActivity | None = None
     destination: str | None = None
     reason: str = ""

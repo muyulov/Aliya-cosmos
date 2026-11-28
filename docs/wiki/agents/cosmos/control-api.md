@@ -187,7 +187,7 @@ async def set_aliya_context(self, ctx: AliyaContext) -> None: ...
 | `report_presence()` | 外部通道上报在线/输入/设备状态；Aliya 不需要也不应该伪造用户状态 |
 | `get_world_view()` | 走缓存；`force=True` 同步等一次新推演（受 10s 超时，默认不复用缓存） |
 | `refresh_world()` | 绕过窗口，但允许复用相同输入的缓存；事件链路常用，返回结果或 `None` |
-| `set_aliya_context()` | 只存不解读；覆盖式写入，`None` 字段表示清除 |
+| `set_aliya_context()` | 只存不解读；覆盖式写入，`None` 字段表示清除。`comms` 变化会同步到终端投递策略（积压 / 延迟），见[终端 §7.2](terminal.md#72-投递语义) |
 
 `get_presence()` 是同步读取内存，不是实时采集。需要变更通知时用订阅，不要轮询。
 

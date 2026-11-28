@@ -132,7 +132,7 @@ agent:
       consume: true
       max_hypotheses_used: 2
       trust_threshold: 0.5
-    # 生活层：活动、移动与精力；与说话节流完全独立。
+    # 生活层：活动、移动与精力；tick 与 initiative.tick_seconds 取较小值。
     life:
       enabled: true
       tick_seconds: 60

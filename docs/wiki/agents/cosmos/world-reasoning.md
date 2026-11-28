@@ -223,7 +223,7 @@ class AliyaContext(BaseModel):
 
 这一块是**由 Aliya 主动提供**的：`ControlService.set_aliya_context(ctx)`。cosmos 只存不解读。不给时字段为 `None`。
 
-`location / activity / comms / free_minutes` 来自 `data/Aliya/activity.json` 的真实生活状态，不是推测。`comms` 是**她所在舱室**的通信条件，和 Aliya↔cosmos 的心跳链路（`link`）是两件事；控制面收到 `comms` 时会同步给 `TerminalService.set_comms()`，由终端决定积压与延迟。
+`location / location_name / activity / comms / free_minutes / since_minutes / interruptibility / energy` 来自 `data/Aliya/activity.json` 的真实生活状态，不是推测。`comms` 是**她所在舱室**的通信条件，和 Aliya↔cosmos 的心跳链路（`link`）是两件事；控制面收到 `comms` 时会同步给 `TerminalService.set_comms()`，由终端决定积压与延迟。
 
 加这个字段的理由：世界推理不是纯看用户，也要知道 Aliya 手头有没有没收尾的事、现在处在什么处境。否则推演出来的建议会和她正在进行的话题冲突。
 
@@ -281,7 +281,8 @@ class ShipSignal(BaseModel):
     reachable: list[ReachablePlace] = []
 ```
 
-描述她所在位置的通信条件与可达去向；`nearest_signal_place` 只在确有更近的信号点时填。
+描述她所在位置的通信条件与可达去向。当前实现只填 `comms` 与一步可达的 `reachable`；
+`nearest_signal_place` 保留给后续「最近有信号舱室」计算，暂不填。
 
 ### 3.11 ReachablePlace
 
@@ -292,7 +293,8 @@ class ReachablePlace(BaseModel):
     minutes: int  # 步行分钟数
 ```
 
-船图是共享只读事实（`agent/cosmos/contracts/ship.py` + `data/world/ship.json`），cosmos 与 Aliya 都只读。世界推理只把「一步可达」的舱室放进 `reachable`，避免给出到不了的建议。
+船图是共享只读事实（`agent/cosmos/contracts/ship.py` + `data/world/ship.json`），cosmos 与 Aliya 都只读。
+世界推理只把「一步可达」的舱室放进 `reachable`，避免给出到不了的建议；`location` 或 `comms` 缺失时 `reachable` 为空。
 
 ---
 
@@ -353,7 +355,7 @@ class SelfView(BaseModel):
     reason: str = ""
 ```
 
-`ActionKind` 取值为 `wait / observe / check_in / offer_help / notify / act`。端口只负责写 `inference_id / snapshot / hypotheses / action_windows / signals_used / confidence`；`revision / confidence_breakdown / belief / prediction_error / urgency / action_choice` 由 cosmos 侧补齐，端口不写也不会被拒绝。
+`ActionKind` 取值为 `wait / observe / check_in / offer_help / notify / act`。端口负责写 `inference_id / snapshot / hypotheses / action_windows / signals_used / confidence / self_view`（`action_windows` 内可带 `target`）；`revision / confidence_breakdown / belief / prediction_error / urgency / action_choice` 由 cosmos 侧补齐，端口不写也不会被拒绝。
 
 ### 4.1 格式约束
 

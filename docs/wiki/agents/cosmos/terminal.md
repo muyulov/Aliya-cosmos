@@ -253,6 +253,7 @@ class DispatchContext(BaseModel):
 | 补偿 | 重连后按 `sequence` 拉取缺口，超过 100 条则改为拉全量快照 |
 | 链路中断 | `link.state=down`（如曲率航行）时双向消息进持久队列，恢复后按序重放；中断期不发主动消息，也不丢她的待发内容 |
 | 链路心跳 | 通道调用 `note_link_heartbeat()`；超过 `heartbeat_seconds` 判 unstable，超过 `down_after_seconds` 判 down |
+| 舱室通信条件 | `AliyaContext.comms` 由控制面同步到 `set_comms()`：`none` 双向积压并立即投递一条 system「信号中断」提示；`weak` 入站延迟 `comms_delay_seconds` 后按序重放、出站按入队顺序抖动延迟发送；`strong` 正常投递。它描述她所在舱室，与 `link.state`（通道心跳）是两件事，两者同时中断时以 `link` 的持久队列为准 |
 
 ### 7.3 主动消息策略
 
@@ -304,6 +305,7 @@ cosmos **不重写**待发内容，只决定「发不发」。要不要换个说
 | 上下文压缩失败 | 截断旧轮次，WARNING |
 | 脱敏命中 | 记录命中规则名与位置，不记原文 |
 | 主动消息被拒 | 返回 `ProactiveReceipt`，不抛错 |
+| 弱信号发送中链路转 down | 消息放回队头而不是进死信；链路与信号恢复后按原顺序续发 |
 | 用户侧投递失败 | 进死信队列，`MessageDeliveryError`，由 `TerminalService` 下次连接时重放 |
 
 降级底线：**宁可告诉用户「稍后再试」，也不要发出半成品或内部细节。**

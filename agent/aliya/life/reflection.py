@@ -26,7 +26,7 @@ async def maybe_reflect(
     now: datetime,
     last_reflection_date: str | None,
 ) -> tuple[list[str], bool]:
-    """跨日首次、或当天 22 点后至少有一条记录时，做一次日终反思。
+    """每天最多反思一次：跨日后有记录就做；没记录则等到 22 点再补一句。
 
     返回 `(facts, attempted)`：`attempted=True` 表示今天已经试过（无论成败），
     调用方应把日期落盘，避免失败后每个 tick 都重试、或重启后重复反思。

@@ -195,12 +195,16 @@ async def run(control) -> None:
 
 用户消息走信封（`inbound()`），状态与任务变化走事件（`subscribe()`）。两条流并行，互不阻塞。
 
+回合执行另有两条独立链路：`_run_worker` 串行处理用户与事件回合，`_run_life_worker` 只处理活动回合；
+ticker 每 `min(initiative.tick_seconds, life.tick_seconds)` 推一次生活状态机，再判断要不要主动开口。
+活动回合不写 `turns.jsonl`、不占用户队列，失败也只影响这一次活动。
+
 ### 5.1 一回合的处理顺序
 
 ```mermaid
 flowchart TD
     E(["收信封"]) --> M["组装上下文<br/>cosmos 轮次 + Aliya 记忆"]
-    M --> L["LLM chat_tools<br/>普通 16 个 / 主动 12 个工具<br/>+ MCP 与技能工具"]
+    M --> L["LLM chat_tools<br/>普通 16 / 主动 12 / 活动 7 个工具<br/>+ MCP 与技能工具"]
     L --> T{"有 tool_calls?"}
     T -->|"有"| X["顺序执行工具<br/>结果回填"]
     X --> R{"未超 6 轮?"}
@@ -285,7 +289,8 @@ flowchart TD
 
 `data/Aliya/activity.json` 与 `activity.jsonl` 是她的**隐私边界**：记录她真正在做什么、去了哪里，
 不通过 `read_file`、`see_desktop` 或任何 RPC 暴露；工作区沙箱根是 `data/Aliya/workspace`，
-与这两个文件物理隔离。cosmos 只能看到 `AliyaContext` 里她主动上报的 `location / activity / comms / free_minutes`。
+与这两个文件物理隔离。cosmos 只能看到 `AliyaContext` 里她主动上报的
+`location / location_name / activity / comms / free_minutes / since_minutes / interruptibility / energy`。
 
 ---
 
@@ -371,7 +376,7 @@ agent:
       trust_threshold: 0.5 # 低于此置信度的假设不采纳
     life:
       enabled: true # 关掉后行为与没有生活层时一致
-      tick_seconds: 60 # 生活状态机检查周期，与说话节流独立
+      tick_seconds: 60 # 生活状态机检查周期；实际 tick 取它与 initiative.tick_seconds 的较小值
       plan_minutes: 40 # 没有活动且规划为空时，隔多久重排
       max_turns_per_day: 40 # 活动回合每日上限
       min_gap_seconds: 300 # 两次活动回合的最小间隔
@@ -414,6 +419,11 @@ agent:
 | 回复出现助手腔 | 不出现「好的/已为您完成/我能理解你的感受」，重写后仍保持她的口气 |
 | 连续多条短句 | 每条单独投递，不被合并成一段 |
 | 链路中断 | 不调用 `send_message`，消息进 outbox |
+| 问她「在干嘛」 | 回复来自 `activity.json` 的 `current.title`，不是时段文案 |
+| 活动回合 | 只注册活动工具；不出现 `dispatch_task` / `see_desktop` |
+| 活动跨舱室 | 先进入 `move`，到达后才 `start`；不可达地点被丢弃 |
+| 动力室发消息（`comms=none`） | 收到「信号中断」系统提示；消息积压，恢复后按序补齐 |
+| 日终反思 | 每天最多一次；失败也落盘，不会每个 tick 重调模型 |
 | 工具调用超过 6 轮 | 停止调用；用户回合补一条 system 失败提示，不记成她的回复 |
 | 出站检查命中 | 重写一次；仍命中则遮蔽后发送 |
 

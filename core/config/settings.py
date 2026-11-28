@@ -659,9 +659,9 @@ class AgentAliyaWorldSettings(_AgentConfigNode):
 
 
 class AgentAliyaLifeSettings(_AgentConfigNode):
-    #: 生活层总开关；关掉时行为与本次改动之前一致
+    #: 生活层总开关；关掉时不启动生活状态机，只保留对话与主动回合
     enabled: bool = True
-    #: 生活状态机检查周期；与说话节流独立
+    #: 生活状态机检查周期；实际 tick 取它与 initiative.tick_seconds 的较小值
     tick_seconds: float = Field(default=60, gt=0)
     #: 没有活动且规划为空时，隔多久重排
     plan_minutes: int = Field(default=40, gt=0)
