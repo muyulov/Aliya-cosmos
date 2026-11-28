@@ -1166,6 +1166,15 @@ class AliyaRuntime:
         state = await self._life_store.load()
         self._life_state = state
         decision: LifeDecision = await self._life_loop.advance(now)
+        # 状态机可能刚改过地点或移动标记；重新读一次，上下文才不会报旧位置
+        state = await self._life_store.load()
+        self._life_state = state
+        if decision.kind == "move" and decision.destination is not None:
+            if decision.reason == "到达":
+                log.info("生活状态：已到达", 地点=decision.destination)
+            else:
+                log.info("生活状态：开始移动", 目的地=decision.destination)
+            await self._publish_context()
         if (
             decision.kind == "start"
             and decision.activity is not None
