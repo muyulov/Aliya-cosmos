@@ -533,3 +533,17 @@ async def test_信号中断给出可见提示(env: Env) -> None:
     await asyncio.sleep(0.05)
     notices = [item.text for item in env.channel.drain() if item.kind == "system"]
     assert any("信号中断" in text for text in notices)
+
+
+async def test_弱信号消息在断信号后恢复补发(env: Env) -> None:
+    env.terminal._comms_delay_seconds = 0.1
+    env.terminal.set_comms("weak")
+    await env.terminal.deliver("断前一句", session_id="s1")
+    await asyncio.sleep(0.05)
+    env.terminal.set_comms("none")
+    await asyncio.sleep(0.2)
+    assert "断前一句" not in [message.text for message in env.channel.drain()]
+
+    env.terminal.set_comms("strong")
+    await asyncio.sleep(0.4)
+    assert "断前一句" in [message.text for message in env.channel.drain()]

@@ -164,9 +164,13 @@ class AliyaContext(BaseModel):
     last_intent: str | None = None
     #: 生活层上报的处境；cosmos 只存不解读
     location: str | None = None
+    location_name: str | None = None
     activity: str | None = None
     comms: Literal["strong", "weak", "none"] | None = None
     free_minutes: int | None = None
+    since_minutes: int | None = None
+    interruptibility: Literal["high", "medium", "low"] | None = None
+    energy: float | None = Field(default=None, ge=0, le=1)
 
 
 class ReachablePlace(BaseModel):

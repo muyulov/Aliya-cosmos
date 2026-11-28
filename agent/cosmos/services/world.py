@@ -39,6 +39,7 @@ from agent.cosmos.contracts import (
     OutcomeSignal,
     PresenceSignal,
     PresenceSnapshot,
+    ReachablePlace,
     SelfState,
     ShipSignal,
     TaskSignal,
@@ -49,6 +50,7 @@ from agent.cosmos.contracts import (
     WorldInferenceEvent,
     WorldInput,
 )
+from agent.cosmos.contracts.ship import ShipGraph, load_ship
 from agent.cosmos.services.presence import PresenceService
 from agent.cosmos.services.registry import AgentRegistryService
 from agent.cosmos.services.runtime import AgentRuntimeService
@@ -128,6 +130,8 @@ class WorldBridgeService(Service):
         self._revision: int = 0
 
         self._aliya_context: AliyaContext | None = None
+        #: 船图是只读事实；构造期加载，缺失/损坏直接失败
+        self._ship: ShipGraph = load_ship()
         self._link_provider: Callable[[], LinkState] = lambda: "up"
         self._link_since_provider: Callable[[], int] | None = None
         self._queue_provider: Callable[[], tuple[int, int]] = lambda: (0, 0)
@@ -786,26 +790,43 @@ class WorldBridgeService(Service):
             self_state=(
                 SelfState(
                     location=self._aliya_context.location,
-                    location_name=None,
+                    location_name=self._aliya_context.location_name,
                     activity=self._aliya_context.activity,
-                    since_minutes=None,
-                    interruptibility=None,
-                    energy=None,
+                    since_minutes=self._aliya_context.since_minutes,
+                    interruptibility=self._aliya_context.interruptibility,
+                    energy=self._aliya_context.energy,
                     comms=self._aliya_context.comms,
                 )
                 if self._aliya_context is not None
                 and self._aliya_context.location is not None
                 else None
             ),
-            ship=(
-                ShipSignal(comms=self._aliya_context.comms or "strong")
-                if self._aliya_context is not None and self._aliya_context.comms is not None
-                else None
-            ),
+            ship=self._ship_signal(),
             belief=self._belief,
             last_inference=self._digest(),
             anchors=self._anchors(),
         )
+
+    def _ship_signal(self) -> ShipSignal | None:
+        """把船图折成一步可达的舱室；没有通信条件时不给这个信号。"""
+        ctx = self._aliya_context
+        if ctx is None or ctx.comms is None:
+            return None
+        reachable: list[ReachablePlace] = []
+        if ctx.location is not None:
+            for neighbor in self._ship.neighbors(ctx.location):
+                place = self._ship.place(neighbor)
+                if place is None:
+                    continue
+                seconds = self._ship.travel_seconds(ctx.location, neighbor) or 0
+                reachable.append(
+                    ReachablePlace(
+                        place=neighbor,
+                        name=place.name,
+                        minutes=max(0, round(seconds / 60)),
+                    )
+                )
+        return ShipSignal(comms=ctx.comms, reachable=reachable)
 
     def _presence_enabled(self) -> bool:
         return self._config.cosmos.presence.enabled

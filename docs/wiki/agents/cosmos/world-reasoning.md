@@ -212,9 +212,13 @@ class AliyaContext(BaseModel):
     last_intent: str | None = None         # 上一轮 Aliya 的意图标签
     # 生活层上报的处境；cosmos 只存不解读
     location: str | None = None            # 当前舱室 id，如 "engine"
+    location_name: str | None = None       # 舱室展示名
     activity: str | None = None            # 正在做的事，可直接说出口的一句话
     comms: Literal["strong", "weak", "none"] | None = None  # 所在舱室的通信条件
     free_minutes: int | None = None        # 手上这件事还剩多少分钟
+    since_minutes: int | None = None       # 这件事已经做了多久
+    interruptibility: Literal["high", "medium", "low"] | None = None
+    energy: float | None = None            # 0–1
 ```
 
 这一块是**由 Aliya 主动提供**的：`ControlService.set_aliya_context(ctx)`。cosmos 只存不解读。不给时字段为 `None`。

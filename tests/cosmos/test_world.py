@@ -757,6 +757,8 @@ async def test_组装输入时带上自我状态与船图(
     payload = port.payloads[0]
     assert payload.self_state is not None and payload.self_state.comms == "none"
     assert payload.ship is not None and payload.ship.comms == "none"
+    assert {item.place for item in payload.ship.reachable} == {"incubator", "hangar"}
+    assert all(item.minutes >= 1 for item in payload.ship.reachable)
 
 
 def test_行动选择结果带目标() -> None:

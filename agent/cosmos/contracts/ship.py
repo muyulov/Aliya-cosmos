@@ -64,10 +64,10 @@ class ShipGraph(BaseModel):
         return list(dict.fromkeys(result))
 
     def travel_seconds(self, source: str, target: str) -> int | None:
-        if source == target:
-            return 0
         if self.place(source) is None or self.place(target) is None:
             return None
+        if source == target:
+            return 0
         adjacency: dict[str, list[tuple[str, int]]] = {}
         for edge in self.edges:
             adjacency.setdefault(edge.a, []).append((edge.b, edge.seconds))

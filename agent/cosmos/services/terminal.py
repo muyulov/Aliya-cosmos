@@ -253,6 +253,9 @@ class TerminalService(Service):
         self.log.info("信号变化", 从=previous, 到=level)
         if level != "none" and self._comms_outbound_worker is None:
             self._comms_outbound_worker = self._spawn(self._comms_outbound_loop())
+            if self._comms_outbound:
+                # 断信号期间残留的出站消息要立刻续发，不能等下一次投递来唤醒
+                self._comms_outbound_event.set()
         if level == "none":
             self._spawn(
                 self.deliver(
@@ -269,15 +272,20 @@ class TerminalService(Service):
         """弱信号出站：按入队顺序延迟发送，保序不丢。"""
         try:
             while self._comms != "none":
-                await self._comms_outbound_event.wait()
                 self._comms_outbound_event.clear()
-                while self._comms_outbound and self._comms != "none":
-                    message = self._comms_outbound.popleft()
-                    delay = self._comms_delay_seconds * (
-                        0.5 + (hash(message.message_id) % 100) / 100
-                    )
-                    await asyncio.sleep(delay)
-                    _ = await self._send(message)
+                if not self._comms_outbound:
+                    await self._comms_outbound_event.wait()
+                    continue
+                message = self._comms_outbound.popleft()
+                delay = self._comms_delay_seconds * (
+                    0.5 + (hash(message.message_id) % 100) / 100
+                )
+                await asyncio.sleep(delay)
+                if self._comms == "none":
+                    # 抖动期间信号又断了：放回队头，等恢复后按原顺序再发
+                    self._comms_outbound.appendleft(message)
+                    break
+                _ = await self._send(message)
         finally:
             self._comms_outbound_worker = None
 
