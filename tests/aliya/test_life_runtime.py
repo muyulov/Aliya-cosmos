@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 from agent.aliya.life.models import Activity, ActivityState
@@ -30,3 +31,35 @@ def test_生活开关关闭时不创建活动队列() -> None:
     config.life.enabled = False
     runtime = AliyaRuntime(control=cast("Any", None), llm=cast("Any", None), config=config)
     assert runtime._life_queue is None  # type: ignore[attr-defined]
+
+
+async def test_用户消息只标记打断不取消活动(tmp_path: Path) -> None:
+    from agent.aliya.life.store import ActivityStore
+
+    store = ActivityStore(tmp_path)
+    state = ActivityState(updated_at=NOW)
+    state.current = Activity(
+        id="act_1", title="修阀门", place="engine", kind="repair", started_at=NOW
+    )
+    await store.save(state)
+    state.current.interrupted_at = NOW
+    await store.save(state)
+    assert (await store.load()).current is not None
+    assert (await store.load()).current.interrupted_at == NOW
+
+
+def test_alya_context_带地点与活动() -> None:
+    from agent.cosmos.contracts import AliyaContext
+
+    ctx = AliyaContext(
+        location="engine", activity="把二舱压力阀拧到底", comms="none", free_minutes=12
+    )
+    assert ctx.model_dump()["comms"] == "none"
+
+
+def test_用户回合上下文含刚才在做什么() -> None:
+    from agent.aliya.turn.context import TurnContext
+
+    turn = TurnContext(user_text="在吗", now=NOW)
+    turn.memory = "你刚才在动力室，被叫了一下；正在把二舱压力阀拧到底。"
+    assert "动力室" in turn.context_text()

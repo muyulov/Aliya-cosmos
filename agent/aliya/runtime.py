@@ -735,11 +735,23 @@ class AliyaRuntime:
                 self._crisis = _is_crisis(envelope.message.text)
                 if envelope.presence is not None:
                     self._presence = envelope.presence
+                interrupted = None
+                if self._life_state is not None and self._life_state.current is not None:
+                    interrupted = self._life_state.current
+                    interrupted.interrupted_at = self._now()
+                    if self._life_store is not None:
+                        await self._life_store.save(self._life_state)
                 turn = TurnContext.from_envelope(envelope)
                 turn.presence = turn.presence or format_presence(self._presence)
                 turn.tasks = turn.tasks or self._tasks_text()
                 turn.desktop = self._desktop_text()
                 turn.world = self._world_text()
+                if interrupted is not None:
+                    # 被叫一下不等于活动作废：只标记打断，状态机照常推进
+                    turn.user_text = (
+                        f"（你刚才在{self._place_name(interrupted.place)}，被叫了一下；"
+                        f"正在{interrupted.title}。）\n{turn.user_text}"
+                    )
                 self._bind_turn(turn)
                 self._pending_inbound += 1
                 try:
@@ -1274,6 +1286,9 @@ class AliyaRuntime:
         facts = self._memory.load_facts()[-_FACTS_IN_CONTEXT:]
         if facts:
             parts.append("记得：" + "；".join(facts))
+        if self._life_state is not None and self._life_state.current is not None:
+            activity = self._life_state.current
+            parts.append(f"你正在：{activity.title}（在{self._place_name(activity.place)}）")
         topics = self._memory.load_open_topics()[: self._config.memory.open_topics_limit]
         if topics:
             parts.append("未收尾：" + "、".join(topics))
@@ -1487,6 +1502,7 @@ class AliyaRuntime:
 
     async def _publish_context(self) -> None:
         enabled = self._config.memory.enabled
+        state = self._life_state
         try:
             await self._control.set_aliya_context(
                 AliyaContext(
@@ -1504,6 +1520,18 @@ class AliyaRuntime:
                         now=self._now(),
                         tasks=self._task_count,
                         crisis=self._crisis,
+                    ),
+                    location=state.place if state is not None else None,
+                    activity=state.current.title if state is not None and state.current else None,
+                    comms=(
+                        self._life_adapter.comms_at(state.place, moving=state.moving)
+                        if state is not None and self._life_adapter is not None
+                        else None
+                    ),
+                    free_minutes=(
+                        state.current.minutes_left(self._now())
+                        if state is not None and state.current is not None
+                        else None
                     ),
                 )
             )

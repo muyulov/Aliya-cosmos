@@ -162,6 +162,11 @@ class AliyaContext(BaseModel):
     unspoken: list[str] = Field(default_factory=list)
     phase: Literal["daily", "maintenance", "crisis", "rest", "unknown"] = "unknown"
     last_intent: str | None = None
+    #: 生活层上报的处境；cosmos 只存不解读
+    location: str | None = None
+    activity: str | None = None
+    comms: Literal["strong", "weak", "none"] | None = None
+    free_minutes: int | None = None
 
 
 class WorldInput(BaseModel):
