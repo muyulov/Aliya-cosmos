@@ -5,13 +5,26 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Literal, Protocol
 
 from loguru import logger
 
 from agent.aliya.life.models import Activity, Move, PendingActivity
 from agent.aliya.life.ship import ShipAdapter
 from agent.aliya.life.store import ActivityStore
+
+
+class PlannerPort(Protocol):
+    """生活规划器只需要这一个方法；测试替身与真实实现都按结构匹配。"""
+
+    async def plan(
+        self,
+        *,
+        place: str,
+        energy: float,
+        now: datetime,
+        recent: list[str],
+    ) -> list[PendingActivity]: ...
 
 #: 每分钟精力消耗；repair 最费神，read 最省
 _ENERGY_PER_MINUTE: dict[str, float] = {
@@ -40,7 +53,7 @@ class LifeLoop:
     def __init__(
         self,
         store: ActivityStore,
-        planner: object,
+        planner: PlannerPort,
         adapter: ShipAdapter,
         *,
         plan_minutes: int = 40,
@@ -108,7 +121,7 @@ class LifeLoop:
             ]
 
         if not state.pending and self._plan_due(now):
-            state.pending = await self._planner.plan(  # type: ignore[attr-defined]
+            state.pending = await self._planner.plan(
                 place=state.place,
                 energy=state.energy,
                 now=now,
@@ -128,8 +141,8 @@ class LifeLoop:
                 state.pending = state.pending[1:]
                 await self._store.save(state)
                 return LifeDecision("wait", reason="活动地点不可达")
-            state.moving = Move(
-                **{
+            state.moving = Move.model_validate(
+                {
                     "from": state.place,
                     "to": item.place,
                     "departed_at": now,

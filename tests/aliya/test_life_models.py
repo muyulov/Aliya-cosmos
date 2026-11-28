@@ -28,7 +28,9 @@ def test_活动序列化往返与剩余分钟() -> None:
 
 
 def test_移动字段使用_from别名() -> None:
-    move = Move(**{"from": "cabin", "to": "engine", "departed_at": NOW, "arrive_at": NOW})
+    move = Move.model_validate(
+        {"from": "cabin", "to": "engine", "departed_at": NOW, "arrive_at": NOW}
+    )
     assert move.from_ == "cabin"
     assert move.model_dump(by_alias=True)["from"] == "cabin"
 

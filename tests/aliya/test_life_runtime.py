@@ -44,8 +44,9 @@ async def test_用户消息只标记打断不取消活动(tmp_path: Path) -> Non
     await store.save(state)
     state.current.interrupted_at = NOW
     await store.save(state)
-    assert (await store.load()).current is not None
-    assert (await store.load()).current.interrupted_at == NOW
+    loaded = await store.load()
+    assert loaded.current is not None
+    assert loaded.current.interrupted_at == NOW
 
 
 def test_alya_context_带地点与活动() -> None:

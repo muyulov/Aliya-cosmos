@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agent.aliya.turn.tools import build_tools
 
@@ -31,9 +32,11 @@ async def test_活动工具面包含文件工具但不派活(tmp_path: Path, mon
 async def test_写入与列举都在工作区内(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.chdir(tmp_path)
     tools = {item.name: item for item in build_tools(_runtime(), mode="activity").tools}
-    write = tools["write_file"].func
-    listing = tools["list_files"].func
-    assert write is not None and listing is not None
+    write_func = tools["write_file"].func
+    listing_func = tools["list_files"].func
+    assert write_func is not None and listing_func is not None
+    write = cast("Callable[[str, str], Awaitable[str]]", write_func)
+    listing = cast("Callable[[str], Awaitable[str]]", listing_func)
     assert "写入成功" in await write("notes/today.md", "# 观测\n今天风很大")
     assert "today.md" in await listing("notes")
     assert "超出工作区" in await write("../escape.md", "不行")

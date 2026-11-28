@@ -34,14 +34,14 @@ class PlanResult(BaseModel):
     activities: list[PlannedActivity] = Field(default_factory=list, max_length=3)
 
 
-#: 零 LLM 兜底池：既省成本，也是「她累了」的语义表达
-FALLBACK_POOL: tuple[dict[str, Any], ...] = (
-    {"title": "躺一会儿", "kind": "rest", "expected_minutes": 25},
-    {"title": "翻翻旧手册", "kind": "read", "expected_minutes": 30},
-    {"title": "在舱里慢慢走两圈", "kind": "wander", "expected_minutes": 15},
-    {"title": "靠着舷窗发呆", "kind": "rest", "expected_minutes": 20},
-    {"title": "把工具重新摆一遍", "kind": "organize", "expected_minutes": 30},
-    {"title": "数一会儿星星", "kind": "observe", "expected_minutes": 25},
+#: 零 LLM 兜底池：既省成本，也是「她累了」的语义表达；place 在 fallback 时补
+FALLBACK_POOL: tuple[PendingActivity, ...] = (
+    PendingActivity(title="躺一会儿", place="", kind="rest", expected_minutes=25),
+    PendingActivity(title="翻翻旧手册", place="", kind="read", expected_minutes=30),
+    PendingActivity(title="在舱里慢慢走两圈", place="", kind="wander", expected_minutes=15),
+    PendingActivity(title="靠着舷窗发呆", place="", kind="rest", expected_minutes=20),
+    PendingActivity(title="把工具重新摆一遍", place="", kind="organize", expected_minutes=30),
+    PendingActivity(title="数一会儿星星", place="", kind="observe", expected_minutes=25),
 )
 
 
@@ -120,6 +120,6 @@ class LifePlanner:
 
     def _fallback(self, place: str, *, rest_only: bool) -> list[PendingActivity]:
         pool = [
-            item for item in FALLBACK_POOL if not rest_only or item["kind"] in {"rest", "wander"}
+            item for item in FALLBACK_POOL if not rest_only or item.kind in {"rest", "wander"}
         ]
-        return [PendingActivity(**{**item, "place": place}) for item in pool[:3]]
+        return [item.model_copy(update={"place": place}) for item in pool[:3]]

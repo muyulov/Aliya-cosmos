@@ -99,8 +99,8 @@ async def test_移动中不接新活且到期前保持当前活动(tmp_path: Pat
 async def test_到达后上报新地点且可重新规划(tmp_path: Path) -> None:
     loop, _, store = build(tmp_path)
     state = ActivityState(updated_at=NOW)
-    state.moving = Move(
-        **{
+    state.moving = Move.model_validate(
+        {
             "from": "cabin",
             "to": "engine",
             "departed_at": NOW - timedelta(seconds=120),

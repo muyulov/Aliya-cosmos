@@ -35,6 +35,8 @@ def test_适配邻接与可达活动() -> None:
 def test_移动中取两端较差信号() -> None:
     adapter = ShipAdapter(GRAPH)
     now = datetime(2026, 11, 28, 14, 0, tzinfo=UTC)
-    move = Move(**{"from": "engine", "to": "galley", "departed_at": now, "arrive_at": now})
+    move = Move.model_validate(
+        {"from": "engine", "to": "galley", "departed_at": now, "arrive_at": now}
+    )
     assert adapter.comms_at("engine", moving=move) == "none"
     assert adapter.comms_at("galley", moving=None) == "strong"
