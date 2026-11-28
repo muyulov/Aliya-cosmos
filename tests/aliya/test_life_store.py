@@ -59,3 +59,12 @@ async def test_并发保存不交错(tmp_path: Path) -> None:
         *(store.save(ActivityState(place=f"p{i}", updated_at=NOW)) for i in range(20))
     )
     assert (await store.load()).version == 1
+
+
+async def test_只读取流水尾部足够行数(tmp_path: Path) -> None:
+    path = tmp_path / "activity.jsonl"
+    lines = [f'{{"id": "act_{index}", "notes": "第{index}条"}}' for index in range(200)]
+    _ = path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    store = ActivityStore(tmp_path)
+    recent = store.recent(limit=3)
+    assert [item["id"] for item in recent] == ["act_197", "act_198", "act_199"]

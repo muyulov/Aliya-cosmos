@@ -21,19 +21,20 @@ async def maybe_reflect(
     *,
     now: datetime,
     last_reflection_date: str | None,
-) -> list[str]:
-    """跨日首次、或当天记录够多且已过 22 点时，做一次日终反思。
+) -> tuple[list[str], bool]:
+    """跨日首次、或当天 22 点后至少有一条记录时，做一次日终反思。
 
-    失败只告警并返回空列表；反思不该挡住生活状态机。
+    返回 `(facts, attempted)`：`attempted=True` 表示今天已经试过（无论成败），
+    调用方应把日期落盘，避免失败后每个 tick 都重试、或重启后重复反思。
     """
     today = now.date().isoformat()
     # 每天只反思一次：已经反思过就直接跳过，避免 22 点后每个 tick 都调模型
     if last_reflection_date == today:
-        return []
+        return [], False
     entries = store.recent(50)
     today_entries = [item for item in entries if str(item.get("at", ""))[:10] == today]
     if not today_entries and now.hour < 22:
-        return []
+        return [], False
     lines = "\n".join(
         f"- {item.get('title', '')}：{item.get('notes', '')}" for item in today_entries
     )
@@ -51,5 +52,5 @@ async def maybe_reflect(
         result = await llm.chat_structured(messages, ReflectionResult, max_tokens=200)
     except Exception as exc:
         logger.warning("日终反思失败", 原因=str(exc))
-        return []
-    return [fact.strip() for fact in result.facts if fact.strip()][:2]
+        return [], True
+    return [fact.strip() for fact in result.facts if fact.strip()][:2], True

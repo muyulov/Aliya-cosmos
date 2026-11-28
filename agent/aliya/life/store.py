@@ -91,14 +91,27 @@ class ActivityStore:
                 _ = handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def recent(self, limit: int = 10) -> list[dict[str, Any]]:
-        """按时间正序返回最近若干条流水；坏行直接跳过。"""
-        if not self._log_path.exists():
+        """按时间正序返回最近若干条流水；只读文件尾巴，坏行直接跳过。"""
+        if limit <= 0 or not self._log_path.exists():
             return []
-        lines = self._log_path.read_text(encoding="utf-8").splitlines()
         result: list[dict[str, Any]] = []
-        for line in reversed(lines[-limit:]):
+        for line in reversed(self._tail_lines(limit)):
             try:
                 result.append(json.loads(line))
             except ValueError:
                 continue
         return list(reversed(result))
+
+    def _tail_lines(self, limit: int) -> list[str]:
+        """从文件末尾按块回读，避免每次 tick 都把整份 jsonl 读进内存。"""
+        block = 64 * 1024
+        with self._log_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            data = b""
+            while position > 0 and data.count(b"\n") <= limit:
+                step = min(block, position)
+                position -= step
+                handle.seek(position)
+                data = handle.read(step) + data
+        return data.decode("utf-8", errors="replace").splitlines()[-limit:]

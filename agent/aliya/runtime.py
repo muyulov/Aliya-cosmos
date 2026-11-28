@@ -286,8 +286,6 @@ class AliyaRuntime:
         self._life_planner: LifePlanner | None = None
         self._life_loop: LifeLoop | None = None
         self._last_activity_at: datetime | None = None
-        #: 最近一次日终反思的日期；跨日才再反思
-        self._last_reflection_date: str | None = None
         #: 回合记忆写入锁：用户回合与活动回合共用同一份 turns.jsonl
         self._turns_lock = asyncio.Lock()
 
@@ -1235,12 +1233,15 @@ class AliyaRuntime:
                 activity_id=state.current.id if state.current is not None else "",
             )
             self._bind_turn(turn)
-            self._last_activity_at = now
             try:
                 self._life_queue.put_nowait(turn)
             except asyncio.QueueFull:
                 # 队列满时宁可跳过这次回合，也不能把 ticker 卡住
                 log.warning("活动回合队列已满，跳过本次", 活动=decision.activity.title)
+                await self._publish_context()
+            else:
+                # 只有真正排进队列的回合才占用最小间隔
+                self._last_activity_at = now
         await self._reflect_if_needed(now)
 
     def _activity_turn_allowed(self, now: datetime) -> bool:
@@ -1265,19 +1266,24 @@ class AliyaRuntime:
         return True
 
     async def _reflect_if_needed(self, now: datetime) -> None:
-        """日终反思：跨日或当天记录够多时，把做的事沉淀进长期事实。"""
+        """日终反思：跨日或当天够晚时，把做的事沉淀进长期事实。"""
         if self._life_store is None:
             return
-        reflected = await maybe_reflect(
+        state = self._life_state or await self._life_store.load()
+        reflected, attempted = await maybe_reflect(
             self._llm,
             self._life_store,
             now=now,
-            last_reflection_date=self._last_reflection_date,
+            last_reflection_date=state.last_reflection_date,
         )
-        if not reflected:
+        if not attempted:
             return
-        self._last_reflection_date = now.date().isoformat()
-        if not self._config.memory.enabled:
+        # 失败也记下日期：否则模型不可用时会每个 tick 重试一次
+        latest = await self._life_store.load()
+        latest.last_reflection_date = now.date().isoformat()
+        self._life_state = latest
+        await self._life_store.save(latest)
+        if not reflected or not self._config.memory.enabled:
             return
         for fact in reflected:
             self._memory.save_fact(fact)

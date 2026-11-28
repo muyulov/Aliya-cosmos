@@ -76,3 +76,35 @@ def test_生活tick可缩短检查周期() -> None:
 
     config.life.enabled = False
     assert runtime._tick_interval() == 60
+
+
+async def test_反思失败后记录日期不再重试(tmp_path: Path) -> None:
+    from agent.aliya.life.store import ActivityStore
+    from core.config import AgentAliyaSettings
+
+    class FailingLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat_structured(self, messages: Any, schema: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            raise RuntimeError("timeout")
+
+    config = AgentAliyaSettings()
+    config.memory.dir = str(tmp_path)
+    llm = FailingLLM()
+    runtime = AliyaRuntime(control=cast("Any", None), llm=cast("Any", llm), config=config)
+    runtime._life_store = ActivityStore(tmp_path)
+    state = ActivityState(updated_at=NOW)
+    state.current = Activity(
+        id="act_1", title="修阀门", place="engine", kind="repair", started_at=NOW
+    )
+    await runtime._life_store.append(state, ended_at=NOW, notes="卡住了")
+    runtime._life_state = await runtime._life_store.load()
+
+    await runtime._reflect_if_needed(NOW)
+    assert (await runtime._life_store.load()).last_reflection_date == "2026-11-28"
+    assert llm.calls == 1
+
+    await runtime._reflect_if_needed(NOW)
+    assert llm.calls == 1

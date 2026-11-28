@@ -30,16 +30,21 @@ async def test_跨日首次触发一次并写入事实(tmp_path: Path) -> None:
     )
     await store.append(state, ended_at=NOW, notes="阀门卡了半圈")
     llm = FakeLLM()
-    facts = await maybe_reflect(llm, store, now=NOW, last_reflection_date="2026-11-27")
+    facts, attempted = await maybe_reflect(
+        llm, store, now=NOW, last_reflection_date="2026-11-27"
+    )
     assert facts == ["阀门还是没拧动，明天换个撬法"]
+    assert attempted is True
     assert llm.calls == 1
 
 
 async def test_同一天不重复触发(tmp_path: Path) -> None:
     llm = FakeLLM()
-    _ = await maybe_reflect(
+    facts, attempted = await maybe_reflect(
         llm, ActivityStore(tmp_path), now=NOW, last_reflection_date="2026-11-28"
     )
+    assert facts == []
+    assert attempted is False
     assert llm.calls == 0
 
 
@@ -56,6 +61,33 @@ async def test_当天已反思后夜间不再重复调模型(tmp_path: Path) -> 
         )
         await store.append(state, ended_at=NOW, notes="又卡住了")
     llm = FakeLLM()
-    facts = await maybe_reflect(llm, store, now=NOW, last_reflection_date="2026-11-28")
+    facts, attempted = await maybe_reflect(
+        llm, store, now=NOW, last_reflection_date="2026-11-28"
+    )
     assert facts == []
+    assert attempted is False
     assert llm.calls == 0
+
+
+async def test_模型失败也标记今天已尝试(tmp_path: Path) -> None:
+    class FailingLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def chat_structured(self, messages: Any, schema: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            raise RuntimeError("timeout")
+
+    store = ActivityStore(tmp_path)
+    state = ActivityState(updated_at=NOW)
+    state.current = Activity(
+        id="act_1", title="修阀门", place="engine", kind="repair", started_at=NOW
+    )
+    await store.append(state, ended_at=NOW, notes="卡住了")
+    llm = FailingLLM()
+    facts, attempted = await maybe_reflect(
+        llm, store, now=NOW, last_reflection_date="2026-11-27"
+    )
+    assert facts == []
+    assert attempted is True
+    assert llm.calls == 1

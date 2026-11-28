@@ -62,4 +62,6 @@ class ActivityState(BaseModel):
     current: Activity | None = None
     moving: Move | None = None
     pending: list[PendingActivity] = Field(default_factory=list)
+    #: 最近一次日终反思的日期（含失败尝试），跨进程持久化
+    last_reflection_date: str | None = None
     updated_at: datetime
