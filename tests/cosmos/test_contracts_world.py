@@ -87,3 +87,42 @@ def test_推理事件_json_round_trip() -> None:
 def test_采集关闭时_presence_为_None() -> None:
     payload = WorldInput(generated_at=datetime.now(UTC), time=make_time(), presence=None)
     assert payload.presence is None
+
+
+def test_自我状态与船图信号可往返() -> None:
+    payload = WorldInput.model_validate(
+        {
+            "generated_at": "2026-11-28T14:00:00+00:00",
+            "time": {"now": "2026-11-28T14:00:00+00:00", "timezone": "Asia/Shanghai"},
+            "self_state": {
+                "location": "engine",
+                "location_name": "动力室",
+                "activity": "修阀门",
+                "since_minutes": 12,
+                "interruptibility": "low",
+                "energy": 0.4,
+                "comms": "none",
+            },
+            "ship": {
+                "comms": "none",
+                "nearest_signal_place": "galley",
+                "reachable": [{"place": "galley", "name": "食堂", "minutes": 2}],
+            },
+        }
+    )
+    assert payload.self_state is not None and payload.self_state.energy == 0.4
+    assert payload.ship is not None and payload.ship.reachable[0].minutes == 2
+    assert WorldInput.model_validate_json(payload.model_dump_json()) == payload
+
+
+def test_自我视角与行动目标可往返() -> None:
+    from agent.cosmos.contracts import SelfView
+
+    view = SelfView(
+        situation="信号断了，手上的活不能撒手", suggested_next="stay", reason="阀门没修完"
+    )
+    window = ActionWindow(
+        window="稍后", suggestion="修完再过去", rationale="别半途而废", target="engine"
+    )
+    assert window.target == "engine"
+    assert SelfView.model_validate_json(view.model_dump_json()) == view

@@ -169,6 +169,50 @@ class AliyaContext(BaseModel):
     free_minutes: int | None = None
 
 
+class ReachablePlace(BaseModel):
+    """从当前位置一步可达、且值得去的舱室。"""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore")
+
+    place: str
+    name: str
+    minutes: int = Field(ge=0)
+
+
+class SelfState(BaseModel):
+    """她上报的自己；cosmos 存而不解读，不生成第二份状态。"""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore")
+
+    location: str | None = None
+    location_name: str | None = None
+    activity: str | None = None
+    since_minutes: int | None = None
+    interruptibility: Literal["high", "medium", "low"] | None = None
+    energy: float | None = Field(default=None, ge=0, le=1)
+    comms: Literal["strong", "weak", "none"] | None = None
+
+
+class ShipSignal(BaseModel):
+    """她所在舱室的通信条件与可达去向。"""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore")
+
+    comms: Literal["strong", "weak", "none"] = "strong"
+    nearest_signal_place: str | None = None
+    reachable: list[ReachablePlace] = Field(default_factory=list)
+
+
+class SelfView(BaseModel):
+    """世界推理对她处境的一句话判断；只给方向，不下命令。"""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore")
+
+    situation: str
+    suggested_next: Literal["stay", "move", "interact"] | None = None
+    reason: str = ""
+
+
 class WorldInput(BaseModel):
     """喂给世界推理的全部信号。"""
 
@@ -189,6 +233,9 @@ class WorldInput(BaseModel):
     last_inference: WorldInferenceDigest | None = None
     #: 供推理侧锚定的实体短语（任务名、工具名、最近话题），不含消息原文
     anchors: list[str] = Field(default_factory=list)
+    #: 生活层上报的自我状态与空间处境
+    self_state: SelfState | None = None
+    ship: ShipSignal | None = None
 
 
 class Hypothesis(BaseModel):
@@ -215,6 +262,8 @@ class ActionWindow(BaseModel):
     kind: ActionKind = "wait"
     #: 期望价值：置信度 × 紧迫度 × 可打扰程度，由 cosmos 侧计算
     expected_value: float | None = Field(default=None, ge=0, le=1)
+    #: 这一步指向的舱室；必须是 ship.reachable 中出现过的 id
+    target: str | None = None
 
 
 class ActionChoice(BaseModel):
@@ -238,6 +287,8 @@ class ActionChoice(BaseModel):
     #: 选择依据：`efe + discount × lookahead`
     total_efe: float = Field(default=0.0, ge=-1, le=1)
     rationale: str = ""
+    #: 由对应 ActionWindow 带过来的目的地
+    target: str | None = None
 
 
 class WorldInference(BaseModel):
@@ -272,6 +323,8 @@ class WorldInference(BaseModel):
     expected_value: float | None = Field(default=None, ge=0, le=1)
     #: 一步 EFE 选出的行动；没有可用候选时为 None
     action_choice: ActionChoice | None = None
+    #: 对她处境的一句话判断；由 self_state / ship 信号推出
+    self_view: SelfView | None = None
 
 
 class WorldInferenceEvent(BaseModel):
