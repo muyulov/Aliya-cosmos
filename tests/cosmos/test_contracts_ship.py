@@ -1,8 +1,11 @@
-"""船图契约测试：解析、邻接、最短耗时与降级加载。"""
+"""船图契约测试：解析、邻接、最短耗时与非法输入报错。"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from agent.cosmos.contracts.ship import ShipGraph, load_ship
 
@@ -33,17 +36,21 @@ def test_解析船图并支持邻接与最短耗时() -> None:
     assert graph.activities_at("cabin") == ["躺着"]
 
 
-def test_缺失或损坏时降级为单地点(tmp_path: Path) -> None:
-    missing = load_ship(tmp_path / "nope.json")
-    assert missing.start == "cabin"
-    assert [place.id for place in missing.places] == ["cabin"]
+def test_缺失或损坏时直接报错(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        _ = load_ship(tmp_path / "nope.json")
 
     bad = tmp_path / "ship.json"
     _ = bad.write_text("{broken", encoding="utf-8")
-    assert load_ship(bad).signal("cabin") == "strong"
+    with pytest.raises(json.JSONDecodeError):
+        _ = load_ship(bad)
 
-    _ = bad.write_text('{"version":1,"start":"nowhere","places":[]}', encoding="utf-8")
-    assert load_ship(bad).start == "cabin"
+    _ = bad.write_text(
+        '{"version":1,"start":"nowhere","places":[{"id":"cabin","name":"寝室"}]}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="起点不存在"):
+        _ = load_ship(bad)
 
 
 def test_仓库船图可加载() -> None:

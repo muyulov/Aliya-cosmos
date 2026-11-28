@@ -11,8 +11,7 @@ import json
 from pathlib import Path
 from typing import ClassVar, Literal
 
-from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SignalLevel = Literal["strong", "weak", "none"]
 SIGNAL_ORDER: tuple[SignalLevel, ...] = ("none", "weak", "strong")
@@ -95,31 +94,10 @@ class ShipGraph(BaseModel):
         return list(place.activities) if place is not None else []
 
 
-def fallback_ship() -> ShipGraph:
-    """船图缺失或损坏时的最小可用图：只有一个寝室。"""
-    return ShipGraph(
-        ship="海獭号",
-        start="cabin",
-        places=[
-            ShipPlace(
-                id="cabin",
-                name="寝室",
-                signal="strong",
-                activities=["躺着", "翻旧手册"],
-            )
-        ],
-    )
-
-
 def load_ship(path: str | Path = "data/world/ship.json") -> ShipGraph:
-    """读取船图；缺失、损坏或起点非法时降级为单地点模式。"""
+    """读取船图；缺失、损坏或起点非法时直接报错，不做静默降级。"""
     source = Path(path)
-    try:
-        graph = ShipGraph.model_validate(json.loads(source.read_text(encoding="utf-8")))
-    except (OSError, ValueError, ValidationError) as exc:
-        logger.warning("船图缺失或损坏，降级为单地点模式", 路径=str(source), 原因=str(exc))
-        return fallback_ship()
+    graph = ShipGraph.model_validate(json.loads(source.read_text(encoding="utf-8")))
     if graph.place(graph.start) is None:
-        logger.warning("船图起点不存在，降级为单地点模式", 起点=graph.start)
-        return fallback_ship()
+        raise ValueError(f"船图起点不存在：{graph.start}")
     return graph

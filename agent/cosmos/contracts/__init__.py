@@ -91,7 +91,6 @@ from agent.cosmos.contracts.ship import (
     ShipGraph,
     ShipPlace,
     SignalLevel,
-    fallback_ship,
     load_ship,
 )
 from agent.cosmos.contracts.terminal import (
@@ -249,7 +248,6 @@ __all__ = [
     "WorldInferenceEvent",
     "WorldInput",
     "WorldLinkState",
-    "fallback_ship",
     "load_ship",
     "parse_rpc_line",
 ]
