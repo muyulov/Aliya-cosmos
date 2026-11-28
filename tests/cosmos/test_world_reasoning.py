@@ -283,3 +283,34 @@ def test_端口可直接构造() -> None:
     settings = Settings().agent.cosmos.world
     port = LLMWorldReasoningPort(cast(LLMService, cast(object, llm)), settings)
     assert isinstance(port, LLMWorldReasoningPort)
+
+
+async def test_self_信号进入可用名单() -> None:
+    from agent.cosmos.contracts import ReachablePlace, SelfState, ShipSignal
+
+    payload = _input(PresenceSignal(online_state="online")).model_copy(
+        update={
+            "self_state": SelfState(location="engine", activity="修阀门", comms="none"),
+            "ship": ShipSignal(
+                comms="none",
+                reachable=[ReachablePlace(place="galley", name="食堂", minutes=2)],
+            ),
+        }
+    )
+    llm = FakeLLM(_draft())
+    _ = await _port(llm).infer(payload)
+    system_prompt = cast(str, llm.messages[0][0]["content"])
+    assert "self_state" in system_prompt and "ship" in system_prompt
+
+
+async def test_self_view被写入推理结果() -> None:
+    from agent.cosmos.world.reasoning import SelfViewDraft
+
+    draft = _draft(
+        signals_used=["time", "self_state"],
+        self_view=SelfViewDraft(
+            situation="联系不上", suggested_next="move", reason="该去有信号的地方"
+        ),
+    )
+    result = await _port(FakeLLM(draft)).infer(_input(PresenceSignal(online_state="online")))
+    assert result.self_view is not None and result.self_view.suggested_next == "move"
