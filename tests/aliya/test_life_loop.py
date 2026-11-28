@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
-from agent.aliya.life.loop import LifeLoop
+from agent.aliya.life.loop import LifeLoop, PlannerPort
 from agent.aliya.life.models import Activity, ActivityState, Move, PendingActivity
 from agent.aliya.life.ship import ShipAdapter
 from agent.aliya.life.store import ActivityStore
@@ -26,10 +26,12 @@ NOW = datetime(2026, 11, 28, 14, 0, tzinfo=UTC)
 
 
 class StubPlanner:
+    calls: int = 0
+
     def __init__(self) -> None:
         self.calls = 0
 
-    async def plan(self, **kwargs: Any) -> list[PendingActivity]:
+    async def plan(self, **_: object) -> list[PendingActivity]:
         self.calls += 1
         return [PendingActivity(title="修阀门", place="engine", kind="repair", expected_minutes=30)]
 
@@ -37,7 +39,7 @@ class StubPlanner:
 def build(tmp_path: Path) -> tuple[LifeLoop, StubPlanner, ActivityStore]:
     planner = StubPlanner()
     store = ActivityStore(tmp_path)
-    loop = LifeLoop(store, cast("Any", planner), ShipAdapter(GRAPH), plan_minutes=40)
+    loop = LifeLoop(store, cast("PlannerPort", planner), ShipAdapter(GRAPH), plan_minutes=40)
     return loop, planner, store
 
 
@@ -148,16 +150,18 @@ async def test_不可达地点被丢弃(tmp_path: Path) -> None:
 
 async def test_规划按最小间隔节流(tmp_path: Path) -> None:
     class EmptyPlanner:
+        calls: int = 0
+
         def __init__(self) -> None:
             self.calls = 0
 
-        async def plan(self, **kwargs: Any) -> list[PendingActivity]:
+        async def plan(self, **_: object) -> list[PendingActivity]:
             self.calls += 1
             return []
 
     planner = EmptyPlanner()
     store = ActivityStore(tmp_path)
-    loop = LifeLoop(store, cast("Any", planner), ShipAdapter(GRAPH), plan_minutes=40)
+    loop = LifeLoop(store, cast("PlannerPort", planner), ShipAdapter(GRAPH), plan_minutes=40)
     assert (await loop.advance(NOW)).reason == "没有可做的事"
     assert planner.calls == 1
     _ = await loop.advance(NOW + timedelta(minutes=1))

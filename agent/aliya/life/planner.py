@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import Any, ClassVar, Literal, cast
+from typing import ClassVar, Literal
 
 from loguru import logger
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent.aliya.life.models import PendingActivity
@@ -55,9 +56,9 @@ class LifePlanner:
         *,
         rest_threshold: float = 0.25,
     ) -> None:
-        self._llm = llm
-        self._adapter = adapter
-        self._rest_threshold = rest_threshold
+        self._llm: LLMService = llm
+        self._adapter: ShipAdapter = adapter
+        self._rest_threshold: float = rest_threshold
 
     async def plan(
         self,
@@ -75,28 +76,25 @@ class LifePlanner:
             return self._fallback(place, rest_only=True)
 
         moment = now.strftime("%Y-%m-%d %H:%M")
-        messages = cast(
-            "Any",
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是生活规划器。给一个叫 Aliya 的人安排 1-3 件接下来能亲手做的事。"
-                        "title 必须是她能对人说出口的一句话；place 只能从给定舱室里选；"
-                        "不要安排派活或调度，不要写内部编号。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"现在：{moment}\n所在：{place}（{self._adapter.name_of(place)}）\n"
-                        f"能做的提示：{'、'.join(self._adapter.activities_at(place)) or '无'}\n"
-                        f"精力：{energy:.2f}\n最近做过：{'；'.join(recent[-10:]) or '无'}\n"
-                        "只输出 activities 数组。"
-                    ),
-                },
-            ],
-        )
+        messages: list[ChatCompletionMessageParam] = [
+            {
+                "role": "system",
+                "content": (
+                    "你是生活规划器。给一个叫 Aliya 的人安排 1-3 件接下来能亲手做的事。"
+                    "title 必须是她能对人说出口的一句话；place 只能从给定舱室里选；"
+                    "不要安排派活或调度，不要写内部编号。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"现在：{moment}\n所在：{place}（{self._adapter.name_of(place)}）\n"
+                    f"能做的提示：{'、'.join(self._adapter.activities_at(place)) or '无'}\n"
+                    f"精力：{energy:.2f}\n最近做过：{'；'.join(recent[-10:]) or '无'}\n"
+                    "只输出 activities 数组。"
+                ),
+            },
+        ]
         try:
             result = await asyncio.wait_for(
                 self._llm.chat_structured(messages, PlanResult, max_tokens=500),

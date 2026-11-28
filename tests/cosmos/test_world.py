@@ -763,7 +763,9 @@ async def test_组装输入时带上自我状态与船图(
 
 def test_行动选择结果带目标() -> None:
     from agent.cosmos.contracts import ActionChoice, ActionWindow
-    from agent.cosmos.services.world import _target_for_window
+    from agent.cosmos.services.world import (
+        _target_for_window,  # pyright: ignore[reportPrivateUsage]
+    )
 
     window = ActionWindow(
         window="稍后", suggestion="去食堂再回消息", rationale="信号差", target="galley"

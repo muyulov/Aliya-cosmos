@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from loguru import logger
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ConfigDict, Field
+
+from agent.aliya.life.store import ActivityStore
+from core.llm import LLMService
 
 
 class ReflectionResult(BaseModel):
@@ -16,8 +20,8 @@ class ReflectionResult(BaseModel):
 
 
 async def maybe_reflect(
-    llm: Any,
-    store: Any,
+    llm: LLMService,
+    store: ActivityStore,
     *,
     now: datetime,
     last_reflection_date: str | None,
@@ -38,7 +42,7 @@ async def maybe_reflect(
     lines = "\n".join(
         f"- {item.get('title', '')}：{item.get('notes', '')}" for item in today_entries
     )
-    messages = [
+    messages: list[ChatCompletionMessageParam] = [
         {
             "role": "system",
             "content": "把下面的活动记录写成 1-2 句能记住的短句；用第一人称口吻，不写内部编号。",

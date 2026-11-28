@@ -5,23 +5,27 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
-from agent.aliya.turn.tools import build_tools
+import pytest
+
+from agent.aliya.turn.tools import RuntimePort, build_tools
 
 
-def _runtime() -> Any:
+def _runtime() -> RuntimePort:
     class FakeRuntime:
         def now(self) -> datetime:
             return datetime(2026, 11, 28, 14, 0, tzinfo=UTC)
 
-        async def send(self, text: str) -> None:
+        async def send(self, _text: str) -> None:
             return None
 
-    return FakeRuntime()
+    return cast("RuntimePort", cast("object", FakeRuntime()))
 
 
-async def test_活动工具面包含文件工具但不派活(tmp_path: Path, monkeypatch: Any) -> None:
+async def test_活动工具面包含文件工具但不派活(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     registry = build_tools(_runtime(), mode="activity")
     names = set(registry.names)
@@ -29,7 +33,9 @@ async def test_活动工具面包含文件工具但不派活(tmp_path: Path, mon
     assert not ({"dispatch_task", "cancel_task", "retry_task"} & names)
 
 
-async def test_写入与列举都在工作区内(tmp_path: Path, monkeypatch: Any) -> None:
+async def test_写入与列举都在工作区内(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     tools = {item.name: item for item in build_tools(_runtime(), mode="activity").tools}
     write_func = tools["write_file"].func
@@ -44,7 +50,7 @@ async def test_写入与列举都在工作区内(tmp_path: Path, monkeypatch: An
 
 
 async def test_关闭工作区写入时不注册写文件工具(
-    tmp_path: Path, monkeypatch: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     registry = build_tools(_runtime(), mode="activity", workspace_writes=False)

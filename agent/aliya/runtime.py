@@ -127,7 +127,7 @@ def _moment_text(
 
     没有生活状态时才退回按时段编造的文案，不替她编造今天发生了什么。
     """
-    place_name = name_of if name_of is not None else (lambda value: value)
+    place_name: Callable[[str], str] = name_of if name_of is not None else str
     if state is not None and state.current is not None:
         activity = state.current
         return (
@@ -287,7 +287,7 @@ class AliyaRuntime:
         self._life_loop: LifeLoop | None = None
         self._last_activity_at: datetime | None = None
         #: 回合记忆写入锁：用户回合与活动回合共用同一份 turns.jsonl
-        self._turns_lock = asyncio.Lock()
+        self._turns_lock: asyncio.Lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._started:
@@ -1064,7 +1064,7 @@ class AliyaRuntime:
     async def _run_ticker(self) -> None:
         while not self._closed.is_set():
             try:
-                await asyncio.wait_for(self._closed.wait(), timeout=self._tick_interval())
+                _ = await asyncio.wait_for(self._closed.wait(), timeout=self._tick_interval())
             except TimeoutError:
                 try:
                     await self._tick_once()
@@ -1254,7 +1254,7 @@ class AliyaRuntime:
         today = sum(
             1
             for item in self._life_store.recent(1000)
-            if item.get("at", "")[:10] == now.date().isoformat()
+            if str(item.get("at", ""))[:10] == now.date().isoformat()
         )
         if today >= limit:
             log.info("今日活动回合预算已用完", 上限=limit)

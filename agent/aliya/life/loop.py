@@ -58,10 +58,10 @@ class LifeLoop:
         *,
         plan_minutes: int = 40,
     ) -> None:
-        self._store = store
-        self._planner = planner
-        self._adapter = adapter
-        self._plan_minutes = plan_minutes
+        self._store: ActivityStore = store
+        self._planner: PlannerPort = planner
+        self._adapter: ShipAdapter = adapter
+        self._plan_minutes: int = plan_minutes
         self._last_plan_at: datetime | None = None
 
     async def advance(

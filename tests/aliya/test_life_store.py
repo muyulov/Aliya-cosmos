@@ -55,7 +55,7 @@ async def test_追加流水并读取最近条目(tmp_path: Path) -> None:
 
 async def test_并发保存不交错(tmp_path: Path) -> None:
     store = ActivityStore(tmp_path)
-    await asyncio.gather(
+    _ = await asyncio.gather(
         *(store.save(ActivityState(place=f"p{i}", updated_at=NOW)) for i in range(20))
     )
     assert (await store.load()).version == 1

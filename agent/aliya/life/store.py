@@ -7,7 +7,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 from loguru import logger
 
@@ -21,12 +21,12 @@ class ActivityStore:
     """`activity.json` 存当前状态，`activity.jsonl` 存已完成流水。"""
 
     def __init__(self, root: str | Path, *, energy_start: float = 0.8) -> None:
-        self._dir = Path(root)
+        self._dir: Path = Path(root)
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._path = self._dir / STATE_FILE
-        self._log_path = self._dir / LOG_FILE
-        self._energy_start = energy_start
-        self._lock = asyncio.Lock()
+        self._path: Path = self._dir / STATE_FILE
+        self._log_path: Path = self._dir / LOG_FILE
+        self._energy_start: float = energy_start
+        self._lock: asyncio.Lock = asyncio.Lock()
 
     async def load(self) -> ActivityState:
         async with self._lock:
@@ -75,7 +75,7 @@ class ActivityStore:
         current = state.current
         if current is None:
             return
-        record: dict[str, Any] = {
+        record: dict[str, object] = {
             "at": ended_at.isoformat(),
             "id": current.id,
             "title": current.title,
@@ -90,28 +90,30 @@ class ActivityStore:
             with self._log_path.open("a", encoding="utf-8") as handle:
                 _ = handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def recent(self, limit: int = 10) -> list[dict[str, Any]]:
+    def recent(self, limit: int = 10) -> list[dict[str, object]]:
         """按时间正序返回最近若干条流水；只读文件尾巴，坏行直接跳过。"""
         if limit <= 0 or not self._log_path.exists():
             return []
-        result: list[dict[str, Any]] = []
+        result: list[dict[str, object]] = []
         for line in reversed(self._tail_lines(limit)):
             try:
-                result.append(json.loads(line))
+                data = cast("object", json.loads(line))
             except ValueError:
                 continue
+            if isinstance(data, dict):
+                result.append(cast("dict[str, object]", data))
         return list(reversed(result))
 
     def _tail_lines(self, limit: int) -> list[str]:
         """从文件末尾按块回读，避免每次 tick 都把整份 jsonl 读进内存。"""
         block = 64 * 1024
         with self._log_path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
+            _ = handle.seek(0, os.SEEK_END)
             position = handle.tell()
             data = b""
             while position > 0 and data.count(b"\n") <= limit:
                 step = min(block, position)
                 position -= step
-                handle.seek(position)
+                _ = handle.seek(position)
                 data = handle.read(step) + data
         return data.decode("utf-8", errors="replace").splitlines()[-limit:]

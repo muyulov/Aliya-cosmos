@@ -41,4 +41,4 @@ def test_空状态默认值与越界校验() -> None:
     assert state.place == "cabin"
     assert state.current is None and state.moving is None and state.pending == []
     with pytest.raises(ValidationError):
-        PendingActivity(title="x", place="cabin", kind="repair", expected_minutes=0)
+        _ = PendingActivity(title="x", place="cabin", kind="repair", expected_minutes=0)

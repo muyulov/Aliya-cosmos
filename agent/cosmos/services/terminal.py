@@ -160,7 +160,7 @@ class TerminalService(Service):
         self._comms_replay_task: asyncio.Task[object] | None = None
         self._comms_outbound: deque[TerminalMessage] = deque()
         self._comms_outbound_worker: asyncio.Task[object] | None = None
-        self._comms_outbound_event = asyncio.Event()
+        self._comms_outbound_event: asyncio.Event = asyncio.Event()
         self._history: dict[str, deque[TerminalMessage]] = {}
         #: (会话, 客户端幂等键) → 首次入站消息；重发时据此重建信封，不再入站
         self._inbound_dedupe: OrderedDict[tuple[str, str], TerminalMessage] = OrderedDict()
@@ -201,7 +201,7 @@ class TerminalService(Service):
         self._load_proactive()
         self._load_stats()
         self._load_inbound_dedupe()
-        self._spawn(self._link_loop())
+        _ = self._spawn(self._link_loop())
 
     @override
     async def stop(self) -> None:
@@ -253,7 +253,7 @@ class TerminalService(Service):
         self.log.info("信号变化", 从=previous, 到=level)
         self._ensure_comms_worker()
         if level == "none":
-            self._spawn(
+            _ = self._spawn(
                 self.deliver(
                     "信号中断，消息会在恢复后送达。",
                     session_id=self._last_session_id,
@@ -262,7 +262,7 @@ class TerminalService(Service):
                 )
             )
         elif previous == "none" and level == "strong":
-            self._spawn(self._replay())
+            _ = self._spawn(self._replay())
 
     def _ensure_comms_worker(self) -> None:
         """确保弱信号出站 worker 在跑；有积压时主动唤醒，不等下一次投递。"""
@@ -278,14 +278,15 @@ class TerminalService(Service):
             while self._comms != "none":
                 self._comms_outbound_event.clear()
                 if not self._comms_outbound:
-                    await self._comms_outbound_event.wait()
+                    _ = await self._comms_outbound_event.wait()
                     continue
                 message = self._comms_outbound.popleft()
                 delay = self._comms_delay_seconds * (
                     0.5 + (hash(message.message_id) % 100) / 100
                 )
                 await asyncio.sleep(delay)
-                if self._comms == "none" or self._link == "down":
+                # 用方法取值避免被 while 条件的类型窄化误判为「永远不成立」
+                if self.comms_state() == "none" or self._link == "down":
                     # 信号或链路又断了：放回队头，等恢复后按原顺序再发
                     self._comms_outbound.appendleft(message)
                     break
@@ -419,7 +420,7 @@ class TerminalService(Service):
             limit=self._config.cosmos.presence.mood.window_messages,
         )
         if mood_messages:
-            self._spawn(self._presence.update_mood(mood_messages))
+            _ = self._spawn(self._presence.update_mood(mood_messages))
         envelope = await self._assemble_envelope(normalized)
 
         if self._link == "down" or self._comms == "none":
@@ -748,7 +749,7 @@ class TerminalService(Service):
             self._timers.discard(handle)
             if proactive and self._pending_proactive is not None:
                 self._pending_proactive = None
-            self._spawn(self._deliver_later(text, proactive))
+            _ = self._spawn(self._deliver_later(text, proactive))
 
         handle = loop.call_later(delay, _fire)
         self._timers.add(handle)

@@ -1,13 +1,21 @@
 """Runtime 生活层接线测试：当下文案、开关与上下文上报。"""
 
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
+
+from openai.types.chat import ChatCompletionMessageParam
 
 from agent.aliya.life.models import Activity, ActivityState
+from agent.aliya.life.reflection import ReflectionResult
+from agent.aliya.ports import ControlPort
 from agent.aliya.runtime import AliyaRuntime, _moment_text
+from core.llm import LLMService
 
 NOW = datetime(2026, 11, 28, 14, 0, tzinfo=UTC)
 
@@ -29,8 +37,10 @@ def test_生活开关关闭时不创建活动队列() -> None:
 
     config = AgentAliyaSettings()
     config.life.enabled = False
-    runtime = AliyaRuntime(control=cast("Any", None), llm=cast("Any", None), config=config)
-    assert runtime._life_queue is None  # type: ignore[attr-defined]
+    control = cast("ControlPort", cast("object", None))
+    llm = cast("LLMService", cast("object", None))
+    runtime = AliyaRuntime(control=control, llm=llm, config=config)
+    assert runtime._life_queue is None
 
 
 async def test_用户消息只标记打断不取消活动(tmp_path: Path) -> None:
@@ -72,7 +82,9 @@ def test_生活tick可缩短检查周期() -> None:
     config = AgentAliyaSettings()
     config.initiative.tick_seconds = 60
     config.life.tick_seconds = 10
-    runtime = AliyaRuntime(control=cast("Any", None), llm=cast("Any", None), config=config)
+    control = cast("ControlPort", cast("object", None))
+    llm = cast("LLMService", cast("object", None))
+    runtime = AliyaRuntime(control=control, llm=llm, config=config)
     assert runtime._tick_interval() == 10
 
     config.life.enabled = False
@@ -84,27 +96,38 @@ async def test_反思失败后记录日期不再重试(tmp_path: Path) -> None:
     from core.config import AgentAliyaSettings
 
     class FailingLLM:
-        def __init__(self) -> None:
-            self.calls = 0
+        calls: int = 0
 
-        async def chat_structured(self, messages: Any, schema: Any, **kwargs: Any) -> Any:
+        async def chat_structured(
+            self,
+            _messages: Sequence[ChatCompletionMessageParam],
+            _schema: type[ReflectionResult],
+            *,
+            max_tokens: int | None = None,
+        ) -> ReflectionResult:
+            _ = max_tokens
             self.calls += 1
             raise RuntimeError("timeout")
 
     config = AgentAliyaSettings()
     config.memory.dir = str(tmp_path)
     llm = FailingLLM()
-    runtime = AliyaRuntime(control=cast("Any", None), llm=cast("Any", llm), config=config)
-    runtime._life_store = ActivityStore(tmp_path)
+    runtime = AliyaRuntime(
+        control=cast("ControlPort", cast("object", None)),
+        llm=cast("LLMService", cast("object", llm)),
+        config=config,
+    )
+    store = ActivityStore(tmp_path)
+    runtime._life_store = store
     state = ActivityState(updated_at=NOW)
     state.current = Activity(
         id="act_1", title="修阀门", place="engine", kind="repair", started_at=NOW
     )
-    await runtime._life_store.append(state, ended_at=NOW, notes="卡住了")
-    runtime._life_state = await runtime._life_store.load()
+    await store.append(state, ended_at=NOW, notes="卡住了")
+    runtime._life_state = await store.load()
 
     await runtime._reflect_if_needed(NOW)
-    assert (await runtime._life_store.load()).last_reflection_date == "2026-11-28"
+    assert (await store.load()).last_reflection_date == "2026-11-28"
     assert llm.calls == 1
 
     await runtime._reflect_if_needed(NOW)

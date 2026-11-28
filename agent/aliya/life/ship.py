@@ -10,7 +10,7 @@ class ShipAdapter:
     """把共享船图收窄成生活层会用到的几个查询。"""
 
     def __init__(self, graph: ShipGraph) -> None:
-        self._graph = graph
+        self._graph: ShipGraph = graph
 
     def neighbors(self, place: str) -> list[str]:
         return self._graph.neighbors(place)
