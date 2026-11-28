@@ -740,3 +740,31 @@ async def test_链路与_aliya_时间进入推理输入(
     payload = port.payloads[-1]
     assert payload.link.since_minutes == 7
     assert payload.time.since_last_aliya_message_seconds == 120
+
+async def test_组装输入时带上自我状态与船图(
+    settings: Settings, clock: ClockService, bus: BusService
+) -> None:
+    from agent.cosmos.contracts import AliyaContext
+
+    settings.agent.cosmos.world.enabled = True
+    service = make_service(settings, clock, bus)
+    port = FakePort(inference=make_inference())
+    service.set_port(port)
+    await service.set_aliya_context(
+        AliyaContext(location="engine", activity="修阀门", comms="none", free_minutes=12)
+    )
+    _ = await service.refresh(force=True)
+    payload = port.payloads[0]
+    assert payload.self_state is not None and payload.self_state.comms == "none"
+    assert payload.ship is not None and payload.ship.comms == "none"
+
+
+def test_行动选择结果带目标() -> None:
+    from agent.cosmos.contracts import ActionChoice, ActionWindow
+    from agent.cosmos.services.world import _target_for_window
+
+    window = ActionWindow(
+        window="稍后", suggestion="去食堂再回消息", rationale="信号差", target="galley"
+    )
+    choice = ActionChoice(action="act", window="稍后")
+    assert _target_for_window([window], choice) == "galley"

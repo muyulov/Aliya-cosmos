@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import ClassVar, cast, override
 
 from agent.cosmos.contracts import (
+    ActionChoice,
+    ActionWindow,
     AgentSignals,
     AliyaContext,
     BeliefState,
@@ -37,6 +39,8 @@ from agent.cosmos.contracts import (
     OutcomeSignal,
     PresenceSignal,
     PresenceSnapshot,
+    SelfState,
+    ShipSignal,
     TaskSignal,
     TaskSignals,
     TimeSignal,
@@ -639,6 +643,10 @@ class WorldBridgeService(Service):
             urgency,
             interruptibility,
         )
+        # 把窗口上的目的地带到选择结果，Aliya 侧才不用再猜窗口文本
+        choice = choice.model_copy(
+            update={"target": _target_for_window(inference.action_windows, choice)}
+        )
         return inference.model_copy(
             update={
                 "confidence": confidence,
@@ -775,6 +783,25 @@ class WorldBridgeService(Service):
             agents=self._agent_signals(),
             history=self._history(),
             aliya_context=self._aliya_context,
+            self_state=(
+                SelfState(
+                    location=self._aliya_context.location,
+                    location_name=None,
+                    activity=self._aliya_context.activity,
+                    since_minutes=None,
+                    interruptibility=None,
+                    energy=None,
+                    comms=self._aliya_context.comms,
+                )
+                if self._aliya_context is not None
+                and self._aliya_context.location is not None
+                else None
+            ),
+            ship=(
+                ShipSignal(comms=self._aliya_context.comms or "strong")
+                if self._aliya_context is not None and self._aliya_context.comms is not None
+                else None
+            ),
             belief=self._belief,
             last_inference=self._digest(),
             anchors=self._anchors(),
@@ -1111,6 +1138,13 @@ class WorldBridgeService(Service):
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+
+def _target_for_window(windows: list[ActionWindow], choice: ActionChoice) -> str | None:
+    """选出行动对应的目的地；窗口没标或选择没带窗口时返回 None。"""
+    if choice.window is None:
+        return None
+    return next((item.target for item in windows if item.window == choice.window), None)
 
 
 def _fingerprint(payload: WorldInput) -> str:
