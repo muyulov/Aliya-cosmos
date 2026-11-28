@@ -100,7 +100,14 @@ def fallback_ship() -> ShipGraph:
     return ShipGraph(
         ship="海獭号",
         start="cabin",
-        places=[ShipPlace(id="cabin", name="寝室", signal="strong", activities=["躺着", "翻旧手册"])],
+        places=[
+            ShipPlace(
+                id="cabin",
+                name="寝室",
+                signal="strong",
+                activities=["躺着", "翻旧手册"],
+            )
+        ],
     )
 
 

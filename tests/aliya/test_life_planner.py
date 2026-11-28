@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from agent.aliya.life.planner import LifePlanner, PlanResult, PlannedActivity
+from agent.aliya.life.planner import LifePlanner, PlannedActivity, PlanResult
 from agent.aliya.life.ship import ShipAdapter
 from agent.cosmos.contracts.ship import ShipGraph
 
@@ -38,7 +38,9 @@ def test_规划结果校验地点并限定数量() -> None:
     result = PlanResult(
         activities=[
             PlannedActivity(title="修阀门", place="engine", kind="repair", expected_minutes=35),
-            PlannedActivity(title="这边没有的地方", place="mars", kind="wander", expected_minutes=20),
+            PlannedActivity(
+                title="这边没有的地方", place="mars", kind="wander", expected_minutes=20
+            ),
         ]
     )
     llm = FakeLLM(result.model_dump())

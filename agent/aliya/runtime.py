@@ -937,10 +937,13 @@ class AliyaRuntime:
                 log.warning("活动回合失败，状态机照常推进", 原因=str(exc))
             finally:
                 self._life_queue.task_done()
-                if self._life_store is not None and self._life_state is not None:
-                    if self._life_state.current is not None:
-                        self._life_state.current.turn_done = True
-                        await self._life_store.save(self._life_state)
+                if (
+                    self._life_store is not None
+                    and self._life_state is not None
+                    and self._life_state.current is not None
+                ):
+                    self._life_state.current.turn_done = True
+                    await self._life_store.save(self._life_state)
                 await self._publish_context()
 
     async def _run_worker(self) -> None:

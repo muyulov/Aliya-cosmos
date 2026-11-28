@@ -255,7 +255,7 @@ flowchart TD
 | 通信 | `send_message` | 她说话的唯一途径；失败提示走 `system`，不经过它 |
 | 调度 | `see_desktop` / `dispatch_task` / `task_status` / `cancel_task` / `retry_task` | 看平板、派活、查进度、改主意 |
 | 情境 | `refresh_world` / `current_time` | 重新感知世界；读控制面校准过的时间 |
-| 文件 | `read_file` | 只读，限定在 `data/Aliya/workspace`，敏感路径拒绝 |
+| 文件 | `read_file` / `write_file` / `list_files` | 限定在 `data/Aliya/workspace`，敏感路径拒绝；后两个只在活动回合可用 |
 | 计算 | `calculate` | AST 白名单求值，不用 `eval` |
 | 记忆 | `remember` / `check_memory` / `resolve_topic` | 长期记忆的写、读、收尾 |
 | 时间 | `plan_followup` / `cancel_followup` / `defer_proactive`（主动回合）/ `mute_proactive`（用户回合） | 未来跟进与主动开口延后；用户回合只能延后之后的主动消息，不影响当轮回复 |
@@ -276,6 +276,15 @@ flowchart TD
 
 技能正文不进提示词，模型调用内置工具 `load_skill(name)` 时才读取；空库时既不导出工具，也不占索引位置。
 仓库自带示例技能 `data/skills/workspace-tasks/SKILL.md`，说明如何给编辑台、检索台、运行台、联网台填参数。
+
+**活动回合**走一套独立的 7 个工具：`send_message / read_file / write_file / list_files / remember / calculate / current_time`。
+它不派活、不看桌面、不碰未来意图——活动回合是独处时间，只允许「做事 + 留记录 + 想说才说」。
+`write_file` / `list_files` 同样被 `resolve_in_workspace` 限制在 `data/Aliya/workspace`，
+单次写入上限 200 KB、单次列举上限 200 项。
+
+`data/Aliya/activity.json` 与 `activity.jsonl` 是她的**隐私边界**：记录她真正在做什么、去了哪里，
+不通过 `read_file`、`see_desktop` 或任何 RPC 暴露；工作区沙箱根是 `data/Aliya/workspace`，
+与这两个文件物理隔离。cosmos 只能看到 `AliyaContext` 里她主动上报的 `location / activity / comms / free_minutes`。
 
 ---
 
@@ -305,7 +314,7 @@ flowchart TD
 
 **默认选择仍然是「不做」。** 没有理由时保持安静，比频繁打扰更接近一个真实的人。
 
-主动回合的上下文还会带一句「这个点你多半在……」——深夜数星星、白天修东西、饭点找甜的——给她一个具体的开口由头，免得每次只会问「在吗」。这只描述该时段通常的状态，不替她编造今天发生了什么。
+主动回合的上下文还会带一句她此刻的状态：优先读 `activity.json` 里的 `current.title`（「你正在把二舱压力阀拧到底（在动力室，约 30 分钟）」）；没有生活状态时才退回「这个点你多半在……」的时段文案。前者是真实活动，后者只是开口由头，都不替她编造今天发生了什么。
 
 `initiative.prefer_when` 不是关键词列表，而是一组可解释的语义条件。当前实现识别四类动机：未收尾话题、刚修好东西、失眠、深夜刷信息；条件里的「N 小时」会成为该类动机的间隔阈值。未识别的自定义条件退化为与当前上下文的保守关键词匹配；已识别但信号不足时不会退化成字面匹配，避免「刚修好」这类条件自证。
 
@@ -359,6 +368,17 @@ agent:
       consume: true # 是否订阅 world.inference
       max_hypotheses_used: 2
       trust_threshold: 0.5 # 低于此置信度的假设不采纳
+    life:
+      enabled: true # 关掉后行为与没有生活层时一致
+      tick_seconds: 60 # 生活状态机检查周期，与说话节流独立
+      plan_minutes: 40 # 没有活动且规划为空时，隔多久重排
+      max_turns_per_day: 40 # 活动回合每日上限
+      min_gap_seconds: 300 # 两次活动回合的最小间隔
+      turn_timeout_seconds: 45 # 单次活动回合超时
+      max_rounds: 3 # 活动回合的工具循环上限
+      energy_start: 0.8
+      rest_threshold: 0.25 # 低于此精力只排 rest / wander
+      workspace_writes: true # 允许活动回合写 data/Aliya/workspace
     reply:
       max_rounds: 6
       turn_timeout_seconds: 120

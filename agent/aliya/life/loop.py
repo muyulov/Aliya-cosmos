@@ -9,7 +9,7 @@ from typing import Literal
 
 from loguru import logger
 
-from agent.aliya.life.models import Activity, ActivityState, Move, PendingActivity
+from agent.aliya.life.models import Activity, Move, PendingActivity
 from agent.aliya.life.ship import ShipAdapter
 from agent.aliya.life.store import ActivityStore
 

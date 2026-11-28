@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal, cast
 
 from loguru import logger
@@ -60,7 +60,7 @@ class LifePlanner:
         now: datetime,
         recent: list[str],
     ) -> list[PendingActivity]:
-        hour = now.astimezone(timezone.utc).hour
+        hour = now.astimezone(UTC).hour
         night = hour >= 23 or hour < 5
         low_mode = energy < 0.25 or night
         if low_mode:

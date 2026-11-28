@@ -210,9 +210,16 @@ class AliyaContext(BaseModel):
     unspoken: list[str] = []               # 只对玩家说过、还没说完的话
     phase: Literal["daily", "maintenance", "crisis", "rest", "unknown"] = "unknown"
     last_intent: str | None = None         # 上一轮 Aliya 的意图标签
+    # 生活层上报的处境；cosmos 只存不解读
+    location: str | None = None            # 当前舱室 id，如 "engine"
+    activity: str | None = None            # 正在做的事，可直接说出口的一句话
+    comms: Literal["strong", "weak", "none"] | None = None  # 所在舱室的通信条件
+    free_minutes: int | None = None        # 手上这件事还剩多少分钟
 ```
 
 这一块是**由 Aliya 主动提供**的：`ControlService.set_aliya_context(ctx)`。cosmos 只存不解读。不给时字段为 `None`。
+
+`location / activity / comms / free_minutes` 来自 `data/Aliya/activity.json` 的真实生活状态，不是推测。`comms` 是**她所在舱室**的通信条件，和 Aliya↔cosmos 的心跳链路（`link`）是两件事；控制面收到 `comms` 时会同步给 `TerminalService.set_comms()`，由终端决定积压与延迟。
 
 加这个字段的理由：世界推理不是纯看用户，也要知道 Aliya 手头有没有没收尾的事、现在处在什么处境。否则推演出来的建议会和她正在进行的话题冲突。
 
@@ -246,6 +253,43 @@ class WorldInferenceDigest(BaseModel):
 
 只给上一轮结论的摘要，不给全文。目的是让推理侧能「在旧结论上更新」，又不会把历史推演全文塞进上下文。
 
+### 3.9 SelfState
+
+```python
+class SelfState(BaseModel):
+    location: str | None = None            # 当前舱室 id
+    location_name: str | None = None       # 舱室展示名
+    activity: str | None = None            # 正在做的事
+    since_minutes: int | None = None       # 这件事已经做了多久
+    interruptibility: Literal["high", "medium", "low"] | None = None
+    energy: float | None = None            # 0–1
+    comms: Literal["strong", "weak", "none"] | None = None
+```
+
+由 Aliya 上报，cosmos **只存不解读**，不据此生成第二份生活状态。缺字段表示未知，不是「正常」。
+
+### 3.10 ShipSignal
+
+```python
+class ShipSignal(BaseModel):
+    comms: Literal["strong", "weak", "none"] = "strong"
+    nearest_signal_place: str | None = None
+    reachable: list[ReachablePlace] = []
+```
+
+描述她所在位置的通信条件与可达去向；`nearest_signal_place` 只在确有更近的信号点时填。
+
+### 3.11 ReachablePlace
+
+```python
+class ReachablePlace(BaseModel):
+    place: str    # 舱室 id，必须来自 data/world/ship.json
+    name: str     # 展示名
+    minutes: int  # 步行分钟数
+```
+
+船图是共享只读事实（`agent/cosmos/contracts/ship.py` + `data/world/ship.json`），cosmos 与 Aliya 都只读。世界推理只把「一步可达」的舱室放进 `reachable`，避免给出到不了的建议。
+
 ---
 
 ## 4. WorldInference
@@ -270,6 +314,7 @@ class WorldInference(BaseModel):
     interruptibility: float | None = None           # 当前可打扰程度
     expected_value: float | None = None             # 置信度×紧迫度×可打扰度
     action_choice: ActionChoice | None = None       # 有限时域 EFE 选出的行动
+    self_view: SelfView | None = None               # 对她处境的一句话判断
 
 class Hypothesis(BaseModel):
     statement: str        # "你可能在忙别的，稍后会回来"
@@ -283,6 +328,7 @@ class ActionWindow(BaseModel):
     rationale: str        # "用户在晚间活跃，且当前无未完成任务"
     kind: ActionKind = "wait"  # wait/observe/check_in/offer_help/notify/act
     expected_value: float | None = None  # cosmos 侧按置信度/紧迫度补
+    target: str | None = None  # 目的地舱室 id，必须来自 ship.reachable
 
 class ActionChoice(BaseModel):
     action: ActionKind
@@ -295,6 +341,12 @@ class ActionChoice(BaseModel):
     lookahead: float = 0.0    # 折扣后的前瞻价值
     total_efe: float = 0.0    # efe + discount × lookahead
     rationale: str = ""
+    target: str | None = None # 由对应 ActionWindow 带过来的目的地
+
+class SelfView(BaseModel):
+    situation: str        # 用「你」称呼她，≤ 40 字
+    suggested_next: Literal["stay", "move", "interact"] | None = None
+    reason: str = ""
 ```
 
 `ActionKind` 取值为 `wait / observe / check_in / offer_help / notify / act`。端口只负责写 `inference_id / snapshot / hypotheses / action_windows / signals_used / confidence`；`revision / confidence_breakdown / belief / prediction_error / urgency / action_choice` 由 cosmos 侧补齐，端口不写也不会被拒绝。
@@ -308,6 +360,9 @@ class ActionChoice(BaseModel):
 | `confidence` | 与 `basis` 同时给；无依据的假设不允许出现 |
 | `basis_signals` | 出现时必须落在 `signals_used` 内；不接地的假设会被丢弃 |
 | `action_windows` | 是「什么时机适合做什么」，不是「你应该做什么」；`kind` 缺省时由 cosmos 推断 |
+| `self_view.situation` | 用她能理解的第二人称口吻，≤ 40 字；空串视为没给 |
+| `self_view.suggested_next` | 只能是 `stay / move / interact`；其它值丢弃为 `None` |
+| `target` | 必须是 `ship.reachable` 中出现的舱室 id；不在名单内的一律丢弃 |
 | 不写用户消息原文 | 只允许聚合指标 |
 | 不写 agent 内部标识 | 用展示名 |
 | 不给数字化的「用户情绪诊断」 | 情绪只作为 `basis` 里的一个因素 |
@@ -405,6 +460,9 @@ cosmos 允许做的处理：
 | 截断 | 单条文本超长按字符截断并标注（不改语义） |
 | 标记过期 | `stale` / `age_seconds` / `revision` 由 cosmos 填 |
 | 排序 | `hypotheses / action_windows` **不改**；`action_choice` 是 cosmos 侧的 EFE 排序 |
+| 自我视角 | `self_view` 原样交给 Aliya；`ActionWindow.target` 会带到 `ActionChoice.target` |
+
+`action_choice` 现在会被 Aliya 侧消费：`AliyaRuntime._world_action()` 把 `action / observe / check_in / …` 映射成 `stay / move / interact`，作为**生活层的方向输入**（例如「去有信号的地方」），不直接替她排活动、也不替她决定说什么。真正的活动仍由 `LifeLoop` 与规划器决定。
 
 ### 6.3 拉取
 
