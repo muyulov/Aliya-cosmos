@@ -41,3 +41,21 @@ async def test_同一天不重复触发(tmp_path: Path) -> None:
         llm, ActivityStore(tmp_path), now=NOW, last_reflection_date="2026-11-28"
     )
     assert llm.calls == 0
+
+
+async def test_当天已反思后夜间不再重复调模型(tmp_path: Path) -> None:
+    store = ActivityStore(tmp_path)
+    for index in range(5):
+        state = ActivityState(updated_at=NOW)
+        state.current = Activity(
+            id=f"act_{index}",
+            title="修阀门",
+            place="engine",
+            kind="repair",
+            started_at=NOW,
+        )
+        await store.append(state, ended_at=NOW, notes="又卡住了")
+    llm = FakeLLM()
+    facts = await maybe_reflect(llm, store, now=NOW, last_reflection_date="2026-11-28")
+    assert facts == []
+    assert llm.calls == 0

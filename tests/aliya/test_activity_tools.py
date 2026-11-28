@@ -38,3 +38,13 @@ async def test_写入与列举都在工作区内(tmp_path: Path, monkeypatch: An
     assert "today.md" in await listing("notes")
     assert "超出工作区" in await write("../escape.md", "不行")
     assert (tmp_path / "data/Aliya/workspace/notes/today.md").exists()
+
+
+async def test_关闭工作区写入时不注册写文件工具(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    registry = build_tools(_runtime(), mode="activity", workspace_writes=False)
+    assert "write_file" not in registry.names
+    assert "list_files" not in registry.names
+    assert "read_file" in registry.names

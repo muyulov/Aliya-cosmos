@@ -27,11 +27,11 @@ async def maybe_reflect(
     失败只告警并返回空列表；反思不该挡住生活状态机。
     """
     today = now.date().isoformat()
+    # 每天只反思一次：已经反思过就直接跳过，避免 22 点后每个 tick 都调模型
+    if last_reflection_date == today:
+        return []
     entries = store.recent(50)
     today_entries = [item for item in entries if str(item.get("at", ""))[:10] == today]
-    repeated_ready = now.hour >= 22 and len(today_entries) >= 5
-    if last_reflection_date == today and not repeated_ready:
-        return []
     if not today_entries and now.hour < 22:
         return []
     lines = "\n".join(

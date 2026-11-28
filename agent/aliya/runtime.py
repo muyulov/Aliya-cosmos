@@ -335,16 +335,26 @@ class AliyaRuntime:
             config=self._config,
         )
         if self._config.life.enabled:
-            self._life_store = ActivityStore(self._config.memory.dir)
+            self._life_store = ActivityStore(
+                self._config.memory.dir, energy_start=self._config.life.energy_start
+            )
             self._life_adapter = ShipAdapter(load_ship())
-            self._life_planner = LifePlanner(self._llm, self._life_adapter)
+            self._life_planner = LifePlanner(
+                self._llm,
+                self._life_adapter,
+                rest_threshold=self._config.life.rest_threshold,
+            )
             self._life_loop = LifeLoop(
                 self._life_store,
                 self._life_planner,
                 self._life_adapter,
                 plan_minutes=self._config.life.plan_minutes,
             )
-            activity_tools = build_tools(self, mode="activity")
+            activity_tools = build_tools(
+                self,
+                mode="activity",
+                workspace_writes=self._config.life.workspace_writes,
+            )
             self._activity_runner = TurnRunner(
                 llm=self._llm,
                 tools=activity_tools,
@@ -355,6 +365,7 @@ class AliyaRuntime:
                     extra_index=extra_index,
                 ),
                 config=self._config,
+                max_rounds=self._config.life.max_rounds,
             )
             self._life_queue = asyncio.Queue(maxsize=8)
             self._life_worker = asyncio.create_task(self._run_life_worker())
@@ -738,8 +749,13 @@ class AliyaRuntime:
                 self._crisis = _is_crisis(envelope.message.text)
                 if envelope.presence is not None:
                     self._presence = envelope.presence
+                # 只标第一次打断：同一活动里连发消息不该反复说「被叫了一下」
                 interrupted = None
-                if self._life_state is not None and self._life_state.current is not None:
+                if (
+                    self._life_state is not None
+                    and self._life_state.current is not None
+                    and self._life_state.current.interrupted_at is None
+                ):
                     interrupted = self._life_state.current
                     interrupted.interrupted_at = self._now()
                     if self._life_store is not None:
@@ -926,6 +942,7 @@ class AliyaRuntime:
         assert self._life_queue is not None
         while True:
             turn = await self._life_queue.get()
+            succeeded = False
             try:
                 if self._activity_runner is None:
                     raise RuntimeError("活动回合执行器未初始化")
@@ -933,18 +950,24 @@ class AliyaRuntime:
                     self._activity_runner.run(turn=turn),
                     timeout=self._config.life.turn_timeout_seconds,
                 )
+                succeeded = True
             except Exception as exc:
                 log.warning("活动回合失败，状态机照常推进", 原因=str(exc))
             finally:
                 self._life_queue.task_done()
-                if (
-                    self._life_store is not None
-                    and self._life_state is not None
-                    and self._life_state.current is not None
-                ):
-                    self._life_state.current.turn_done = True
-                    await self._life_store.save(self._life_state)
+                await self._mark_activity_turn_done(turn.activity_id if succeeded else None)
                 await self._publish_context()
+
+    async def _mark_activity_turn_done(self, activity_id: str | None) -> None:
+        """回写「这件活动跑过回合」；必须重读状态，避免把已结束的活动写回来。"""
+        if activity_id is None or self._life_store is None:
+            return
+        latest = await self._life_store.load()
+        self._life_state = latest
+        if latest.current is None or latest.current.id != activity_id:
+            return
+        latest.current.turn_done = True
+        await self._life_store.save(latest)
 
     async def _run_worker(self) -> None:
         while True:
@@ -1033,12 +1056,17 @@ class AliyaRuntime:
         except Exception:
             log.exception("发送失败提示失败", 来源=turn.origin)
 
+    def _tick_interval(self) -> float:
+        """两个检查周期取小者：生活层与主动判断各自可以要求更快的节奏。"""
+        interval = self._config.initiative.tick_seconds
+        if self._config.life.enabled:
+            interval = min(interval, self._config.life.tick_seconds)
+        return interval
+
     async def _run_ticker(self) -> None:
         while not self._closed.is_set():
             try:
-                await asyncio.wait_for(
-                    self._closed.wait(), timeout=self._config.initiative.tick_seconds
-                )
+                await asyncio.wait_for(self._closed.wait(), timeout=self._tick_interval())
             except TimeoutError:
                 try:
                     await self._tick_once()
@@ -1169,9 +1197,10 @@ class AliyaRuntime:
             return
         state = await self._life_store.load()
         self._life_state = state
+        direction = self._world_action()
         decision: LifeDecision = await self._life_loop.advance(
             now,
-            suggested_next=self._world_action(),
+            suggested_next=direction,
             preferred_target=self._world_action_target(),
         )
         # 状态机可能刚改过地点或移动标记；重新读一次，上下文才不会报旧位置
@@ -1182,6 +1211,9 @@ class AliyaRuntime:
                 log.info("生活状态：已到达", 地点=decision.destination)
             else:
                 log.info("生活状态：开始移动", 目的地=decision.destination)
+            await self._publish_context()
+        if decision.reason == "活动到期":
+            # 活动结束后 free_minutes / activity 已经变了，及时同步给 cosmos
             await self._publish_context()
         if (
             decision.kind == "start"
@@ -1200,10 +1232,15 @@ class AliyaRuntime:
                 proactive=True,
                 silent=True,
                 origin="activity",
+                activity_id=state.current.id if state.current is not None else "",
             )
             self._bind_turn(turn)
             self._last_activity_at = now
-            _ = await self._life_queue.put(turn)
+            try:
+                self._life_queue.put_nowait(turn)
+            except asyncio.QueueFull:
+                # 队列满时宁可跳过这次回合，也不能把 ticker 卡住
+                log.warning("活动回合队列已满，跳过本次", 活动=decision.activity.title)
         await self._reflect_if_needed(now)
 
     def _activity_turn_allowed(self, now: datetime) -> bool:
@@ -1572,7 +1609,9 @@ class AliyaRuntime:
 
     async def _publish_context(self) -> None:
         enabled = self._config.memory.enabled
+        now = self._now()
         state = self._life_state
+        current = state.current if state is not None else None
         try:
             await self._control.set_aliya_context(
                 AliyaContext(
@@ -1587,22 +1626,30 @@ class AliyaRuntime:
                         else []
                     ),
                     phase=phase_for(
-                        now=self._now(),
+                        now=now,
                         tasks=self._task_count,
                         crisis=self._crisis,
                     ),
                     location=state.place if state is not None else None,
-                    activity=state.current.title if state is not None and state.current else None,
+                    location_name=(
+                        self._place_name(state.place) if state is not None else None
+                    ),
+                    activity=current.title if current is not None else None,
                     comms=(
                         self._life_adapter.comms_at(state.place, moving=state.moving)
                         if state is not None and self._life_adapter is not None
                         else None
                     ),
                     free_minutes=(
-                        state.current.minutes_left(self._now())
-                        if state is not None and state.current is not None
+                        current.minutes_left(now) if current is not None else None
+                    ),
+                    since_minutes=(
+                        max(0, round((now - current.started_at).total_seconds() / 60))
+                        if current is not None
                         else None
                     ),
+                    interruptibility=current.interruptibility if current is not None else None,
+                    energy=state.energy if state is not None else None,
                 )
             )
         except Exception as exc:

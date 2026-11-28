@@ -13,6 +13,18 @@ from agent.aliya.life.models import Activity, Move, PendingActivity
 from agent.aliya.life.ship import ShipAdapter
 from agent.aliya.life.store import ActivityStore
 
+#: 每分钟精力消耗；repair 最费神，read 最省
+_ENERGY_PER_MINUTE: dict[str, float] = {
+    "repair": 0.003,
+    "observe": 0.0015,
+    "wander": 0.002,
+    "social": 0.0015,
+    "organize": 0.0015,
+    "read": 0.001,
+}
+#: 休息每分钟恢复的精力
+_REST_GAIN_PER_MINUTE = 0.003
+
 
 @dataclass(slots=True)
 class LifeDecision:
@@ -37,6 +49,7 @@ class LifeLoop:
         self._planner = planner
         self._adapter = adapter
         self._plan_minutes = plan_minutes
+        self._last_plan_at: datetime | None = None
 
     async def advance(
         self,
@@ -62,24 +75,27 @@ class LifeLoop:
             elapsed = (now - state.current.started_at).total_seconds() / 60
             if elapsed < state.current.expected_minutes:
                 return LifeDecision("wait", reason="活动未到期")
-            finished_title = state.current.title
+            finished = state.current
+            finished_title = finished.title
             await self._store.append(
                 state,
                 ended_at=now,
                 notes="",
-                turns=1 if state.current.turn_done else 0,
+                turns=1 if finished.turn_done else 0,
             )
             state.current = None
-            state.energy = max(0.0, state.energy - 0.05)
+            state.energy = _energy_after(finished, state.energy)
             await self._store.save(state)
             logger.info("活动结束", 活动=finished_title)
             # 收尾本身不触发新回合：本 tick 只负责把旧活动送进流水
             return LifeDecision("wait", reason="活动到期")
 
-        # 世界推理给出方向时，先按它插一条就近的活动；只认一步可达的地点
+        # 世界推理给出方向时，先按它插一条就近的活动；只认一步可达的地点。
+        # `suggested_next=stay` 时忽略目标，避免一边让她留下一边安排移动。
         if (
             not state.pending
             and preferred_target is not None
+            and suggested_next != "stay"
             and preferred_target in self._adapter.neighbors(state.place)
         ):
             state.pending = [
@@ -91,13 +107,14 @@ class LifeLoop:
                 )
             ]
 
-        if not state.pending:
+        if not state.pending and self._plan_due(now):
             state.pending = await self._planner.plan(  # type: ignore[attr-defined]
                 place=state.place,
                 energy=state.energy,
                 now=now,
                 recent=[str(item.get("notes", "")) for item in self._store.recent(10)],
             )
+            self._last_plan_at = now
             await self._store.save(state)
 
         if not state.pending:
@@ -106,6 +123,11 @@ class LifeLoop:
         item = state.pending[0]
         if item.place != state.place:
             seconds = self._adapter.travel_seconds(state.place, item.place)
+            if seconds is None:
+                logger.warning("活动地点不可达，丢弃", 地点=item.place)
+                state.pending = state.pending[1:]
+                await self._store.save(state)
+                return LifeDecision("wait", reason="活动地点不可达")
             state.moving = Move(
                 **{
                     "from": state.place,
@@ -132,3 +154,18 @@ class LifeLoop:
         await self._store.save(state)
         logger.info("活动开始", 活动=item.title, 地点=item.place)
         return LifeDecision("start", activity=item, reason="开始下一个活动")
+
+    def _plan_due(self, now: datetime) -> bool:
+        """规划节流：没有活动时不必每个 tick 都问一次模型。"""
+        if self._last_plan_at is None:
+            return True
+        return now - self._last_plan_at >= timedelta(minutes=self._plan_minutes)
+
+
+def _energy_after(activity: Activity, energy: float) -> float:
+    """按活动类型与叙事时长结算精力；休息回升，其余消耗。"""
+    minutes = max(1, activity.expected_minutes)
+    if activity.kind == "rest":
+        return min(1.0, energy + _REST_GAIN_PER_MINUTE * minutes)
+    cost = _ENERGY_PER_MINUTE.get(activity.kind, 0.002) * minutes
+    return max(0.0, energy - cost)

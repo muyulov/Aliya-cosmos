@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, ClassVar, Literal, cast
 
 from loguru import logger
@@ -48,9 +48,16 @@ FALLBACK_POOL: tuple[dict[str, Any], ...] = (
 class LifePlanner:
     """只负责「接下来做什么」；时间推进与落盘交给 LifeLoop。"""
 
-    def __init__(self, llm: LLMService, adapter: ShipAdapter) -> None:
+    def __init__(
+        self,
+        llm: LLMService,
+        adapter: ShipAdapter,
+        *,
+        rest_threshold: float = 0.25,
+    ) -> None:
         self._llm = llm
         self._adapter = adapter
+        self._rest_threshold = rest_threshold
 
     async def plan(
         self,
@@ -60,9 +67,10 @@ class LifePlanner:
         now: datetime,
         recent: list[str],
     ) -> list[PendingActivity]:
-        hour = now.astimezone(UTC).hour
+        # `now` 已是服务端时区（见 transport.now），不要再转 UTC，否则夜间档会错 8 小时
+        hour = now.hour
         night = hour >= 23 or hour < 5
-        low_mode = energy < 0.25 or night
+        low_mode = energy < self._rest_threshold or night
         if low_mode:
             return self._fallback(place, rest_only=True)
 

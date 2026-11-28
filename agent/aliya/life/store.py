@@ -20,11 +20,12 @@ LOG_FILE = "activity.jsonl"
 class ActivityStore:
     """`activity.json` 存当前状态，`activity.jsonl` 存已完成流水。"""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, energy_start: float = 0.8) -> None:
         self._dir = Path(root)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / STATE_FILE
         self._log_path = self._dir / LOG_FILE
+        self._energy_start = energy_start
         self._lock = asyncio.Lock()
 
     async def load(self) -> ActivityState:
@@ -33,14 +34,18 @@ class ActivityStore:
 
     def _load_unlocked(self) -> ActivityState:
         if not self._path.exists():
-            return ActivityState(updated_at=datetime.now(UTC))
+            return ActivityState(
+                energy=self._energy_start, updated_at=datetime.now(UTC)
+            )
         try:
             raw = self._path.read_text(encoding="utf-8")
             return ActivityState.model_validate_json(raw)
         except (OSError, ValueError) as exc:
             logger.warning("活动状态损坏，备份后重建", 原因=str(exc))
             self._backup_broken()
-            return ActivityState(updated_at=datetime.now(UTC))
+            return ActivityState(
+                energy=self._energy_start, updated_at=datetime.now(UTC)
+            )
 
     def _backup_broken(self) -> None:
         """把读不动的状态另存一份，避免下一轮再撞同一个坑。"""

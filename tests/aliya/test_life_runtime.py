@@ -63,3 +63,16 @@ def test_用户回合上下文含刚才在做什么() -> None:
     turn = TurnContext(user_text="在吗", now=NOW)
     turn.memory = "你刚才在动力室，被叫了一下；正在把二舱压力阀拧到底。"
     assert "动力室" in turn.context_text()
+
+
+def test_生活tick可缩短检查周期() -> None:
+    from core.config import AgentAliyaSettings
+
+    config = AgentAliyaSettings()
+    config.initiative.tick_seconds = 60
+    config.life.tick_seconds = 10
+    runtime = AliyaRuntime(control=cast("Any", None), llm=cast("Any", None), config=config)
+    assert runtime._tick_interval() == 10
+
+    config.life.enabled = False
+    assert runtime._tick_interval() == 60

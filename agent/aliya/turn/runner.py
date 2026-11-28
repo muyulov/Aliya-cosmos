@@ -21,11 +21,14 @@ class TurnRunner:
         tools: ToolRegistry,
         builder: PromptBuilder,
         config: AgentAliyaSettings,
+        max_rounds: int | None = None,
     ) -> None:
         self._llm: LLMService = llm
         self._tools: ToolRegistry = tools
         self._builder: PromptBuilder = builder
         self._config: AgentAliyaSettings = config
+        #: 活动回合轮数更少；不传时沿用 reply.max_rounds
+        self._max_rounds: int = max_rounds or config.reply.max_rounds
 
     async def run(self, *, turn: TurnContext) -> None:
         messages = self._builder.build(turn=turn)
@@ -36,7 +39,7 @@ class TurnRunner:
             上下文条目=turn.context_text().count("\n\n") + 1,
             输入字数=len(turn.user_text),
         )
-        for round_index in range(1, self._config.reply.max_rounds + 1):
+        for round_index in range(1, self._max_rounds + 1):
             started = time.monotonic()
             try:
                 reply = await asyncio.wait_for(

@@ -15,9 +15,9 @@ class ShipAdapter:
     def neighbors(self, place: str) -> list[str]:
         return self._graph.neighbors(place)
 
-    def travel_seconds(self, source: str, target: str) -> int:
-        seconds = self._graph.travel_seconds(source, target)
-        return seconds if seconds is not None else 0
+    def travel_seconds(self, source: str, target: str) -> int | None:
+        """不可达返回 None；不要伪装成 0 秒，否则会瞬移到不存在的路线。"""
+        return self._graph.travel_seconds(source, target)
 
     def signal(self, place: str) -> SignalLevel:
         return self._graph.signal(place)

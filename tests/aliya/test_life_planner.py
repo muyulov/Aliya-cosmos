@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from agent.aliya.life.planner import LifePlanner, PlannedActivity, PlanResult
 from agent.aliya.life.ship import ShipAdapter
@@ -65,6 +66,29 @@ def test_低精力与夜间只出休息或闲逛() -> None:
     )
     planner = LifePlanner(cast("Any", FakeLLM(result.model_dump())), ShipAdapter(GRAPH))
     plans = asyncio_run(planner.plan(place="cabin", energy=0.1, now=NOW, recent=[]))
+    assert plans and all(item.kind in {"rest", "wander"} for item in plans)
+
+
+def test_夜间按服务端时区判定() -> None:
+    """服务端时区是 Asia/Shanghai；转 UTC 会把凌晨两点算成下午六点。"""
+    night = datetime(2026, 11, 28, 2, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    result = PlanResult(
+        activities=[
+            PlannedActivity(title="修阀门", place="engine", kind="repair", expected_minutes=35)
+        ]
+    )
+    llm = FakeLLM(result.model_dump())
+    planner = LifePlanner(cast("Any", llm), ShipAdapter(GRAPH))
+    plans = asyncio_run(planner.plan(place="cabin", energy=0.8, now=night, recent=[]))
+    assert plans and all(item.kind in {"rest", "wander"} for item in plans)
+    assert llm.calls == 0
+
+
+def test_休息阈值可配置() -> None:
+    planner = LifePlanner(
+        cast("Any", FakeLLM({})), ShipAdapter(GRAPH), rest_threshold=0.5
+    )
+    plans = asyncio_run(planner.plan(place="cabin", energy=0.3, now=NOW, recent=[]))
     assert plans and all(item.kind in {"rest", "wander"} for item in plans)
 
 

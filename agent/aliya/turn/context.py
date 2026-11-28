@@ -66,6 +66,8 @@ class TurnContext:
     silent: bool = False
     #: 这个回合由哪条未来意图触发；回合结束后据此结算或重试。
     intent_text: str = ""
+    #: 活动回合对应的活动 id；结束后据此回写 turn_done，避免写错活动。
+    activity_id: str = ""
     #: 队列满时是否允许丢弃；只有进度类汇报可以丢。
     droppable: bool = False
     replies: list[str] = field(default_factory=list)

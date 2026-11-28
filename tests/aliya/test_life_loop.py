@@ -112,3 +112,55 @@ async def test_到达后上报新地点且可重新规划(tmp_path: Path) -> Non
     assert decision.kind == "move" and decision.destination == "engine"
     assert (await store.load()).place == "engine"
     assert (await store.load()).moving is None
+
+
+async def test_休息回升精力而修理消耗(tmp_path: Path) -> None:
+    loop, _, store = build(tmp_path)
+    state = ActivityState(place="cabin", energy=0.2, updated_at=NOW)
+    state.current = Activity(
+        id="act_rest", title="躺一会儿", place="cabin", kind="rest",
+        started_at=NOW, expected_minutes=30,
+    )
+    await store.save(state)
+    _ = await loop.advance(NOW + timedelta(minutes=31))
+    assert (await store.load()).energy > 0.2
+
+    state = ActivityState(place="cabin", energy=0.8, updated_at=NOW)
+    state.current = Activity(
+        id="act_fix", title="修阀门", place="cabin", kind="repair",
+        started_at=NOW, expected_minutes=30,
+    )
+    await store.save(state)
+    _ = await loop.advance(NOW + timedelta(minutes=31))
+    assert (await store.load()).energy < 0.8
+
+
+async def test_不可达地点被丢弃(tmp_path: Path) -> None:
+    loop, _, store = build(tmp_path)
+    state = ActivityState(updated_at=NOW)
+    state.pending = [PendingActivity(title="去火星", place="mars", kind="wander")]
+    await store.save(state)
+    decision = await loop.advance(NOW)
+    assert decision.kind == "wait"
+    assert decision.reason == "活动地点不可达"
+    assert (await store.load()).pending == []
+
+
+async def test_规划按最小间隔节流(tmp_path: Path) -> None:
+    class EmptyPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def plan(self, **kwargs: Any) -> list[PendingActivity]:
+            self.calls += 1
+            return []
+
+    planner = EmptyPlanner()
+    store = ActivityStore(tmp_path)
+    loop = LifeLoop(store, cast("Any", planner), ShipAdapter(GRAPH), plan_minutes=40)
+    assert (await loop.advance(NOW)).reason == "没有可做的事"
+    assert planner.calls == 1
+    _ = await loop.advance(NOW + timedelta(minutes=1))
+    assert planner.calls == 1
+    _ = await loop.advance(NOW + timedelta(minutes=41))
+    assert planner.calls == 2

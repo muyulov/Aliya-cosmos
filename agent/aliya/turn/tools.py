@@ -79,6 +79,7 @@ def build_tools(
     *,
     proactive: bool = False,
     mode: Literal["normal", "proactive", "activity"] = "normal",
+    workspace_writes: bool = True,
 ) -> ToolRegistry:
     """按回合类型装配工具面；活动回合既不派活也不看桌面。"""
     if mode == "activity":
@@ -370,15 +371,11 @@ def build_tools(
 
     registry = ToolRegistry()
     if mode == "activity":
-        registry.register(
-            send_message,
-            read_file,
-            write_file,
-            list_files,
-            remember,
-            calculate,
-            current_time,
-        )
+        activity_items = [send_message, read_file]
+        if workspace_writes:
+            activity_items += [write_file, list_files]
+        activity_items += [remember, calculate, current_time]
+        registry.register(*activity_items)
     elif proactive:
         registry.register(
             send_message,
