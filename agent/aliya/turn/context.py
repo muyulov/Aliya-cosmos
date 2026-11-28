@@ -58,8 +58,8 @@ class TurnContext:
     message_id: str = ""
     sent: bool = False
     proactive: bool = False
-    #: 回合来源决定出站通道：用户回复 / 主动消息 / 事件汇报。
-    origin: Literal["user", "proactive", "event"] = "user"
+    #: 回合来源决定出站通道：用户回复 / 主动消息 / 事件汇报 / 独立活动。
+    origin: Literal["user", "proactive", "event", "activity"] = "user"
     #: 排队中的主动回合被用户活动取消后置位，工作循环直接跳过。
     canceled: bool = False
     #: 主动回合决定这次不开口：空回复不再触发系统提示。

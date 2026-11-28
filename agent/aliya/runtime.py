@@ -13,6 +13,11 @@ from uuid import uuid4
 from openai.types.chat import ChatCompletionMessageParam
 
 from agent.aliya.initiative import Initiative, PreferenceGate, TimeSignals
+from agent.aliya.life.loop import LifeDecision, LifeLoop
+from agent.aliya.life.models import ActivityState
+from agent.aliya.life.planner import LifePlanner
+from agent.aliya.life.ship import ShipAdapter
+from agent.aliya.life.store import ActivityStore
 from agent.aliya.memory import MemoryKind, MemoryScope, MemoryStore
 from agent.aliya.ports import ControlPort
 from agent.aliya.prompt.builder import PromptBuilder
@@ -33,6 +38,7 @@ from agent.cosmos.contracts import (
     ReadablePresence,
     WorldInference,
 )
+from agent.cosmos.contracts.ship import load_ship
 from core.agent import MCPManager, SkillLibrary, Tool, ToolDefinitionError, ToolRegistry
 from core.config.settings import AgentAliyaSettings
 from core.llm import LLMService
@@ -111,11 +117,26 @@ def _gap_text(now: datetime, last_user_at: datetime | None) -> str:
     return f"{seconds / 86400:.1f} 天".replace(".0", "")
 
 
-def _moment_text(now: datetime) -> str:
-    """主动回合的当下由头：让她开口时有具体的事，不是只会问「在吗」。
+def _moment_text(
+    now: datetime,
+    state: ActivityState | None = None,
+    name_of: Callable[[str], str] | None = None,
+) -> str:
+    """主动回合的当下由头：优先说她真正在做的事。
 
-    只描述这个时段她多半在做什么，不替她编造今天发生了什么。
+    没有生活状态时才退回按时段编造的文案，不替她编造今天发生了什么。
     """
+    place_name = name_of if name_of is not None else (lambda value: value)
+    if state is not None and state.current is not None:
+        activity = state.current
+        return (
+            f"你正在{activity.title}（在{place_name(activity.place)}，"
+            f"约 {activity.expected_minutes} 分钟）"
+        )
+    if state is not None and state.moving is not None:
+        return (
+            f"你正从{place_name(state.moving.from_)}去{place_name(state.moving.to)}，还没到"
+        )
     hour = now.hour
     if hour >= 23 or hour < 5:
         return "这个点你多半还没睡：数星星、刷信息，或者躺着听通风口响。"
@@ -254,6 +275,18 @@ class AliyaRuntime:
         self._started: bool = False
         self._pending_inbound: int = 0
         self._closed: asyncio.Event = asyncio.Event()
+        # ---------- 生活层：活动、移动与精力 ----------
+        self._life_queue: asyncio.Queue[TurnContext] | None = None
+        self._life_worker: asyncio.Task[None] | None = None
+        self._activity_runner: TurnRunner | None = None
+        self._life_state: ActivityState | None = None
+        self._life_store: ActivityStore | None = None
+        self._life_adapter: ShipAdapter | None = None
+        self._life_planner: LifePlanner | None = None
+        self._life_loop: LifeLoop | None = None
+        self._last_activity_at: datetime | None = None
+        #: 回合记忆写入锁：用户回合与活动回合共用同一份 turns.jsonl
+        self._turns_lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._started:
@@ -298,6 +331,30 @@ class AliyaRuntime:
             ),
             config=self._config,
         )
+        if self._config.life.enabled:
+            self._life_store = ActivityStore(self._config.memory.dir)
+            self._life_adapter = ShipAdapter(load_ship())
+            self._life_planner = LifePlanner(self._llm, self._life_adapter)
+            self._life_loop = LifeLoop(
+                self._life_store,
+                self._life_planner,
+                self._life_adapter,
+                plan_minutes=self._config.life.plan_minutes,
+            )
+            activity_tools = build_tools(self, mode="activity")
+            self._activity_runner = TurnRunner(
+                llm=self._llm,
+                tools=activity_tools,
+                builder=PromptBuilder(
+                    persona=persona,
+                    charter=charter,
+                    tools=activity_tools.tools,
+                    extra_index=extra_index,
+                ),
+                config=self._config,
+            )
+            self._life_queue = asyncio.Queue(maxsize=8)
+            self._life_worker = asyncio.create_task(self._run_life_worker())
         self._worker = asyncio.create_task(self._run_worker())
         self._ticker = asyncio.create_task(self._run_ticker())
         await self._recover_unanswered()
@@ -316,6 +373,7 @@ class AliyaRuntime:
             技能数=len(self._skills),
             订阅主题数=len(_EVENT_TOPICS),
             记忆启用=self._config.memory.enabled,
+            生活启用=self._config.life.enabled,
         )
 
     async def _attach_external_tools(
@@ -431,7 +489,7 @@ class AliyaRuntime:
             _ = await self._enqueue(turn)
 
     async def stop(self) -> None:
-        tasks = [self._worker, self._ticker, *self._consumers]
+        tasks = [self._worker, self._ticker, self._life_worker, *self._consumers]
         for task in tasks:
             if task is not None:
                 _ = task.cancel()
@@ -442,6 +500,7 @@ class AliyaRuntime:
         await self._stop_mcp()
         self._worker = None
         self._ticker = None
+        self._life_worker = None
         self._consumers = []
         self._started = False
         self._closed.set()
@@ -847,6 +906,28 @@ class AliyaRuntime:
         )
         return True
 
+    async def _run_life_worker(self) -> None:
+        """活动回合独立执行：失败不影响状态机，也不写用户对话轮次。"""
+        assert self._life_queue is not None
+        while True:
+            turn = await self._life_queue.get()
+            try:
+                if self._activity_runner is None:
+                    raise RuntimeError("活动回合执行器未初始化")
+                await asyncio.wait_for(
+                    self._activity_runner.run(turn=turn),
+                    timeout=self._config.life.turn_timeout_seconds,
+                )
+            except Exception as exc:
+                log.warning("活动回合失败，状态机照常推进", 原因=str(exc))
+            finally:
+                self._life_queue.task_done()
+                if self._life_store is not None and self._life_state is not None:
+                    if self._life_state.current is not None:
+                        self._life_state.current.turn_done = True
+                        await self._life_store.save(self._life_state)
+                await self._publish_context()
+
     async def _run_worker(self) -> None:
         while True:
             turn = await self._queue.get()
@@ -893,18 +974,19 @@ class AliyaRuntime:
                 self._current_turn = None
                 try:
                     if self._config.memory.enabled and turn.replies:
-                        prefix = (
-                            f"{turn.message_id}:reply"
-                            if turn.message_id
-                            else f"{turn.origin}:{uuid4().hex}:reply"
-                        )
-                        for reply in turn.replies:
-                            self._memory.append_turn(
-                                prefix,
-                                "aliya",
-                                reply,
-                                session_id=turn.session_id or self._last_session_id,
+                        async with self._turns_lock:
+                            prefix = (
+                                f"{turn.message_id}:reply"
+                                if turn.message_id
+                                else f"{turn.origin}:{uuid4().hex}:reply"
                             )
+                            for reply in turn.replies:
+                                self._memory.append_turn(
+                                    prefix,
+                                    "aliya",
+                                    reply,
+                                    session_id=turn.session_id or self._last_session_id,
+                                )
                     await self._maybe_compress_memory()
                     fields = {
                         "来源": turn.origin,
@@ -934,13 +1016,17 @@ class AliyaRuntime:
             log.exception("发送失败提示失败", 来源=turn.origin)
 
     async def _run_ticker(self) -> None:
-        while True:
-            await asyncio.sleep(self._config.initiative.tick_seconds)
+        while not self._closed.is_set():
             try:
-                await self._tick_once()
-            except Exception:
-                # 单轮失败不能让主动行为永久停摆。
-                log.exception("主动行为检查失败，跳过本轮")
+                await asyncio.wait_for(
+                    self._closed.wait(), timeout=self._config.initiative.tick_seconds
+                )
+            except TimeoutError:
+                try:
+                    await self._tick_once()
+                except Exception:
+                    # 单轮失败不能让主动行为与生活状态机永久停摆。
+                    log.exception("主动行为检查失败，跳过本轮")
 
     async def _fire_due_intent(self, now: datetime) -> bool:
         """到期意图优先于常规主动判断；仍受链路、状态与打扰预算约束。"""
@@ -958,7 +1044,7 @@ class AliyaRuntime:
             user_text=(
                 f"你之前给自己安排了一件事：{intent.text}"
                 f"\n现在是 {now:%H:%M}，到时间了，而且没有人说话。"
-                f"\n（你此刻：{_moment_text(now)}）"
+                f"\n（你此刻：{_moment_text(now, self._life_state, self._place_name)}）"
                 "要不要说、说什么由你决定。"
             ),
             session_id=self._last_session_id,
@@ -998,9 +1084,12 @@ class AliyaRuntime:
         log.info("到期跟进稍后重试", 内容=turn.intent_text[:40], 分钟=_INTENT_RETRY_MINUTES)
 
     async def _tick_once(self) -> None:
+        now = self._now()
+        # 生活状态机先走：说话节流只拦说话，不拦做事
+        if self._config.life.enabled:
+            await self._tick_life(now)
         if not self._config.initiative.enabled or self._pending_proactive:
             return
-        now = self._now()
         if self._defer_until is not None:
             if now < self._defer_until:
                 return
@@ -1031,7 +1120,7 @@ class AliyaRuntime:
         user_text = (
             f"现在是 {now:%H:%M}，距上次对话 {_gap_text(now, self._last_user_at)}。"
             "\n（现在没有人说话。）"
-            f"\n（你此刻：{_moment_text(now)}）"
+            f"\n（你此刻：{_moment_text(now, self._life_state, self._place_name)}）"
         )
         if preference.condition:
             user_text += f"\n可以考虑：{preference.condition}"
@@ -1054,6 +1143,50 @@ class AliyaRuntime:
             偏好条件=preference.condition or "-",
             时间=f"{now:%H:%M}",
         )
+
+    async def _tick_life(self, now: datetime) -> None:
+        """推进生活状态机；不依赖说话节流，也不占用用户回合队列。"""
+        if self._life_store is None or self._life_loop is None or self._life_queue is None:
+            return
+        state = await self._life_store.load()
+        self._life_state = state
+        decision: LifeDecision = await self._life_loop.advance(now)
+        if decision.kind != "start" or decision.activity is None:
+            return
+        limit = self._config.life.max_turns_per_day
+        if limit <= 0:
+            return
+        today = sum(
+            1
+            for item in self._life_store.recent(1000)
+            if item.get("at", "")[:10] == now.date().isoformat()
+        )
+        if today >= limit:
+            log.info("今日活动回合预算已用完", 上限=limit)
+            return
+        if self._last_activity_at is not None:
+            gap = (now - self._last_activity_at).total_seconds()
+            if gap < self._config.life.min_gap_seconds:
+                return
+        turn = TurnContext(
+            user_text=(
+                f"你现在在{self._place_name(state.place)}。"
+                f"手上的事是：{decision.activity.title}。"
+                f"手边可以做：{decision.activity.output_hint or '自己看着办'}。"
+                "做完把结果记进自己的工作区；想说才说。"
+            ),
+            now=now,
+            world=self._world_text(),
+            proactive=True,
+            silent=True,
+            origin="activity",
+        )
+        self._bind_turn(turn)
+        self._last_activity_at = now
+        _ = await self._life_queue.put(turn)
+
+    def _place_name(self, place: str) -> str:
+        return self._life_adapter.name_of(place) if self._life_adapter is not None else place
 
     def _time_signals(self, now: datetime | None = None) -> TimeSignals:
         """收集时间层可用的语义信号；只读缓存，不触发额外拉取。"""

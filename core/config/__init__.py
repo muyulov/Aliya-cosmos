@@ -2,6 +2,8 @@
 
 from core.config.loader import CONFIG_FILE, ENV_FILE, ConfigError
 from core.config.settings import (
+    AgentAliyaLifeSettings,
+    AgentAliyaSettings,
     AgentCardConfig,
     AgentContractSettings,
     AgentCosmosSettings,
@@ -47,6 +49,8 @@ from core.config.settings import (
 __all__ = [
     "CONFIG_FILE",
     "ENV_FILE",
+    "AgentAliyaLifeSettings",
+    "AgentAliyaSettings",
     "AgentCardConfig",
     "AgentContractSettings",
     "AgentCosmosSettings",
