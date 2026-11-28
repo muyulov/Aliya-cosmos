@@ -1,4 +1,4 @@
-"""Aliya 的工具面：16 个工具，主动回合给 12 个可自行安排的。
+"""Aliya 的工具面：普通 16 个、主动 12 个、活动 7 个。
 
 用闭包把 runtime 绑进工具，避免 `self` 被当成工具参数。
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from agent.aliya.memory import MemoryKind, MemoryScope
 from agent.aliya.turn.context import format_moment
@@ -28,6 +28,10 @@ MAX_READ_LINES = 200
 #: 计算表达式长度与指数上限，挡住 `9**9**9` 这类把回合卡死的输入
 MAX_EXPRESSION_CHARS = 200
 MAX_EXPONENT = 100
+#: 活动回合单次写入上限与列举上限，防止一次回合把工作区塞满
+MAX_WRITE_BYTES = 200_000
+MAX_LIST_ENTRIES = 200
+
 
 class _CalcError(ValueError):
     """表达式不受支持，或结果没有意义。"""
@@ -70,7 +74,15 @@ class RuntimePort(Protocol):
     async def defer(self, minutes: int, reason: str = "") -> str: ...
 
 
-def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistry:
+def build_tools(
+    runtime: RuntimePort,
+    *,
+    proactive: bool = False,
+    mode: Literal["normal", "proactive", "activity"] = "normal",
+) -> ToolRegistry:
+    """按回合类型装配工具面；活动回合既不派活也不看桌面。"""
+    if mode == "activity":
+        proactive = False
     @tool
     async def send_message(text: str) -> str:
         """给对方发一条消息，他只能通过这条消息看见你。
@@ -199,6 +211,58 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
         return f"{path}（第 {begin}-{end} 行 / 共 {len(lines)} 行）\n{body}"
 
     @tool
+    async def write_file(path: str, content: str) -> str:
+        """往你自己的工作区写一个文本文件；目录不存在会新建。
+
+        活动需要留下记录时用，例如维护日志、观测笔记；只能写 data/Aliya/workspace 内的路径，
+        绝不写运行时状态或别人的文件。返回写入结果；越界或过大时返回原因。
+        不传这个文件的内容摘要时不要声称已经写好了。
+
+        Args:
+            path: 工作区内的相对路径。
+            content: 要写入的正文。
+        """
+        try:
+            target = resolve_in_workspace(path, root=aliya_workspace_root())
+        except WorkspacePathError as exc:
+            return str(exc)
+        if len(content.encode("utf-8")) > MAX_WRITE_BYTES:
+            return f"内容超过 {MAX_WRITE_BYTES} 字节，请拆成几个文件"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _ = await asyncio.to_thread(target.write_text, content, "utf-8")
+        except OSError as exc:
+            return f"写不了：{exc}"
+        return f"写入成功：{path}（{len(content)} 字）"
+
+    @tool
+    async def list_files(path: str = "") -> str:
+        """列出你工作区某个目录下的文件与子目录。
+
+        想知道手边有什么笔记、上一次记到哪时用；只能列 data/Aliya/workspace 内的路径。
+        返回相对路径列表；目录不存在或越界时返回原因。
+
+        Args:
+            path: 工作区内的相对目录，空串表示根目录。
+        """
+        try:
+            target = resolve_in_workspace(path or ".", root=aliya_workspace_root())
+        except WorkspacePathError as exc:
+            return str(exc)
+        if not target.is_dir():
+            return f"没有这个目录：{path}"
+        entries = sorted(item.relative_to(target).as_posix() for item in target.iterdir())
+        if not entries:
+            return f"{path or '.'} 是空的"
+        shown = entries[:MAX_LIST_ENTRIES]
+        suffix = (
+            ""
+            if len(entries) <= MAX_LIST_ENTRIES
+            else f"\n（还有 {len(entries) - MAX_LIST_ENTRIES} 项）"
+        )
+        return "\n".join(shown) + suffix
+
+    @tool
     def calculate(expression: str) -> str:
         """算一个算术表达式，比如折扣后多少钱、两个数差多少。
 
@@ -305,7 +369,17 @@ def build_tools(runtime: RuntimePort, *, proactive: bool = False) -> ToolRegistr
         return f"之后的主动消息已延后 {minutes} 分钟"
 
     registry = ToolRegistry()
-    if proactive:
+    if mode == "activity":
+        registry.register(
+            send_message,
+            read_file,
+            write_file,
+            list_files,
+            remember,
+            calculate,
+            current_time,
+        )
+    elif proactive:
         registry.register(
             send_message,
             see_desktop,
