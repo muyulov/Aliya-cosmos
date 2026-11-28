@@ -251,11 +251,7 @@ class TerminalService(Service):
         previous = self._comms
         self._comms = level
         self.log.info("信号变化", 从=previous, 到=level)
-        if level != "none" and self._comms_outbound_worker is None:
-            self._comms_outbound_worker = self._spawn(self._comms_outbound_loop())
-            if self._comms_outbound:
-                # 断信号期间残留的出站消息要立刻续发，不能等下一次投递来唤醒
-                self._comms_outbound_event.set()
+        self._ensure_comms_worker()
         if level == "none":
             self._spawn(
                 self.deliver(
@@ -267,6 +263,14 @@ class TerminalService(Service):
             )
         elif previous == "none" and level == "strong":
             self._spawn(self._replay())
+
+    def _ensure_comms_worker(self) -> None:
+        """确保弱信号出站 worker 在跑；有积压时主动唤醒，不等下一次投递。"""
+        if self._comms == "none" or self._comms_outbound_worker is not None:
+            return
+        self._comms_outbound_worker = self._spawn(self._comms_outbound_loop())
+        if self._comms_outbound:
+            self._comms_outbound_event.set()
 
     async def _comms_outbound_loop(self) -> None:
         """弱信号出站：按入队顺序延迟发送，保序不丢。"""
@@ -281,8 +285,8 @@ class TerminalService(Service):
                     0.5 + (hash(message.message_id) % 100) / 100
                 )
                 await asyncio.sleep(delay)
-                if self._comms == "none":
-                    # 抖动期间信号又断了：放回队头，等恢复后按原顺序再发
+                if self._comms == "none" or self._link == "down":
+                    # 信号或链路又断了：放回队头，等恢复后按原顺序再发
                     self._comms_outbound.appendleft(message)
                     break
                 _ = await self._send(message)
@@ -339,8 +343,11 @@ class TerminalService(Service):
             "queued_aliya_messages": queued_aliya,
         }
         _ = await self._bus.events.publish("link.state.changed", payload)
-        if state == "up" and self._config.cosmos.link.replay_on_recover:
-            await self._replay()
+        if state == "up":
+            # 链路恢复后先让弱信号队列继续跑，再重放链路中断期积压
+            self._ensure_comms_worker()
+            if self._config.cosmos.link.replay_on_recover:
+                await self._replay()
 
     async def _replay(self) -> None:
         """恢复后按序重放双向队列。"""

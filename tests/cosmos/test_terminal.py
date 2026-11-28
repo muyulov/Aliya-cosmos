@@ -547,3 +547,17 @@ async def test_弱信号消息在断信号后恢复补发(env: Env) -> None:
     env.terminal.set_comms("strong")
     await asyncio.sleep(0.4)
     assert "断前一句" in [message.text for message in env.channel.drain()]
+
+
+async def test_弱信号排队期间链路中断不丢消息(env: Env) -> None:
+    env.terminal._comms_delay_seconds = 0.05
+    env.terminal.set_comms("weak")
+    await env.terminal.deliver("链路断前的一句", session_id="s1")
+    await asyncio.sleep(0.02)
+    await env.terminal.set_link_state("down")
+    await asyncio.sleep(0.15)
+    assert "链路断前的一句" not in [message.text for message in env.channel.drain()]
+
+    await env.terminal.set_link_state("up")
+    await asyncio.sleep(0.2)
+    assert "链路断前的一句" in [message.text for message in env.channel.drain()]

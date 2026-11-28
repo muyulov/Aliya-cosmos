@@ -278,6 +278,7 @@ flowchart TD
 仓库自带示例技能 `data/skills/workspace-tasks/SKILL.md`，说明如何给编辑台、检索台、运行台、联网台填参数。
 
 **活动回合**走一套独立的 7 个工具：`send_message / read_file / write_file / list_files / remember / calculate / current_time`。
+`life.workspace_writes=false` 时不注册 `write_file / list_files`，只剩 5 个。
 它不派活、不看桌面、不碰未来意图——活动回合是独处时间，只允许「做事 + 留记录 + 想说才说」。
 `write_file` / `list_files` 同样被 `resolve_in_workspace` 限制在 `data/Aliya/workspace`，
 单次写入上限 200 KB、单次列举上限 200 项。

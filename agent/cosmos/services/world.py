@@ -130,8 +130,8 @@ class WorldBridgeService(Service):
         self._revision: int = 0
 
         self._aliya_context: AliyaContext | None = None
-        #: 船图是只读事实；构造期加载，缺失/损坏直接失败
-        self._ship: ShipGraph = load_ship()
+        #: 船图是只读事实；延迟到第一次需要时加载，world 关闭时不碰文件
+        self._ship: ShipGraph | None = None
         self._link_provider: Callable[[], LinkState] = lambda: "up"
         self._link_since_provider: Callable[[], int] | None = None
         self._queue_provider: Callable[[], tuple[int, int]] = lambda: (0, 0)
@@ -812,21 +812,27 @@ class WorldBridgeService(Service):
         ctx = self._aliya_context
         if ctx is None or ctx.comms is None:
             return None
+        ship = self._ship_graph()
         reachable: list[ReachablePlace] = []
         if ctx.location is not None:
-            for neighbor in self._ship.neighbors(ctx.location):
-                place = self._ship.place(neighbor)
+            for neighbor in ship.neighbors(ctx.location):
+                place = ship.place(neighbor)
                 if place is None:
                     continue
-                seconds = self._ship.travel_seconds(ctx.location, neighbor) or 0
+                seconds = ship.travel_seconds(ctx.location, neighbor) or 0
                 reachable.append(
                     ReachablePlace(
                         place=neighbor,
                         name=place.name,
-                        minutes=max(0, round(seconds / 60)),
+                        minutes=max(1, round(seconds / 60)),
                     )
                 )
         return ShipSignal(comms=ctx.comms, reachable=reachable)
+
+    def _ship_graph(self) -> ShipGraph:
+        if self._ship is None:
+            self._ship = load_ship()
+        return self._ship
 
     def _presence_enabled(self) -> bool:
         return self._config.cosmos.presence.enabled
