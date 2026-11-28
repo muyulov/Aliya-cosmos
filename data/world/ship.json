@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "ship": "海獭号",
+  "start": "cabin",
+  "places": [
+    {"id": "bridge",      "name": "驾驶舱", "signal": "strong", "activities": ["校对航向", "翻航行日志"]},
+    {"id": "observatory", "name": "观测台", "signal": "strong", "activities": ["记观测", "数星星"]},
+    {"id": "cabin",       "name": "寝室",   "signal": "weak",   "activities": ["躺着", "翻旧手册"]},
+    {"id": "galley",      "name": "食堂",   "signal": "strong", "activities": ["找点甜的", "啃华夫饼"]},
+    {"id": "incubator",   "name": "培育室", "signal": "strong", "activities": ["整理样本", "抄培养皿编号"]},
+    {"id": "engine",      "name": "动力室", "signal": "none",   "activities": ["修阀门", "查管路"]},
+    {"id": "hangar",      "name": "机库",   "signal": "weak",   "activities": ["点货", "擦工具"]}
+  ],
+  "edges": [
+    {"a": "bridge",      "b": "observatory", "seconds": 70},
+    {"a": "observatory", "b": "cabin",       "seconds": 60},
+    {"a": "cabin",       "b": "galley",      "seconds": 50},
+    {"a": "galley",      "b": "incubator",   "seconds": 80},
+    {"a": "incubator",   "b": "engine",      "seconds": 110},
+    {"a": "engine",      "b": "hangar",      "seconds": 90}
+  ]
+}

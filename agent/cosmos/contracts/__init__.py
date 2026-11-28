@@ -86,6 +86,14 @@ from agent.cosmos.contracts.runtime import (
     DispatchFinished,
     RuntimeStats,
 )
+from agent.cosmos.contracts.ship import (
+    ShipEdge,
+    ShipGraph,
+    ShipPlace,
+    SignalLevel,
+    fallback_ship,
+    load_ship,
+)
 from agent.cosmos.contracts.terminal import (
     Attachment,
     ConversationContext,
@@ -213,6 +221,10 @@ __all__ = [
     "RpcRequest",
     "RpcResponse",
     "RuntimeStats",
+    "ShipEdge",
+    "ShipGraph",
+    "ShipPlace",
+    "SignalLevel",
     "Subscribe",
     "Subscribed",
     "TaskBrief",
@@ -229,5 +241,7 @@ __all__ = [
     "WorldInferenceEvent",
     "WorldInput",
     "WorldLinkState",
+    "fallback_ship",
+    "load_ship",
     "parse_rpc_line",
 ]
