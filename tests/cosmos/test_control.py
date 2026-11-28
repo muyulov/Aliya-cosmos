@@ -253,6 +253,11 @@ async def test_状态读取转发(env: Env) -> None:
     await env.control.set_aliya_context(AliyaContext(phase="daily"))
 
 
+async def test_上下文里的通信条件同步到终端(env: Env) -> None:
+    await env.control.set_aliya_context(AliyaContext(location="engine", comms="none"))
+    assert env.terminal.comms_state() == "none"
+
+
 async def test_转发超时抛可重试错误(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
     async def slow() -> object:
         await asyncio.sleep(0.05)

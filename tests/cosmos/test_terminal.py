@@ -502,3 +502,34 @@ async def test_终端可接收通道状态上报(env: Env) -> None:
     )
     assert snapshot.fields.typing.is_typing is True
     assert snapshot.fields.env.device == "mobile"
+
+async def test_无信号时入站进积压恢复后按序重放(env: Env, bus: BusService) -> None:
+    env.terminal.set_comms("none")
+    await env.terminal.ingest(user_message("第一句"))
+    await env.terminal.ingest(user_message("第二句"))
+    assert env.terminal.queue_depth()[0] == 2
+    iterator = bus.messages.subscribe("aliya")
+    try:
+        env.terminal.set_comms("strong")
+        replayed = [(await asyncio.wait_for(anext(iterator), 1.0)).message.text for _ in range(2)]
+        assert replayed == ["第一句", "第二句"]
+        assert env.terminal.queue_depth()[0] == 0
+    finally:
+        await iterator.aclose()
+
+
+async def test_弱信号出站保序(env: Env) -> None:
+    env.terminal._comms_delay_seconds = 0.01  # 测试注入，缩短抖动
+    env.terminal.set_comms("weak")
+    await env.terminal.deliver("第一句", session_id="s1")
+    await env.terminal.deliver("第二句", session_id="s1")
+    await asyncio.sleep(0.1)
+    texts = [item.text for item in env.channel.drain()]
+    assert texts[-2:] == ["第一句", "第二句"]
+
+
+async def test_信号中断给出可见提示(env: Env) -> None:
+    env.terminal.set_comms("none")
+    await asyncio.sleep(0.05)
+    notices = [item.text for item in env.channel.drain() if item.kind == "system"]
+    assert any("信号中断" in text for text in notices)

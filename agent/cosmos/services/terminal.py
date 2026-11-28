@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from statistics import median
-from typing import ClassVar, cast, override
+from typing import ClassVar, Literal, cast, override
 
 from agent.cosmos.contracts import (
     HistoryPattern,
@@ -154,6 +154,13 @@ class TerminalService(Service):
         self._link_observer: Callable[[LinkState], None] | None = None
         self._pending: deque[TerminalMessage] = deque(maxlen=config.cosmos.link.queue_limit)
         self._pending_inbound: deque[InboundEnvelope] = deque(maxlen=config.cosmos.link.queue_limit)
+        #: 她所在舱室的通信条件：none 积压，weak 延迟，strong 正常
+        self._comms: Literal["strong", "weak", "none"] = "strong"
+        self._comms_delay_seconds: float = 20.0
+        self._comms_replay_task: asyncio.Task[object] | None = None
+        self._comms_outbound: deque[TerminalMessage] = deque()
+        self._comms_outbound_worker: asyncio.Task[object] | None = None
+        self._comms_outbound_event = asyncio.Event()
         self._history: dict[str, deque[TerminalMessage]] = {}
         #: (会话, 客户端幂等键) → 首次入站消息；重发时据此重建信封，不再入站
         self._inbound_dedupe: OrderedDict[tuple[str, str], TerminalMessage] = OrderedDict()
@@ -232,6 +239,48 @@ class TerminalService(Service):
         """(用户积压, Aliya 待发)。"""
         return len(self._pending_inbound), len(self._pending)
 
+    # ---------- 通信条件 ----------
+
+    def comms_state(self) -> str:
+        return self._comms
+
+    def set_comms(self, level: Literal["strong", "weak", "none"]) -> None:
+        """Aliya 上报所在舱室通信条件：`none` 积压，`weak` 延迟，`strong` 重放。"""
+        if level == self._comms:
+            return
+        previous = self._comms
+        self._comms = level
+        self.log.info("信号变化", 从=previous, 到=level)
+        if level != "none" and self._comms_outbound_worker is None:
+            self._comms_outbound_worker = self._spawn(self._comms_outbound_loop())
+        if level == "none":
+            self._spawn(
+                self.deliver(
+                    "信号中断，消息会在恢复后送达。",
+                    session_id=self._last_session_id,
+                    kind="system",
+                    force=True,
+                )
+            )
+        elif previous == "none" and level == "strong":
+            self._spawn(self._replay())
+
+    async def _comms_outbound_loop(self) -> None:
+        """弱信号出站：按入队顺序延迟发送，保序不丢。"""
+        try:
+            while self._comms != "none":
+                await self._comms_outbound_event.wait()
+                self._comms_outbound_event.clear()
+                while self._comms_outbound and self._comms != "none":
+                    message = self._comms_outbound.popleft()
+                    delay = self._comms_delay_seconds * (
+                        0.5 + (hash(message.message_id) % 100) / 100
+                    )
+                    await asyncio.sleep(delay)
+                    _ = await self._send(message)
+        finally:
+            self._comms_outbound_worker = None
+
     async def report_presence(self, signal: PresenceInput) -> PresenceSnapshot:
         """通道上报在线/输入/设备等状态；真实通道可直接调用。"""
         return await self._presence.apply(signal)
@@ -295,6 +344,15 @@ class TerminalService(Service):
         for message in pending:
             _ = await self._send(message)
 
+    async def _replay_weak(self) -> None:
+        """弱信号的一次性延迟重放；信号断掉时保留积压等恢复。"""
+        try:
+            await asyncio.sleep(self._comms_delay_seconds)
+            if self._comms != "none":
+                await self._replay()
+        finally:
+            self._comms_replay_task = None
+
     # ---------- 入口 ----------
 
     async def ingest(self, message: TerminalMessage) -> InboundEnvelope:
@@ -349,17 +407,26 @@ class TerminalService(Service):
             self._spawn(self._presence.update_mood(mood_messages))
         envelope = await self._assemble_envelope(normalized)
 
-        if self._link == "down":
+        if self._link == "down" or self._comms == "none":
             limit = self._pending_inbound.maxlen
             if limit is not None and len(self._pending_inbound) >= limit:
-                self.log.warning("链路中断期用户消息积压已满，丢弃最旧消息", 上限=limit)
+                self.log.warning("消息积压已满，丢弃最旧消息", 上限=limit)
             self._pending_inbound.append(envelope)
             self._remember_inbound(key, normalized)
             self.log.info(
-                "链路中断，消息进入待发队列",
+                "消息进入待发队列",
+                原因=self._comms if self._link != "down" else "link_down",
                 message_id=normalized.message_id,
                 session_id=normalized.session_id,
             )
+            return envelope
+
+        if self._comms == "weak":
+            # 弱信号：先积压，延迟一段时间后统一按序重放
+            self._pending_inbound.append(envelope)
+            self._remember_inbound(key, normalized)
+            if self._comms_replay_task is None:
+                self._comms_replay_task = self._spawn(self._replay_weak())
             return envelope
 
         await self._bus.messages.publish("aliya", envelope)
@@ -442,7 +509,14 @@ class TerminalService(Service):
 
     # ---------- 出口 ----------
 
-    async def deliver(self, text: str, *, session_id: str, kind: MessageKind = "chat") -> None:
+    async def deliver(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        kind: MessageKind = "chat",
+        force: bool = False,
+    ) -> None:
         """回应用户：分段 → 脱敏扫描 → 投递 → 写入上下文。
 
         `kind="system"` 只投递：不写对话轮次，也不计入 Aliya 消息统计。
@@ -472,6 +546,11 @@ class TerminalService(Service):
                 if limit is not None and len(self._pending) >= limit:
                     self.log.warning("链路中断期积压已满，丢弃最旧消息", 上限=limit)
                 self._pending.append(message)
+            elif self._comms == "none" and not force:
+                self._pending.append(message)
+            elif self._comms == "weak" and not force:
+                self._comms_outbound.append(message)
+                self._comms_outbound_event.set()
             else:
                 _ = await self._send(message)
             if not recorded:
@@ -860,10 +939,11 @@ class TerminalService(Service):
         except OSError as exc:
             self.log.warning("会话统计写盘失败", 原因=str(exc))
 
-    def _spawn(self, coro: Coroutine[object, object, object]) -> None:
-        task = asyncio.create_task(coro)
+    def _spawn(self, coro: Coroutine[object, object, object]) -> asyncio.Task[object]:
+        task: asyncio.Task[object] = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
 
 
 def _as_int(value: object) -> int:

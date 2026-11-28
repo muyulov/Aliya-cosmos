@@ -349,6 +349,9 @@ class ControlService(Service):
 
     async def set_aliya_context(self, ctx: AliyaContext) -> None:
         await self._world.set_aliya_context(ctx)
+        # 通信条件是终端的投递策略，必须跟着她所在舱室一起变
+        if ctx.comms is not None:
+            self._terminal.set_comms(ctx.comms)
 
     # ---------- 消息 ----------
 
