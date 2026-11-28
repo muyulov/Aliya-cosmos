@@ -73,3 +73,16 @@ agent:
       max_hypotheses_used: 2
       trust_threshold: 0.5
       provide_context: true
+
+    # ---------- 生活层（活动、移动、精力）----------
+    life:
+      enabled: true
+      tick_seconds: 60
+      plan_minutes: 40
+      max_turns_per_day: 40
+      min_gap_seconds: 300
+      turn_timeout_seconds: 45
+      max_rounds: 3
+      energy_start: 0.8
+      rest_threshold: 0.25
+      workspace_writes: true

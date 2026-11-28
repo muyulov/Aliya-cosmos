@@ -97,3 +97,18 @@ def test_对端称呼写别的值回落为你() -> None:
 
     assert cosmos.presence.privacy.address_as == "你"
     assert any("称呼" in message for message in messages)
+
+
+def test_生活配置默认值() -> None:
+    settings = Settings()
+    life = settings.agent.aliya.life
+    assert life.enabled is True
+    assert life.tick_seconds == 60
+    assert life.max_turns_per_day == 40
+    assert life.rest_threshold == 0.25
+    assert life.workspace_writes is True
+
+
+def test_仓库骨架里的生活配置可加载() -> None:
+    settings = load_settings()
+    assert settings.agent.aliya.life.plan_minutes == 40

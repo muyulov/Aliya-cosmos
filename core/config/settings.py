@@ -658,6 +658,22 @@ class AgentAliyaWorldSettings(_AgentConfigNode):
     provide_context: bool = True
 
 
+class AgentAliyaLifeSettings(_AgentConfigNode):
+    #: 生活层总开关；关掉时行为与本次改动之前一致
+    enabled: bool = True
+    #: 生活状态机检查周期；与说话节流独立
+    tick_seconds: float = Field(default=60, gt=0)
+    #: 没有活动且规划为空时，隔多久重排
+    plan_minutes: int = Field(default=40, gt=0)
+    max_turns_per_day: int = Field(default=40, ge=0)
+    min_gap_seconds: float = Field(default=300, ge=0)
+    turn_timeout_seconds: float = Field(default=45, gt=0)
+    max_rounds: int = Field(default=3, ge=1)
+    energy_start: float = Field(default=0.8, ge=0, le=1)
+    rest_threshold: float = Field(default=0.25, ge=0, le=1)
+    workspace_writes: bool = True
+
+
 class AgentAliyaSettings(_AgentConfigNode):
     persona: AgentAliyaPersonaSettings = AgentAliyaPersonaSettings()
     memory: AgentAliyaMemorySettings = AgentAliyaMemorySettings()
@@ -665,6 +681,7 @@ class AgentAliyaSettings(_AgentConfigNode):
     reply: AgentAliyaReplySettings = AgentAliyaReplySettings()
     tools: AgentAliyaToolsSettings = AgentAliyaToolsSettings()
     world: AgentAliyaWorldSettings = AgentAliyaWorldSettings()
+    life: AgentAliyaLifeSettings = AgentAliyaLifeSettings()
 
 
 class AgentSettings(_AgentConfigNode):
