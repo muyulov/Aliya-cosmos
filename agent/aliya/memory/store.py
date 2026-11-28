@@ -204,6 +204,15 @@ class MemoryStore:
     def load_facts(self) -> list[str]:
         return self._load_list("facts.json")
 
+    def save_fact(self, fact: str) -> None:
+        """追加一条长期事实；只保留最近 50 条，避免无限增长。"""
+        text = fact.strip()
+        if not text:
+            return
+        facts = self.load_facts()
+        facts.append(text)
+        self.save_facts(facts[-50:])
+
     def save_summary(self, summary: str) -> None:
         self._write_json("summary.json", {"summary": summary})
 

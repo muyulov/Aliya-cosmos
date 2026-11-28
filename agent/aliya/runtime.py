@@ -16,6 +16,7 @@ from agent.aliya.initiative import Initiative, PreferenceGate, TimeSignals
 from agent.aliya.life.loop import LifeDecision, LifeLoop
 from agent.aliya.life.models import ActivityState
 from agent.aliya.life.planner import LifePlanner
+from agent.aliya.life.reflection import maybe_reflect
 from agent.aliya.life.ship import ShipAdapter
 from agent.aliya.life.store import ActivityStore
 from agent.aliya.memory import MemoryKind, MemoryScope, MemoryStore
@@ -285,6 +286,8 @@ class AliyaRuntime:
         self._life_planner: LifePlanner | None = None
         self._life_loop: LifeLoop | None = None
         self._last_activity_at: datetime | None = None
+        #: 最近一次日终反思的日期；跨日才再反思
+        self._last_reflection_date: str | None = None
         #: 回合记忆写入锁：用户回合与活动回合共用同一份 turns.jsonl
         self._turns_lock = asyncio.Lock()
 
@@ -1163,11 +1166,36 @@ class AliyaRuntime:
         state = await self._life_store.load()
         self._life_state = state
         decision: LifeDecision = await self._life_loop.advance(now)
-        if decision.kind != "start" or decision.activity is None:
-            return
+        if (
+            decision.kind == "start"
+            and decision.activity is not None
+            and self._activity_turn_allowed(now)
+        ):
+            turn = TurnContext(
+                user_text=(
+                    f"你现在在{self._place_name(state.place)}。"
+                    f"手上的事是：{decision.activity.title}。"
+                    f"手边可以做：{decision.activity.output_hint or '自己看着办'}。"
+                    "做完把结果记进自己的工作区；想说才说。"
+                ),
+                now=now,
+                world=self._world_text(),
+                proactive=True,
+                silent=True,
+                origin="activity",
+            )
+            self._bind_turn(turn)
+            self._last_activity_at = now
+            _ = await self._life_queue.put(turn)
+        await self._reflect_if_needed(now)
+
+    def _activity_turn_allowed(self, now: datetime) -> bool:
+        """活动回合预算：每日上限 + 最小间隔，避免同一天把话和活都刷满。"""
+        if self._life_store is None:
+            return False
         limit = self._config.life.max_turns_per_day
         if limit <= 0:
-            return
+            return False
         today = sum(
             1
             for item in self._life_store.recent(1000)
@@ -1175,27 +1203,30 @@ class AliyaRuntime:
         )
         if today >= limit:
             log.info("今日活动回合预算已用完", 上限=limit)
-            return
+            return False
         if self._last_activity_at is not None:
             gap = (now - self._last_activity_at).total_seconds()
             if gap < self._config.life.min_gap_seconds:
-                return
-        turn = TurnContext(
-            user_text=(
-                f"你现在在{self._place_name(state.place)}。"
-                f"手上的事是：{decision.activity.title}。"
-                f"手边可以做：{decision.activity.output_hint or '自己看着办'}。"
-                "做完把结果记进自己的工作区；想说才说。"
-            ),
+                return False
+        return True
+
+    async def _reflect_if_needed(self, now: datetime) -> None:
+        """日终反思：跨日或当天记录够多时，把做的事沉淀进长期事实。"""
+        if self._life_store is None:
+            return
+        reflected = await maybe_reflect(
+            self._llm,
+            self._life_store,
             now=now,
-            world=self._world_text(),
-            proactive=True,
-            silent=True,
-            origin="activity",
+            last_reflection_date=self._last_reflection_date,
         )
-        self._bind_turn(turn)
-        self._last_activity_at = now
-        _ = await self._life_queue.put(turn)
+        if not reflected:
+            return
+        self._last_reflection_date = now.date().isoformat()
+        if not self._config.memory.enabled:
+            return
+        for fact in reflected:
+            self._memory.save_fact(fact)
 
     def _place_name(self, place: str) -> str:
         return self._life_adapter.name_of(place) if self._life_adapter is not None else place
