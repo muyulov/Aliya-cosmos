@@ -43,6 +43,7 @@ class LifeLoop:
         now: datetime,
         *,
         suggested_next: str | None = None,
+        preferred_target: str | None = None,
     ) -> LifeDecision:
         state = await self._store.load()
 
@@ -74,6 +75,21 @@ class LifeLoop:
             logger.info("活动结束", 活动=finished_title)
             # 收尾本身不触发新回合：本 tick 只负责把旧活动送进流水
             return LifeDecision("wait", reason="活动到期")
+
+        # 世界推理给出方向时，先按它插一条就近的活动；只认一步可达的地点
+        if (
+            not state.pending
+            and preferred_target is not None
+            and preferred_target in self._adapter.neighbors(state.place)
+        ):
+            state.pending = [
+                PendingActivity(
+                    title=f"去{self._adapter.name_of(preferred_target)}看看",
+                    place=preferred_target,
+                    kind="wander",
+                    expected_minutes=20,
+                )
+            ]
 
         if not state.pending:
             state.pending = await self._planner.plan(  # type: ignore[attr-defined]

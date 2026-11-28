@@ -1398,3 +1398,71 @@ def test_主动回合按时段给出当下由头() -> None:
     assert "整理样本" in _moment_text(datetime(2026, 11, 26, 7, 0, tzinfo=UTC))
     assert "甜的" in _moment_text(datetime(2026, 11, 26, 12, 0, tzinfo=UTC))
     assert "修东西" in _moment_text(datetime(2026, 11, 26, 15, 0, tzinfo=UTC))
+
+
+NOW = datetime(2026, 11, 28, 14, 0, tzinfo=UTC)
+
+
+def runtime_with_world(view: WorldInference) -> AliyaRuntime:
+    runtime = AliyaRuntime(
+        control=cast("object", None),
+        llm=cast("object", None),
+        config=AgentAliyaSettings(),
+    )
+    runtime._world = view
+    return runtime
+
+
+def test_world_text_包含自我视角() -> None:
+    runtime = runtime_with_world(
+        WorldInference.model_validate(
+            {
+                "inference_id": "i1",
+                "generated_at": NOW,
+                "snapshot": "她正在动力室",
+                "hypotheses": [{"statement": "信号差", "confidence": 0.9, "basis": "无信号"}],
+                "self_view": {
+                    "situation": "联系不上",
+                    "suggested_next": "move",
+                    "reason": "该去有信号的地方",
+                },
+            }
+        )
+    )
+    text = runtime._world_text()
+    assert text is not None and "联系不上" in text
+
+
+def test_world_action_读取行动选择() -> None:
+    runtime = runtime_with_world(
+        WorldInference.model_validate(
+            {
+                "inference_id": "i2",
+                "generated_at": NOW,
+                "snapshot": "x",
+                "hypotheses": [{"statement": "y", "confidence": 0.9, "basis": "z"}],
+                "action_choice": {
+                    "action": "act",
+                    "target": "galley",
+                    "total_efe": 0.7,
+                    "rationale": "去有信号的地方",
+                },
+            }
+        )
+    )
+    assert runtime._world_action() == "move"
+    assert runtime._world_action_target() == "galley"
+
+
+async def test_说话节流不拦做事(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config.initiative.enabled = False
+    runtime = AliyaRuntime(control=FakeControl(), llm=FakeLLM(), config=config)
+    called: list[bool] = []
+
+    async def fake_tick_life(now: object) -> None:
+        called.append(True)
+
+    runtime._tick_life = fake_tick_life  # type: ignore[method-assign]
+    await runtime._tick_once()
+    assert called == [True]

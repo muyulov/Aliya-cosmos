@@ -1120,6 +1120,7 @@ class AliyaRuntime:
         )
         if not decision.should_speak:
             return
+        # 这里的延后与偏好门控只拦说话，不拦生活状态机
         preference = self._preference_gate.match(self._time_signals(now))
         if not preference.matched:
             log.debug(
@@ -1165,7 +1166,11 @@ class AliyaRuntime:
             return
         state = await self._life_store.load()
         self._life_state = state
-        decision: LifeDecision = await self._life_loop.advance(now)
+        decision: LifeDecision = await self._life_loop.advance(
+            now,
+            suggested_next=self._world_action(),
+            preferred_target=self._world_action_target(),
+        )
         # 状态机可能刚改过地点或移动标记；重新读一次，上下文才不会报旧位置
         state = await self._life_store.load()
         self._life_state = state
@@ -1378,6 +1383,10 @@ class AliyaRuntime:
         if view is None:
             return None
         parts = [view.snapshot]
+        if view.self_view is not None:
+            parts.append(f"你的处境：{view.self_view.situation}")
+            if view.self_view.reason:
+                parts.append(f"（原因：{view.self_view.reason}）")
         limit = self._config.world.max_hypotheses_used
         if limit > 0:
             hypotheses = [
@@ -1396,6 +1405,24 @@ class AliyaRuntime:
                 + "；".join(f"{item.window} {item.suggestion}" for item in view.action_windows[:2])
             )
         return "\n".join(parts)
+
+    def _world_action(self) -> str | None:
+        """把 action_choice 变成生活层的方向输入；只给方向，不直接排活动。"""
+        view = self._world
+        if view is None or view.action_choice is None:
+            return None
+        return {
+            "wait": "stay",
+            "observe": "stay",
+            "check_in": "interact",
+            "offer_help": "interact",
+            "notify": "interact",
+            "act": "move",
+        }[view.action_choice.action]
+
+    def _world_action_target(self) -> str | None:
+        view = self._world
+        return view.action_choice.target if view is not None and view.action_choice else None
 
     def _now(self) -> datetime:
         """优先用控制面校准过的时间；测试桩没有 `now` 时退回本地时间。"""
